@@ -1,5 +1,6 @@
 import asyncio
 from pprint import pprint
+from typing import Dict, List
 from telethon import TelegramClient, events, functions
 
 from api import get_response, summarise_text
@@ -40,7 +41,7 @@ CONVERSATION_TEMPLATE = [  # template to dictate conversation tone (TODO)
     {"input": "nah im good\nmaybe later", "response": "kk np\njust lmk when :)"},
 ]
 USER_NAME = os.environ.get("USER_NAME", "Matt")  # user and bot name
-BOT_NAME = os.environ.get("BOT_NAME", "Icarus")  # mostly for summary use
+BOT_NAME = os.environ.get("BOT_NAME", "Rachel")  # mostly for summary use
 ADMIN_ID = int(
     os.environ.get("ADMIN_ID", 0)
 )  # whitelist: bot is only accessible to admin (temporarily)
@@ -73,7 +74,9 @@ async def reply(event):
     del current_message_ids[chat_id]
     current_message_parts[chat_id].clear()
 
-    history = [
+
+    # a few "human-like" message-response pairs to set the tone of the conversation are appended to the start of the history
+    history: List[Dict[str,str]] = [
         *CONVERSATION_TEMPLATE,
         *get_history(chat_id),
     ]
@@ -90,6 +93,8 @@ async def reply(event):
         pprint(get_history(chat_id))
 
     # check if summarising is necessary, if so initiate it
+    # idea is, all messages are stored in db, but only the last X messages are needed to keep track of the conversation
+    # if the history is too long, summarise it to keep the context of the conversation
     if get_history_length(chat_id) > HISTORY_LENGTH_THRESHOLD:
         # only initiate it if its not already running
         if not (chat_id in summarising_statuses and summarising_statuses[chat_id]):
@@ -141,6 +146,7 @@ async def summarise(chat_id: int):
     note: there is possibility of generating 2 summaries simultaneously if
     threshold is low but shouldnt happen reasonably
     """
+    # dont really have to summarize twice, can optimize abit. Only summarize once, with the new 20 messages from history, and the old summary.
     print(f"[{chat_id}] Summary initiated")
     summarising_statuses[chat_id] = True
 
@@ -158,10 +164,12 @@ async def summarise(chat_id: int):
         to_summarise_text = "\n".join(temp)
         new_summary = await summarise_text(to_summarise_text)
 
+        # if there is already a previous summary, append it with the new one and store it back to the database  
         current_summary = get_summary(chat_id)
         if current_summary != None:
             new_summary = await summarise_text(f"{current_summary}\n{new_summary}")
 
+        # if there is no previous summary, set the new summary as the current one
         set_summary(chat_id, new_summary)
         delete_history(chat_id, ids)
 
@@ -196,17 +204,24 @@ async def user_update(event):
     cancel_tasks[event.chat_id] = asyncio.create_task(stop_typing(event.chat_id))
 
 
-@client.on(events.NewMessage(pattern="\\/clear_history", from_users=ADMIN_ID))
+@client.on(events.NewMessage(pattern="\\/clear_history"))
 async def on_clear_history(event):  # TODO
+    print(f"[{event.chat_id}] clear history command received")
+
+    if event.is_group:
+        await event.respond("I can't clear history in groups yet.")
+        return  # ignore group messages
+
+
     global wait_tasks  # cancel any pending messages
     if event.chat_id in wait_tasks and wait_tasks[event.chat_id]:
         wait_tasks[event.chat_id].cancel()
 
-    await client(
-        functions.messages.DeleteHistoryRequest(
-            peer=event.chat_id, max_id=-1, revoke=True
-        )
-    )
+    # await client(
+    #     functions.messages.DeleteHistoryRequest(
+    #         peer=event.chat_id, max_id=-1, revoke=True
+    #     )
+    # )
 
     clear_history(event.chat_id)
     delete_summary(event.chat_id)
@@ -217,16 +232,23 @@ async def on_clear_history(event):  # TODO
     if event.chat_id in current_message_parts:
         del current_message_parts[event.chat_id]
 
+    await event.respond("History cleared.")
     raise events.StopPropagation
 
 
-@client.on(events.NewMessage(pattern="\\/update_history", from_users=ADMIN_ID))
+@client.on(events.NewMessage(pattern="\\/update_history"))
 async def on_update_history(event):
     # TODO: consider context of this function call:
     # are there pending messages from user?
     # is bot currently replying?
 
     # --
+    print(f"[{event.chat_id}] update history command received")
+
+    if event.is_group:
+        await event.respond("I can't clear history in groups yet.")
+        return  # ignore group messages
+    
     my_id = (await client.get_me(input_peer=True)).user_id
     chat_id = event.chat_id
     min_id = get_history_min_id(chat_id)
@@ -254,14 +276,19 @@ async def on_update_history(event):
     raise events.StopPropagation
 
 
-@client.on(events.NewMessage(incoming=True, from_users=ADMIN_ID))
+@client.on(events.NewMessage(incoming=True))
 async def new_message(event):
     """
     handle new tg message
     set client_typing status
     cancel current reply if have
     """
+    print(f"[{event.chat_id}] new message received")
     chat_id = event.chat_id
+
+    if event.is_group and not event.message.mentioned:
+        # ignore group messages that are not mentioned
+        return
 
     # message received, cancel task and immediately set stop typing
     global cancel_tasks
@@ -272,7 +299,7 @@ async def new_message(event):
     client_typing_statuses[chat_id] = False
     print(f"[{chat_id}] typing=False (message received)")
 
-    await event.mark_read()  # mark as read!
+    #await event.mark_read()  # mark as read!
 
     # parse message received
     global current_message_ids, current_message_parts
@@ -290,3 +317,16 @@ async def new_message(event):
     if chat_id in wait_tasks and wait_tasks[chat_id]:
         wait_tasks[chat_id].cancel()
     wait_tasks[chat_id] = asyncio.create_task(wait_before_reply(event))
+
+
+@client.on(events.ChatAction)
+async def say_hi_added(event):
+    """
+    Send a "Hello" message when the bot is added to a group.
+    """
+    if event.user_added or event.user_joined:
+        # Check if the bot itself was added to the group
+        me = await client.get_me()
+        if event.user_id == me.id:
+            print(f"Bot added to group: {event.chat_id}")
+            await event.respond("Yoooo! I'm Icarus, your guy best friend!")

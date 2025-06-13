@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS "History" (
 	"response"	TEXT,
 	PRIMARY KEY("id" AUTOINCREMENT)
 );
-INSERT INTO "Context" VALUES ('You''re Icarus, aged 20, male. You text informally using lowercase, and in short sentences. Send multiple messages by separating them with \n.');
+INSERT INTO "Context" VALUES ('You''re Icarus, aged 20, male. You text informally using lowercase, and in short sentences. Send multiple messages by separating them with \n');
 COMMIT;"""
 
 db = sqlite3.connect(DB_PATH)
@@ -30,7 +30,7 @@ for cmd in DB_INIT.split(";"):
     db.execute(cmd)
 db.close()
 
-
+# context is system prompt for the bot
 def get_context():
     global context
     if context:
@@ -43,7 +43,7 @@ def get_context():
 
     return context
 
-
+# context is system prompt for the bot
 def set_context(new_context):
     global context
     context = new_context
