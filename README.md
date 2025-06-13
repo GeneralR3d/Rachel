@@ -32,3 +32,4 @@ LLM-based conversational Telegram bot aiming to mimic human texting behaviour. R
 2. Trigger for enthusiastic mode is when messages per min > threshold (then reduce typing delay)
 3. set random timer to be online after receiving messages
 4. For each group, store what you know about each user based on what they have said (long term memory)
+5. Long term: an agent inside the bot that rewrites the system prompt based on new information that may have shaped its world view, or emotions it might have felt from the interactions with other people

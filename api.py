@@ -8,7 +8,7 @@ from google.genai import types
 import functools
 from dotenv import load_dotenv
 
-from db import get_context
+from db import get_system_prompt
 
 load_dotenv()
 
@@ -33,21 +33,14 @@ def run_in_executor(f):
 @run_in_executor
 def get_response(message, history:List[Dict[str,str]], current_summary=None):
     start = time.time()
-    context:str = get_context() # context is system prompt for the bot
+    system_prompt:str = get_system_prompt() # context is system prompt for the bot
     if current_summary:
         print("Current summary: ", current_summary)
-        context += "\n\n"
-        context += current_summary
+        system_prompt += "\n\n"
+        system_prompt += current_summary
 
     # so now the context is the system prompt and the current summary
 
-
-
-    # resp = client.chatbot(
-    #     message,
-    #     context=context,
-    #     history=history,
-    # )
 
 
     user_msg: Dict[str, Any] = create_gemini_content_obj(
@@ -56,7 +49,7 @@ def get_response(message, history:List[Dict[str,str]], current_summary=None):
 
     gemini_formatted_history = transform_history_to_gemini_format(history)
 
-    print("System prompt: ", context)
+    print("System prompt: ", system_prompt)
     print(f"Message: {message}")
     print(f"History: {gemini_formatted_history}")
 
@@ -64,7 +57,7 @@ def get_response(message, history:List[Dict[str,str]], current_summary=None):
     model="gemini-2.0-flash",
     #contents=[context, message, "History: ",] + history,
     config=types.GenerateContentConfig(
-        system_instruction=context,
+        system_instruction=system_prompt,
         temperature=0.2,
         topP = 0.95),
     contents=gemini_formatted_history + [user_msg]

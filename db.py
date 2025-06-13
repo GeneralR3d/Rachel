@@ -1,14 +1,15 @@
 import sqlite3
 from typing import Union
+from prompts import SYSTEM_PROMPT
 
-context = None  # not yet loaded
+system_prompt = None
 
 DB_PATH = "data.db"
 
 # initialise db if not already done
-DB_INIT = """BEGIN TRANSACTION;
-CREATE TABLE IF NOT EXISTS "Context" (
-	"context"	TEXT
+DB_INIT = f"""BEGIN TRANSACTION;
+CREATE TABLE IF NOT EXISTS "SystemPrompt" (
+	"SystemPrompt"	TEXT
 );
 CREATE TABLE IF NOT EXISTS "Summary" (
 	"chat_id"	INTEGER,
@@ -22,7 +23,7 @@ CREATE TABLE IF NOT EXISTS "History" (
 	"response"	TEXT,
 	PRIMARY KEY("id" AUTOINCREMENT)
 );
-INSERT INTO "Context" VALUES ('You''re Icarus, aged 20, male. You text informally using lowercase, and in short sentences. Send multiple messages by separating them with \n');
+INSERT INTO "SystemPrompt" VALUES ({SYSTEM_PROMPT});
 COMMIT;"""
 
 db = sqlite3.connect(DB_PATH)
@@ -30,26 +31,26 @@ for cmd in DB_INIT.split(";"):
     db.execute(cmd)
 db.close()
 
-# context is system prompt for the bot
-def get_context():
-    global context
-    if context:
-        return context
+#  system prompt for the bot
+def get_system_prompt() -> str:
+    global system_prompt
+    if system_prompt:
+        return system_prompt
 
     db = sqlite3.connect(DB_PATH)
-    res = db.execute("SELECT context FROM Context LIMIT 1")
-    context = res.fetchone()[0]
+    res = db.execute("SELECT SystemPrompt FROM SystemPrompt LIMIT 1")
+    system_prompt = res.fetchone()[0]
     db.close()
 
-    return context
+    return system_prompt
 
-# context is system prompt for the bot
-def set_context(new_context):
-    global context
-    context = new_context
+# system_prompt is system prompt for the bot
+def set_system_prompt(new_system_prompt):
+    global system_prompt
+    system_prompt = new_system_prompt
 
     db = sqlite3.connect(DB_PATH)
-    db.execute("UPDATE Context SET context=?", (new_context,))
+    db.execute("UPDATE SystemPrompt SET SystemPrompt=?", (new_system_prompt,))
     db.commit()
     db.close()
 

@@ -2,7 +2,7 @@ import asyncio
 from pprint import pprint
 from typing import Dict, List
 from telethon import TelegramClient, events, functions
-
+from prompts import CONVERSATION_TONE_TEMPLATES
 from api import get_response, summarise_text
 from utils import parse_history
 from db import (
@@ -32,14 +32,6 @@ DELAY = 2  # seconds
 TYPING_SPEED = 20  # characters per second
 HISTORY_LENGTH_THRESHOLD = 40  # when to initiate summary
 HISTORY_LENGTH_TO_SUMMARISE = 20  # number of histories to take out and summarise
-CONVERSATION_TEMPLATE = [  # template to dictate conversation tone (TODO)
-    {"input": "hi", "response": "hey!\nwhats up?"},
-    {
-        "input": "not much\nhbu?",
-        "response": "ic\nim just chilling rn\ndo u wanna get sth to eat?",
-    },
-    {"input": "nah im good\nmaybe later", "response": "kk np\njust lmk when :)"},
-]
 USER_NAME = os.environ.get("USER_NAME", "Matt")  # user and bot name
 BOT_NAME = os.environ.get("BOT_NAME", "Rachel")  # mostly for summary use
 ADMIN_ID = int(
