@@ -23,12 +23,16 @@ CREATE TABLE IF NOT EXISTS "History" (
 	"response"	TEXT,
 	PRIMARY KEY("id" AUTOINCREMENT)
 );
-INSERT INTO "SystemPrompt" VALUES ({SYSTEM_PROMPT});
-COMMIT;"""
+"""
+DB_INSERT_SYSTEM_PROMPT_CMD = """
+INSERT INTO "SystemPrompt" VALUES (?)
+"""
 
 db = sqlite3.connect(DB_PATH)
 for cmd in DB_INIT.split(";"):
     db.execute(cmd)
+db.execute(DB_INSERT_SYSTEM_PROMPT_CMD, (SYSTEM_PROMPT,))
+db.commit()
 db.close()
 
 #  system prompt for the bot
@@ -58,6 +62,8 @@ def set_system_prompt(new_system_prompt):
 def get_history(chat_id: int, count: int = -1):
     """
     count: number of pieces to get (starting from earliest), -1 for all
+    ASC order is used to get the history in the order it was added
+    chat_id: id of the chat for which to get the history
     """
 
     db = sqlite3.connect(DB_PATH)
