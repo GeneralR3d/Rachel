@@ -4,3 +4,4 @@ old/
 *.session
 *.session-journal
 data.db
+tasks.md

@@ -17,13 +17,15 @@ CREATE TABLE IF NOT EXISTS "Summary" (
 	PRIMARY KEY("chat_id")
 );
 CREATE TABLE IF NOT EXISTS "History" (
-	"id"	INTEGER,
+	"message_id"	INTEGER,
 	"chat_id"	INTEGER,
-	"input"	TEXT,
-	"response"	TEXT,
-	PRIMARY KEY("id" AUTOINCREMENT)
+	"sender"	TEXT,
+	"content"	TEXT,
+	PRIMARY KEY("message_id" AUTOINCREMENT)
 );
 """
+# AUTOINCREMENT just means if not inserted manually, the message_id will be incremented automatically
+
 DB_INSERT_SYSTEM_PROMPT_CMD = """
 INSERT INTO "SystemPrompt" VALUES (?)
 """
@@ -35,7 +37,7 @@ db.execute(DB_INSERT_SYSTEM_PROMPT_CMD, (SYSTEM_PROMPT,))
 db.commit()
 db.close()
 
-#  system prompt for the bot
+# system prompt for the bot
 def get_system_prompt() -> str:
     global system_prompt
     if system_prompt:
@@ -69,37 +71,72 @@ def get_history(chat_id: int, count: int = -1):
     db = sqlite3.connect(DB_PATH)
     if count == -1:
         res = db.execute(
-            "SELECT input, response, id FROM History WHERE chat_id=? ORDER BY id ASC",
+            "SELECT sender, content, message_id FROM History WHERE chat_id=? ORDER BY message_id ASC",
             (chat_id,),
         )
     else:  # count specified, limit response
         res = db.execute(
-            "SELECT input, response, id FROM History WHERE chat_id=? ORDER BY id ASC LIMIT ?",
+            "SELECT sender, content, message_id FROM History WHERE chat_id=? ORDER BY message_id ASC LIMIT ?",
             (chat_id, count),
         )
 
     # convert to desired format
-    out = [{"input": i[0], "response": i[1], "id": i[2]} for i in res]
+    out = [{"sender": i[0], "content": i[1], "message_id": i[2]} for i in res]
 
     db.close()
 
     return out
 
-
-def add_history(id_: int, chat_id: int, input_: str, response: str):
+def add_history(chat_id: int, sender: str, content: str, message_id: int = None):
     """
-    id_: message id of first message sent by user in this piece of history
+    Adds a single history entry to the database.
+    
+    Parameters:
+    - chat_id: chat ID where the message was sent
+    - sender: who sent the message
+    - content: the message content
+    - message_id: message ID of the message (optional)
     """
-
     db = sqlite3.connect(DB_PATH)
-    db.execute(
-        "INSERT INTO History(id, chat_id, input, response) VALUES (?,?,?,?)",
-        (
-            id_,
-            chat_id,
-            input_,
-            response,
-        ),
+    if message_id:
+        db.execute(
+            "INSERT INTO History(message_id, chat_id, sender, content) VALUES (?,?,?,?)",
+            (message_id, chat_id, sender, content)
+        )
+    else:
+        db.execute(
+            "INSERT INTO History(chat_id, sender, content) VALUES (?,?,?)",
+            (chat_id, sender, content)
+        )
+
+    db.commit()
+    db.close()
+
+def add_history_batch(message_ids: list[int], chat_ids: list[int], 
+                      senders: list[str], contents: list[str]):
+    """
+    Adds multiple history entries to the database.
+    It also works when the list is of length 1, i.e. a single message.
+    
+    Must be called with lists of equal length:
+    - message_ids: list of message IDs
+    - chat_ids: list of chat IDs where the messages were sent
+    - senders: list of who sent the messages
+    - contents: list of message contents
+    """
+    print("message_ids:", message_ids)
+    db = sqlite3.connect(DB_PATH)
+    
+    # Ensure all inputs are lists of the same length
+    if not len(message_ids) == len(chat_ids) == len(senders) == len(contents):
+        raise ValueError("All inputs must be lists of the same length")
+    
+    # Prepare data for executemany
+    data = list(zip(message_ids, chat_ids, senders, contents))
+    print("Adding history batch:", data)
+    db.executemany(
+        "INSERT INTO History(message_id, chat_id, sender, content) VALUES (?,?,?,?)",
+        data
     )
     db.commit()
     db.close()
@@ -124,7 +161,7 @@ def get_history_min_id(chat_id: int) -> int:
 
     db = sqlite3.connect(DB_PATH)
     res = db.execute(
-        "SELECT MIN(id) FROM History WHERE chat_id=?",
+        "SELECT MIN(message_id) FROM History WHERE chat_id=?",
         (chat_id,),
     )
     out = res.fetchone()
@@ -141,8 +178,8 @@ def rewrite_history(chat_id: int, parsed_history: list[dict]):
 
     for item in parsed_history:
         db.execute(
-            "INSERT INTO History(id, chat_id, input, response) VALUES(?,?,?,?)",
-            (item["id"], chat_id, item["input"], item["response"]),
+            "INSERT INTO History(message_id, chat_id, sender, content) VALUES(?,?,?,?)",
+            (item["message_id"], chat_id, item["sender"], item["content"]),
         )
 
     db.commit()
@@ -152,7 +189,7 @@ def rewrite_history(chat_id: int, parsed_history: list[dict]):
 def get_history_length(chat_id: int) -> int:
     db = sqlite3.connect(DB_PATH)
 
-    res = db.execute("SELECT COUNT(id) FROM History WHERE chat_id=?", (chat_id,))
+    res = db.execute("SELECT COUNT(message_id) FROM History WHERE chat_id=?", (chat_id,))
     count = res.fetchone()[0]
 
     db.close()
@@ -160,16 +197,16 @@ def get_history_length(chat_id: int) -> int:
     return count
 
 
-def delete_history(chat_id: int, ids: list[int]):
+def delete_history(chat_id: int, message_ids: list[int]):
     """
     for summary purposes
     """
     db = sqlite3.connect(DB_PATH)
 
-    for id_ in ids:
+    for message_id in message_ids:
         db.execute(
-            "DELETE FROM History WHERE chat_id=? AND id=?",
-            (chat_id, id_),
+            "DELETE FROM History WHERE chat_id=? AND message_id=?",
+            (chat_id, message_id),
         )
     db.commit()
     db.close()
