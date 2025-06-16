@@ -1,6 +1,7 @@
 import sqlite3
 from typing import Union
 from prompts import SYSTEM_PROMPT
+import traceback
 
 system_prompt = None
 
@@ -112,34 +113,53 @@ def add_history(chat_id: int, sender: str, content: str, message_id: int = None)
     db.commit()
     db.close()
 
-def add_history_batch(message_ids: list[int], chat_ids: list[int], 
-                      senders: list[str], contents: list[str]):
+def add_history_batch(chat_ids: list[int], senders: list[str], contents: list[str], 
+                      message_ids: list[int] = None):
     """
     Adds multiple history entries to the database.
     It also works when the list is of length 1, i.e. a single message.
     
     Must be called with lists of equal length:
-    - message_ids: list of message IDs
     - chat_ids: list of chat IDs where the messages were sent
     - senders: list of who sent the messages
     - contents: list of message contents
+    - message_ids: list of message IDs (optional)
     """
-    print("message_ids:", message_ids)
     db = sqlite3.connect(DB_PATH)
     
-    # Ensure all inputs are lists of the same length
-    if not len(message_ids) == len(chat_ids) == len(senders) == len(contents):
-        raise ValueError("All inputs must be lists of the same length")
-    
-    # Prepare data for executemany
-    data = list(zip(message_ids, chat_ids, senders, contents))
-    print("Adding history batch:", data)
-    db.executemany(
-        "INSERT INTO History(message_id, chat_id, sender, content) VALUES (?,?,?,?)",
-        data
-    )
-    db.commit()
-    db.close()
+    try:
+        # Ensure input lists have the same length
+        if not len(chat_ids) == len(senders) == len(contents):
+            raise ValueError("chat_ids, senders, and contents must be lists of the same length")
+        
+        # If message_ids is provided, ensure it has the same length
+        if message_ids is not None and len(message_ids) != len(chat_ids):
+            raise ValueError("message_ids must have the same length as other lists")
+        
+        if message_ids is not None:
+            # Use message_ids
+            data = list(zip(message_ids, chat_ids, senders, contents))
+            db.executemany(
+                "INSERT INTO History(message_id, chat_id, sender, content) VALUES (?,?,?,?)",
+                data
+            )
+        else:
+            # Skip message_ids, let SQLite auto-increment
+            data = list(zip(chat_ids, senders, contents))
+            db.executemany(
+                "INSERT INTO History(chat_id, sender, content) VALUES (?,?,?)",
+                data
+            )
+        
+        db.commit()
+    except sqlite3.Error as e:
+        print("Database error occurred:", e)
+        traceback.print_exc()
+    except Exception as e:
+        print("An unexpected error occurred:", e)
+        traceback.print_exc()
+    finally:
+        db.close()
 
 
 def clear_history(chat_id: int):

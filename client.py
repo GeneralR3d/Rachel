@@ -96,7 +96,7 @@ async def reply(event):
                           chat_ids=[chat_id] * len(current_messages),
                           senders=[msg["sender"] for msg in current_messages],
                           contents=[msg["content"] for msg in current_messages])
-        add_history(chat_id=chat_id, sender= BOT_NAME, content=response)
+        add_history(chat_id=chat_id, sender= BOT_NAME, content=response, message_id=None)
                     
         print(f"[{chat_id}] Current summary: {current_summary}")
         print(f"[{chat_id}] Current history (without prompts) is: ")
