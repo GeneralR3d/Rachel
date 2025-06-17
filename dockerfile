@@ -1,4 +1,4 @@
-FROM python:3.13
+FROM python:3.13-slim
 
 WORKDIR /app
 
@@ -12,5 +12,4 @@ ENV PORT=8000
 
 EXPOSE $PORT
 
-ENTRYPOINT
 CMD ["python", "main.py"]

@@ -1,6 +1,6 @@
 import sqlite3
 from typing import Union
-from app.prompts import SYSTEM_PROMPT
+from prompts import SYSTEM_PROMPT
 import traceback
 
 system_prompt = None

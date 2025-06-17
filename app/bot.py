@@ -3,7 +3,7 @@ from telethon import TelegramClient, events
 import os
 from dotenv import load_dotenv
 
-from app.db import get_system_prompt, set_system_prompt
+from db import get_system_prompt, set_system_prompt
 
 load_dotenv()
 
