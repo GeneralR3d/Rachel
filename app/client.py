@@ -3,10 +3,10 @@ from pprint import pprint
 import random
 from typing import Dict, List
 from telethon import TelegramClient, events, functions
-from prompts import CONVERSATION_TONE_TEMPLATES
-from api import get_response, summarise_text
-from utils import parse_history
-from db import (
+from rachel_adk_agent.prompts import CONVERSATION_TONE_TEMPLATES
+from rachel_adk_agent.agent import get_response, summarise_text
+from rachel_adk_agent.utils import parse_history
+from rachel_adk_agent.db_utils import (
     get_history,
     add_history,
     add_history_batch,
