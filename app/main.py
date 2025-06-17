@@ -2,8 +2,8 @@ import os
 import asyncio
 from dotenv import load_dotenv
 
-from bot import bot
-from client import client
+from app.bot import bot
+from app.client import client
 
 load_dotenv()
 

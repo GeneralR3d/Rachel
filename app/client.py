@@ -3,10 +3,10 @@ from pprint import pprint
 import random
 from typing import Dict, List
 from telethon import TelegramClient, events, functions
-from prompts import CONVERSATION_TONE_TEMPLATES
-from api import get_response, summarise_text
-from utils import parse_history
-from db import (
+from app.prompts import CONVERSATION_TONE_TEMPLATES
+from app.api import get_response, summarise_text
+from app.utils import parse_history
+from app.db import (
     get_history,
     add_history,
     add_history_batch,
@@ -32,7 +32,7 @@ client = TelegramClient("anon", api_id, api_hash)
 # constants
 MAX_OFFLINE_TIME = 300  # seconds
 TYPING_SPEED = 20  # characters per second
-HISTORY_LENGTH_THRESHOLD = 200  # when to initiate summary
+HISTORY_LENGTH_THRESHOLD = 500  # when to initiate summary
 HISTORY_LENGTH_TO_SUMMARISE = 20  # number of histories to take out and summarise
 INPUT_BUFFER_SIZE = 15
 

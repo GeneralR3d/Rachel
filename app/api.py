@@ -9,7 +9,7 @@ from google.genai import types
 import functools
 from dotenv import load_dotenv
 
-from db import get_system_prompt
+from app.db import get_system_prompt
 
 load_dotenv()
 
