@@ -30,7 +30,7 @@ api_hash = os.environ["TELEGRAM_API_HASH"]
 client = TelegramClient("anon", api_id, api_hash)
 
 # constants
-MAX_OFFLINE_TIME = 30  # seconds
+MAX_OFFLINE_TIME = 300  # seconds
 TYPING_SPEED = 20  # characters per second
 HISTORY_LENGTH_THRESHOLD = 200  # when to initiate summary
 HISTORY_LENGTH_TO_SUMMARISE = 20  # number of histories to take out and summarise
@@ -92,7 +92,7 @@ async def reply(event):
         )  # pyright: ignore
 
 
-        add_history_batch(message_ids= [msg["message_id"] for msg in current_messages],
+        add_history_batch(message_ids= None,
                           chat_ids=[chat_id] * len(current_messages),
                           senders=[msg["sender"] for msg in current_messages],
                           contents=[msg["content"] for msg in current_messages])
