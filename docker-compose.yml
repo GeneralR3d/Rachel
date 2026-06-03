@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16
+    container_name: rachel-db
+    environment:
+      POSTGRES_USER: rachel
+      POSTGRES_PASSWORD: rachel
+      POSTGRES_DB: rachel
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rachel -d rachel"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Optional: run the app in a container too. By default just run `db` and
+  # start the app locally with uv (see README). Uncomment to use.
+  # app:
+  #   build: .
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #   env_file: .env
+  #   environment:
+  #     DATABASE_URL: postgresql+asyncpg://rachel:rachel@db:5432/rachel
+  #   ports:
+  #     - "8000:8000"
+  #   volumes:
+  #     - ./anon.session:/app/anon.session
+  #     - ./bot.session:/app/bot.session
+
+volumes:
+  pgdata:

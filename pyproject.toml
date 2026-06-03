@@ -1,0 +1,24 @@
+[project]
+name = "rachel"
+version = "0.1.0"
+description = "LLM-based conversational Telegram bot (Rachel), re-platformed onto FastAPI + Postgres"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "telethon>=1.36",
+    "google-genai>=1.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "python-dotenv>=1.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.alembic]
+# alembic reads its config from alembic.ini; this section is intentionally empty.
