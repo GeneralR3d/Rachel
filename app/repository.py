@@ -91,6 +91,18 @@ async def upsert_user(
 # --- history -------------------------------------------------------------
 
 
+async def get_all_chats() -> list[dict]:
+    """Return all chat_ids with their message counts."""
+    stmt = (
+        select(History.chat_id, func.count(History.telegram_message_id).label("message_count"))
+        .group_by(History.chat_id)
+        .order_by(History.chat_id)
+    )
+    async with session_scope() as session:
+        rows = (await session.execute(stmt)).all()
+    return [{"chat_id": r.chat_id, "message_count": r.message_count} for r in rows]
+
+
 async def get_history(chat_id: int, count: int = -1) -> list[dict]:
     """count: number of pieces to get (earliest first), -1 for all.
 

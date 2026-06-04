@@ -70,6 +70,28 @@ On startup the app seeds the default system prompt (only if not already present)
 | `GET` | `/summary/{chat_id}` | Stored summary |
 | `DELETE` | `/summary/{chat_id}` | Delete a chat's summary |
 
+To set a per-chat scope, you need to use the Bot API directly instead of BotFather. Send a setMyCommands request with the scope field:
+
+```  
+  curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setMyCommands" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "commands": [
+        {"command": "get_system_prompt", "description": "Get the current system prompt"},
+        {"command": "set_system_prompt", "description": "Set a new system prompt"},
+        {"command": "list_chats", "description": "List all chats with message counts"},
+        {"command": "get_history", "description": "Get message history for a chat"},
+        {"command": "clear_history", "description": "Clear message history for a chat"},
+        {"command": "get_summary", "description": "Get the conversation summary for a chat"},
+        {"command": "delete_summary", "description": "Delete the conversation summary for a chat"}
+      ],    
+      "scope": {
+        "type": "chat",
+        "chat_id": <YOUR_ADMIN_ID>
+      }
+    }'
+```
+
 Interactive docs at `http://localhost:8000/docs`.
 
 ## How it works
