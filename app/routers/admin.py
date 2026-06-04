@@ -25,6 +25,13 @@ class HistoryItem(BaseModel):
     content: str
     telegram_message_id: int
 
+class UserNameOut(BaseModel):
+    telegram_user_id: int
+    first_name: str | None
+    last_name: str | None
+    username: str | None
+
+
 class AllChats(BaseModel):
     chat_id: int
     message_count: int
@@ -53,7 +60,12 @@ async def update_system_prompt(body: SystemPromptIn) -> SystemPromptOut:
     await repository.set_system_prompt(body.prompt)
     return SystemPromptOut(prompt=body.prompt)
 
-@router.get("/history/all", response_model=list[AllChats])
+@router.get("/users/names", response_model=list[UserNameOut])
+async def read_user_names() -> list[UserNameOut]:
+    return [UserNameOut(**u) for u in await repository.get_all_users()]
+
+
+@router.get("/list-chats", response_model=list[AllChats])
 async def get_all_chat_ids() -> list[AllChats]:
     return [AllChats(**row) for row in await repository.get_all_chats()]
 

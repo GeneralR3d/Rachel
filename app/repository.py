@@ -91,6 +91,23 @@ async def upsert_user(
 # --- history -------------------------------------------------------------
 
 
+async def get_all_users() -> list[dict]:
+    """Return all known users."""
+    async with session_scope() as session:
+        rows = (await session.execute(select(User).order_by(User.telegram_user_id))).scalars().all()
+    return [
+        {
+            "telegram_user_id": u.telegram_user_id,
+            "first_name": u.first_name,
+            "last_name": u.last_name,
+            "username": u.username,
+            "created_at": u.created_at,
+            "updated_at": u.updated_at,
+        }
+        for u in rows
+    ]
+
+
 async def get_all_chats() -> list[dict]:
     """Return all chat_ids with their message counts."""
     stmt = (

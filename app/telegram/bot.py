@@ -11,6 +11,7 @@ from app.repository import (
     clear_history,
     delete_summary,
     get_all_chats,
+    get_all_users,
     get_history,
     get_summary,
     get_system_prompt,
@@ -40,6 +41,21 @@ async def on_set_system_prompt(event):
     new_system_prompt = event.raw_text.replace("/set_system_prompt ", "")
     await set_system_prompt(new_system_prompt)
     await event.reply("System prompt set!")
+
+
+@bot.on(
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/list_user_names$")
+)
+async def on_list_user_names(event):
+    users = await get_all_users()
+    if not users:
+        await event.reply("No users found.")
+        return
+    lines = [
+        f"@{u['username'] or '—'} | {u['first_name'] or ''} {u['last_name'] or ''}".strip()
+        for u in users
+    ]
+    await event.reply("\n".join(lines))
 
 
 @bot.on(
