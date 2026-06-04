@@ -23,8 +23,9 @@ class Settings(BaseSettings):
     # Admin bot token (the second bot, from @BotFather)
     telegram_bot_token: str
 
-    # Google Gemini
-    gemini_api_key: str
+    # OpenRouter
+    openrouter_api_key: str
+    openrouter_model: str = "google/gemini-2.0-flash-001"
 
     # Admin whitelist (your personal Telegram user id, from @userinfobot)
     admin_id: int = 0

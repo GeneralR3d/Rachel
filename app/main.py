@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Telethon clients...")
     # Rachel's user-facing client. Requires anon.session to already exist
     # (uvicorn is non-interactive — run `python -m scripts.login` once first).
-    await client.start()
+    await client.start(bot_token=settings.telegram_bot_token)
     await bot.start(bot_token=settings.telegram_bot_token)
     logger.info("Telethon clients started.")
 

@@ -1,30 +1,25 @@
-"""Google Gemini integration — async port of the original Reference/app/api.py.
+"""LLM integration via OpenRouter (OpenAI-compatible API).
 
-The blocking ``generate_content`` SDK call is offloaded to a worker thread via
-``asyncio.to_thread`` so it never blocks the event loop (replacing the original
-``run_in_executor`` decorator).
+Replaces the google-genai client. The public interface (get_response, summarise_text)
+is unchanged so telegram/client.py needs no edits.
 """
 
-import asyncio
+import json
 import time
 from typing import Any, Dict, List, Tuple
 
-from google import genai
-from google.genai import types
-from pydantic import BaseModel
+from openai import AsyncOpenAI
 
 from app.config import get_settings
 from app.repository import get_system_prompt
 
 settings = get_settings()
 
-client = genai.Client(api_key=settings.gemini_api_key)
+_client = AsyncOpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=settings.openrouter_api_key,
+)
 BOT_NAME = settings.bot_name
-
-
-class llm_response(BaseModel):
-    sender: str
-    content: str
 
 
 async def get_response(
@@ -32,76 +27,56 @@ async def get_response(
     history: List[Dict[str, str]],
     current_summary: str | None = None,
 ) -> Tuple[str, float]:
-    """Generate a response using the Gemini API.
+    """Generate a response via OpenRouter.
 
     Returns a ``(response_text, elapsed_seconds)`` tuple.
     """
     start = time.time()
+
     system_prompt: str = await get_system_prompt()
     if current_summary:
         print("Current summary: ", current_summary)
         system_prompt += "\n\n" + current_summary
+    system_prompt += (
+        '\n\nAlways reply with valid JSON: {"sender": "<your name>", "content": "<your reply>"}'
+    )
 
-    gemini_formatted_current_messages = [
-        create_gemini_content_obj(role="user", text=msg["content"], sender=msg["sender"])
-        for msg in current_messages
-    ]
-    gemini_formatted_history = transform_history_to_gemini_format(history, BOT_NAME)
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
-    print(f"Current Messages: {gemini_formatted_current_messages}")
-    print(f"History going into model: {gemini_formatted_history}")
-    print()
-
-    def _call() -> Any:
-        return client.models.generate_content(
-            model="gemini-2.0-flash",
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=0.2,
-                topP=0.95,
-                responseMimeType="application/json",
-                responseSchema=llm_response,
-            ),
-            contents=gemini_formatted_history + gemini_formatted_current_messages,
+    for entry in history:
+        role = "assistant" if entry["sender"] == BOT_NAME else "user"
+        messages.append(
+            {"role": role, "content": str({"sender": entry["sender"], "content": entry["content"]})}
         )
 
-    response = await asyncio.to_thread(_call)
+    for msg in current_messages:
+        messages.append(
+            {"role": "user", "content": str({"sender": msg["sender"], "content": msg["content"]})}
+        )
+
+    print(f"Messages going into model: {messages}")
+
+    response = await _client.chat.completions.create(
+        model=settings.openrouter_model,
+        messages=messages,
+        temperature=0.2,
+        response_format={"type": "json_object"},
+    )
+
     end = time.time()
 
-    response_text: str = ""
+    response_text = ""
     try:
-        response_text = response.parsed.content
+        data = json.loads(response.choices[0].message.content)
+        response_text = data["content"]
     except Exception as e:
         print("Error parsing response: ", e)
         response_text = "Sorry, I encountered an error while processing your request."
+
     print("Response from LLM: ", response_text)
     return response_text, end - start
 
 
 async def summarise_text(text: str) -> str:
-    # Stubbed in the reference implementation; kept identical here.
+    # Stubbed — same as before.
     return "Summarised text"
-
-
-# helpers ------------------------------------------------------------------
-
-
-def create_gemini_content_obj(role: str, text: str, sender: str) -> dict:
-    return {
-        "role": role,
-        "parts": [{"text": str({"sender": sender, "content": text})}],
-    }
-
-
-def transform_history_to_gemini_format(
-    history: List[Dict[str, str]], BOT_NAME: str
-) -> List[Dict[str, Any]]:
-    """Use 'model' role for the bot's own messages, 'user' otherwise."""
-    return [
-        create_gemini_content_obj(
-            role="model" if entry["sender"] == BOT_NAME else "user",
-            text=entry["content"],
-            sender=entry["sender"],
-        )
-        for entry in history
-    ]
