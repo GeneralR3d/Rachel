@@ -7,6 +7,7 @@ Original SQLite tables (see Reference/app/db.py):
 """
 
 from datetime import datetime
+from typing import Optional
 
 from sqlalchemy import BigInteger, DateTime, Integer, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -32,13 +33,29 @@ class Summary(Base):
     summary: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    first_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    username: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class History(Base):
     __tablename__ = "history"
 
     # Telegram message IDs are unique per chat, so the PK is composite.
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     telegram_message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    sender: Mapped[str] = mapped_column(Text, nullable=False)
+    # References users.telegram_user_id — no FK constraint to avoid cascade issues.
+    sender_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

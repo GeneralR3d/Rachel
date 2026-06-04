@@ -27,6 +27,7 @@ from app.repository import (
     get_summary,
     rewrite_history,
     set_summary,
+    upsert_user,
 )
 from app.services.gemini import get_response, summarise_text
 from app.utils import parse_history
@@ -72,15 +73,18 @@ async def reply(event):
         print(f"[{chat_id}] No messages to reply to, exiting")
         return
 
-    current_messages: List[Dict[str, str]] = [
+    current_messages: List[Dict] = [
         {
             "sender": part["sender_name"],
+            "sender_user_id": part["sender_user_id"],
             "content": part["content"],
             "telegram_message_id": part["telegram_message_id"],
         }
         for part in current_message_parts[chat_id]
     ]
     current_message_parts[chat_id].clear()
+
+    me = await client.get_me()
 
     async with client.action(event.chat_id, "typing"):  # pyright: ignore
         # a few "human-like" message-response pairs to set the tone of the
@@ -97,7 +101,7 @@ async def reply(event):
 
         await add_history_batch(
             chat_ids=[chat_id] * len(current_messages),
-            senders=[msg["sender"] for msg in current_messages],
+            sender_user_ids=[msg["sender_user_id"] for msg in current_messages],
             contents=[msg["content"] for msg in current_messages],
             telegram_message_ids=[msg["telegram_message_id"] for msg in current_messages],
         )
@@ -130,7 +134,7 @@ async def reply(event):
 
     if bot_message_id is not None:
         await add_history(
-            chat_id=chat_id, sender=BOT_NAME, content=response, telegram_message_id=bot_message_id
+            chat_id=chat_id, sender_user_id=me.id, content=response, telegram_message_id=bot_message_id
         )
 
 
@@ -251,10 +255,8 @@ async def on_update_history(event):
     async for message in client.iter_messages(
         chat_id, min_id=min_id - 1, max_id=event.message.id
     ):  # ignore command message
-        if message.from_id is None or message.from_id.user_id != my_id:
-            chat_log.insert(0, ("user", message.text, message.id))
-        else:
-            chat_log.insert(0, ("bot", message.text, message.id))
+        sender_id = message.from_id.user_id if message.from_id else 0
+        chat_log.insert(0, (sender_id, message.text, message.id))
 
     parsed_history = parse_history(chat_log)
     print(f"{my_id=}")
@@ -294,9 +296,19 @@ async def new_message(event):
 
     sender = await event.get_sender()
     event_username = sender.username if sender and sender.username else "Unknown"
+
+    if sender:
+        await upsert_user(
+            telegram_user_id=sender.id,
+            first_name=getattr(sender, "first_name", None),
+            last_name=getattr(sender, "last_name", None),
+            username=getattr(sender, "username", None),
+        )
+
     current_message_parts[chat_id].append(
         {
             "telegram_message_id": event.message.id,
+            "sender_user_id": sender.id if sender else 0,
             "sender_name": event_username,
             "content": event.raw_text,
         }

@@ -7,11 +7,12 @@ HTTP routes change as little as possible. Each function opens its own session
 
 from typing import Optional, Union
 
+import sqlalchemy as sa
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import session_scope
-from app.models import History, Summary, SystemPrompt
+from app.models import History, Summary, SystemPrompt, User
 from app.prompts import SYSTEM_PROMPT
 
 # Cached system prompt (mirrors the original module-level global cache).
@@ -55,13 +56,56 @@ async def set_system_prompt(new_system_prompt: str) -> None:
         )
 
 
+# --- users ---------------------------------------------------------------
+
+
+async def upsert_user(
+    telegram_user_id: int,
+    first_name: Optional[str],
+    last_name: Optional[str],
+    username: Optional[str],
+) -> None:
+    """Insert or update a Telegram user's profile info."""
+    async with session_scope() as session:
+        stmt = (
+            pg_insert(User)
+            .values(
+                telegram_user_id=telegram_user_id,
+                first_name=first_name,
+                last_name=last_name,
+                username=username,
+            )
+            .on_conflict_do_update(
+                index_elements=[User.telegram_user_id],
+                set_={
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "username": username,
+                    "updated_at": func.now(),
+                },
+            )
+        )
+        await session.execute(stmt)
+
+
 # --- history -------------------------------------------------------------
 
 
 async def get_history(chat_id: int, count: int = -1) -> list[dict]:
-    """count: number of pieces to get (earliest first), -1 for all."""
+    """count: number of pieces to get (earliest first), -1 for all.
+
+    Returns dicts with ``sender`` set to the user's display name (username,
+    first_name, or stringified ID) for backward compatibility with the LLM layer.
+    """
+    display_name = func.coalesce(
+        User.username,
+        User.first_name,
+        sa.cast(History.sender_user_id, sa.Text),
+    ).label("sender")
+
     stmt = (
-        select(History.sender, History.content, History.telegram_message_id)
+        select(History.chat_id, History.sender_user_id, History.content, History.telegram_message_id, display_name)
+        .outerjoin(User, History.sender_user_id == User.telegram_user_id)
         .where(History.chat_id == chat_id)
         .order_by(History.telegram_message_id.asc())
     )
@@ -72,19 +116,25 @@ async def get_history(chat_id: int, count: int = -1) -> list[dict]:
         rows = (await session.execute(stmt)).all()
 
     return [
-        {"sender": r.sender, "content": r.content, "telegram_message_id": r.telegram_message_id}
+        {
+            "sender": r.sender,
+            "sender_user_id": r.sender_user_id,
+            "content": r.content,
+            "telegram_message_id": r.telegram_message_id,
+            "chat_id":r.chat_id
+        }
         for r in rows
     ]
 
 
 async def add_history(
-    chat_id: int, sender: str, content: str, telegram_message_id: int
+    chat_id: int, sender_user_id: int, content: str, telegram_message_id: int
 ) -> None:
     async with session_scope() as session:
         await session.execute(
             pg_insert(History).values(
                 chat_id=chat_id,
-                sender=sender,
+                sender_user_id=sender_user_id,
                 content=content,
                 telegram_message_id=telegram_message_id,
             )
@@ -93,20 +143,20 @@ async def add_history(
 
 async def add_history_batch(
     chat_ids: list[int],
-    senders: list[str],
+    sender_user_ids: list[int],
     contents: list[str],
     telegram_message_ids: list[int],
 ) -> None:
     """Insert multiple history entries. Works for a single message too."""
-    if not len(chat_ids) == len(senders) == len(contents) == len(telegram_message_ids):
+    if not len(chat_ids) == len(sender_user_ids) == len(contents) == len(telegram_message_ids):
         raise ValueError(
-            "chat_ids, senders, contents, and telegram_message_ids must be lists of the same length"
+            "chat_ids, sender_user_ids, contents, and telegram_message_ids must be lists of the same length"
         )
 
     rows = [
         {
             "chat_id": chat_ids[i],
-            "sender": senders[i],
+            "sender_user_id": sender_user_ids[i],
             "content": contents[i],
             "telegram_message_id": telegram_message_ids[i],
         }
@@ -143,7 +193,7 @@ async def rewrite_history(chat_id: int, parsed_history: list[dict]) -> None:
                 pg_insert(History).values(
                     telegram_message_id=item["telegram_message_id"],
                     chat_id=chat_id,
-                    sender=item["sender"],
+                    sender_user_id=item["sender_user_id"],
                     content=item["content"],
                 )
             )
