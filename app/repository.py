@@ -61,9 +61,9 @@ async def set_system_prompt(new_system_prompt: str) -> None:
 async def get_history(chat_id: int, count: int = -1) -> list[dict]:
     """count: number of pieces to get (earliest first), -1 for all."""
     stmt = (
-        select(History.sender, History.content, History.message_id)
+        select(History.sender, History.content, History.telegram_message_id)
         .where(History.chat_id == chat_id)
-        .order_by(History.message_id.asc())
+        .order_by(History.telegram_message_id.asc())
     )
     if count != -1:
         stmt = stmt.limit(count)
@@ -72,46 +72,46 @@ async def get_history(chat_id: int, count: int = -1) -> list[dict]:
         rows = (await session.execute(stmt)).all()
 
     return [
-        {"sender": r.sender, "content": r.content, "message_id": r.message_id}
+        {"sender": r.sender, "content": r.content, "telegram_message_id": r.telegram_message_id}
         for r in rows
     ]
 
 
 async def add_history(
-    chat_id: int, sender: str, content: str, message_id: int = None
+    chat_id: int, sender: str, content: str, telegram_message_id: int
 ) -> None:
-    values = {"chat_id": chat_id, "sender": sender, "content": content}
-    if message_id:
-        values["message_id"] = message_id
-
     async with session_scope() as session:
-        await session.execute(pg_insert(History).values(**values))
+        await session.execute(
+            pg_insert(History).values(
+                chat_id=chat_id,
+                sender=sender,
+                content=content,
+                telegram_message_id=telegram_message_id,
+            )
+        )
 
 
 async def add_history_batch(
     chat_ids: list[int],
     senders: list[str],
     contents: list[str],
-    message_ids: list[int] = None,
+    telegram_message_ids: list[int],
 ) -> None:
     """Insert multiple history entries. Works for a single message too."""
-    if not len(chat_ids) == len(senders) == len(contents):
+    if not len(chat_ids) == len(senders) == len(contents) == len(telegram_message_ids):
         raise ValueError(
-            "chat_ids, senders, and contents must be lists of the same length"
+            "chat_ids, senders, contents, and telegram_message_ids must be lists of the same length"
         )
-    if message_ids is not None and len(message_ids) != len(chat_ids):
-        raise ValueError("message_ids must have the same length as other lists")
 
-    rows: list[dict] = []
-    for i in range(len(chat_ids)):
-        row = {
+    rows = [
+        {
             "chat_id": chat_ids[i],
             "sender": senders[i],
             "content": contents[i],
+            "telegram_message_id": telegram_message_ids[i],
         }
-        if message_ids is not None:
-            row["message_id"] = message_ids[i]
-        rows.append(row)
+        for i in range(len(chat_ids))
+    ]
 
     if not rows:
         return
@@ -126,10 +126,10 @@ async def clear_history(chat_id: int) -> None:
 
 
 async def get_history_min_id(chat_id: int) -> int:
-    """Min message_id stored for a chat, used to incrementally update history."""
+    """Min telegram_message_id stored for a chat, used to incrementally update history."""
     async with session_scope() as session:
         out = await session.scalar(
-            select(func.min(History.message_id)).where(History.chat_id == chat_id)
+            select(func.min(History.telegram_message_id)).where(History.chat_id == chat_id)
         )
     # return 0 if no min id (no messages stored yet)
     return out if out else 0
@@ -141,7 +141,7 @@ async def rewrite_history(chat_id: int, parsed_history: list[dict]) -> None:
         for item in parsed_history:
             await session.execute(
                 pg_insert(History).values(
-                    message_id=item["message_id"],
+                    telegram_message_id=item["telegram_message_id"],
                     chat_id=chat_id,
                     sender=item["sender"],
                     content=item["content"],
@@ -152,19 +152,20 @@ async def rewrite_history(chat_id: int, parsed_history: list[dict]) -> None:
 async def get_history_length(chat_id: int) -> int:
     async with session_scope() as session:
         count = await session.scalar(
-            select(func.count(History.message_id)).where(History.chat_id == chat_id)
+            select(func.count(History.telegram_message_id)).where(History.chat_id == chat_id)
         )
     return count or 0
 
 
-async def delete_history(chat_id: int, message_ids: list[int]) -> None:
+async def delete_history(chat_id: int, telegram_message_ids: list[int]) -> None:
     """For summary purposes — delete specific messages."""
-    if not message_ids:
+    if not telegram_message_ids:
         return
     async with session_scope() as session:
         await session.execute(
             delete(History).where(
-                History.chat_id == chat_id, History.message_id.in_(message_ids)
+                History.chat_id == chat_id,
+                History.telegram_message_id.in_(telegram_message_ids),
             )
         )
 

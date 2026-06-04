@@ -76,7 +76,7 @@ async def reply(event):
         {
             "sender": part["sender_name"],
             "content": part["content"],
-            "message_id": part["message_id"],
+            "telegram_message_id": part["telegram_message_id"],
         }
         for part in current_message_parts[chat_id]
     ]
@@ -96,13 +96,10 @@ async def reply(event):
         )  # pyright: ignore
 
         await add_history_batch(
-            message_ids=None,
             chat_ids=[chat_id] * len(current_messages),
             senders=[msg["sender"] for msg in current_messages],
             contents=[msg["content"] for msg in current_messages],
-        )
-        await add_history(
-            chat_id=chat_id, sender=BOT_NAME, content=response, message_id=None
+            telegram_message_ids=[msg["telegram_message_id"] for msg in current_messages],
         )
 
         print(f"[{chat_id}] Current summary: {current_summary}")
@@ -117,17 +114,24 @@ async def reply(event):
         if not (chat_id in summarising_statuses and summarising_statuses[chat_id]):
             asyncio.create_task(summarise(chat_id))
 
+    bot_message_id = None
     for i, raw_text in enumerate(response.split("\n\n")):
         if raw_text == "":  # speechless
             continue
 
-        current_ai_msg_text = raw_text
-        wait = len(current_ai_msg_text) / TYPING_SPEED
+        wait = len(raw_text) / TYPING_SPEED
         if i != 0:  # dont need to wait before sending first message
             async with client.action(event.chat_id, "typing"):  # pyright: ignore
                 await asyncio.sleep(wait)
 
-        await event.respond(current_ai_msg_text)
+        sent = await event.respond(raw_text)
+        if bot_message_id is None:
+            bot_message_id = sent.id
+
+    if bot_message_id is not None:
+        await add_history(
+            chat_id=chat_id, sender=BOT_NAME, content=response, telegram_message_id=bot_message_id
+        )
 
 
 async def wait_before_reply(event, delay: int):
@@ -154,10 +158,6 @@ async def summarise(chat_id: int):
     combine summaries if available with model B
     update summary
     delete initially grabbed history (only at this stage in case convo continues)
-
-    NOTE (carried over from the reference): the items returned by get_history use
-    keys sender/content/message_id, while this loop reads id/input/response. This
-    pre-existing mismatch is preserved verbatim — fix separately if desired.
     """
     print(f"[{chat_id}] Summary initiated")
     summarising_statuses[chat_id] = True
@@ -167,11 +167,9 @@ async def summarise(chat_id: int):
         ids = []
         temp = []
         for item in to_summarise:
-            ids.append(item["id"])
-            for msg in item["input"].split("\n"):
-                temp.append(f"{USER_NAME}: {msg}")
-            for msg in item["response"].split("\n"):
-                temp.append(f"{BOT_NAME}: {msg}")
+            ids.append(item["telegram_message_id"])
+            for msg in item["content"].split("\n"):
+                temp.append(f"{item['sender']}: {msg}")
 
         to_summarise_text = "\n".join(temp)
         new_summary = await summarise_text(to_summarise_text)
@@ -298,7 +296,7 @@ async def new_message(event):
     event_username = sender.username if sender and sender.username else "Unknown"
     current_message_parts[chat_id].append(
         {
-            "message_id": event.message.id,
+            "telegram_message_id": event.message.id,
             "sender_name": event_username,
             "content": event.raw_text,
         }

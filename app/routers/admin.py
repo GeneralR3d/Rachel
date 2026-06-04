@@ -23,7 +23,7 @@ class SystemPromptOut(BaseModel):
 class HistoryItem(BaseModel):
     sender: str
     content: str
-    message_id: int
+    telegram_message_id: int
 
 
 class SummaryOut(BaseModel):

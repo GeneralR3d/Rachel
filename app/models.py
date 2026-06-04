@@ -6,8 +6,11 @@ Original SQLite tables (see Reference/app/db.py):
     History(message_id INTEGER PK AUTOINCREMENT, chat_id INTEGER, sender TEXT, content TEXT)
 """
 
-from sqlalchemy import BigInteger, Identity, Index, Integer, Text
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, Integer, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql import func
 
 
 class Base(DeclarativeBase):
@@ -32,13 +35,11 @@ class Summary(Base):
 class History(Base):
     __tablename__ = "history"
 
-    # Identity column: auto-generated when not supplied, but explicit inserts
-    # (used by add_history / rewrite_history) are still allowed via OVERRIDING.
-    message_id: Mapped[int] = mapped_column(
-        BigInteger, Identity(always=False), primary_key=True
-    )
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Telegram message IDs are unique per chat, so the PK is composite.
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    telegram_message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     sender: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-
-    __table_args__ = (Index("ix_history_chat_id", "chat_id"),)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
