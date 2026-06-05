@@ -4,6 +4,8 @@ These endpoints reuse the same repository functions the Telethon handlers use,
 so the HTTP API and the in-Telegram admin bot stay in sync.
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -88,3 +90,42 @@ async def read_summary(chat_id: int) -> SummaryOut:
 @router.delete("/summary/{chat_id}", status_code=204)
 async def delete_chat_summary(chat_id: int) -> None:
     await repository.delete_summary(chat_id)
+
+
+# --- personality traits --------------------------------------------------
+
+TraitValue = Literal["low", "medium", "high"]
+
+
+class TraitOut(BaseModel):
+    id: int
+    name: str
+    sort_order: int
+    low_prompt: str
+    medium_prompt: str
+    high_prompt: str
+    current_value: TraitValue
+
+
+class TraitPatch(BaseModel):
+    value: TraitValue
+
+
+@router.get("/personality", response_model=list[TraitOut])
+async def list_traits() -> list[TraitOut]:
+    return [TraitOut(**t) for t in await repository.get_traits()]
+
+
+@router.patch("/personality/{trait_id}", response_model=TraitOut)
+async def update_trait(trait_id: int, body: TraitPatch) -> TraitOut:
+    found = await repository.set_trait_value(trait_id, body.value)
+    if not found:
+        raise HTTPException(status_code=404, detail="Trait not found")
+    traits = await repository.get_traits()
+    trait = next((t for t in traits if t["id"] == trait_id), None)
+    return TraitOut(**trait)
+
+
+@router.post("/personality/reset", status_code=204)
+async def reset_traits() -> None:
+    await repository.reset_traits()

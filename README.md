@@ -69,6 +69,11 @@ On startup the app seeds the default system prompt (only if not already present)
 | `DELETE` | `/history/{chat_id}` | Clear a chat's history |
 | `GET` | `/summary/{chat_id}` | Stored summary |
 | `DELETE` | `/summary/{chat_id}` | Delete a chat's summary |
+| `GET` | `/users/names` | All known Telegram users |
+| `GET` | `/list-chats` | All chats with message counts |
+| `GET` | `/personality` | All personality trait sliders with current values |
+| `PATCH` | `/personality/{id}` | Set one trait — body `{"value": "low"\|"medium"\|"high"}` |
+| `POST` | `/personality/reset` | Reset all traits to `medium` |
 
 To set a per-chat scope, you need to use the Bot API directly instead of BotFather. Send a setMyCommands request with the scope field:
 
@@ -83,7 +88,11 @@ To set a per-chat scope, you need to use the Bot API directly instead of BotFath
         {"command": "get_history", "description": "Get message history for a chat"},
         {"command": "clear_history", "description": "Clear message history for a chat"},
         {"command": "get_summary", "description": "Get the conversation summary for a chat"},
-        {"command": "delete_summary", "description": "Delete the conversation summary for a chat"}
+        {"command": "delete_summary", "description": "Delete the conversation summary for a chat"},
+        {"command": "list_user_names", "description": "List all usernames and names"},
+        {"command": "list_traits", "description": "List all personality trait sliders and current values"},
+        {"command": "set_trait", "description": "Set a trait value: /set_trait <id> <low|medium|high>"},
+        {"command": "reset_traits", "description": "Reset all personality traits to medium"}
       ],    
       "scope": {
         "type": "chat",
@@ -104,7 +113,9 @@ Incoming messages are buffered per chat; after a short randomised delay (or once
 |---|---|
 | `system_prompt` | `id`, `system_prompt` (single row) |
 | `summary` | `chat_id` (PK), `summary` |
-| `history` | `message_id` (PK, identity), `chat_id` (indexed), `sender`, `content` |
+| `history` | `chat_id` + `telegram_message_id` (composite PK), `sender_user_id`, `content`, `created_at` |
+| `users` | `telegram_user_id` (PK), `first_name`, `last_name`, `username`, `created_at`, `updated_at` |
+| `personality_traits` | `id` (PK), `name`, `sort_order`, `low_prompt`, `medium_prompt`, `high_prompt`, `current_value` |
 
 ## Migrations
 

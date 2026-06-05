@@ -15,7 +15,10 @@ from app.repository import (
     get_history,
     get_summary,
     get_system_prompt,
+    get_traits,
+    reset_traits,
     set_system_prompt,
+    set_trait_value,
 )
 
 settings = get_settings()
@@ -128,3 +131,38 @@ async def on_delete_summary(event):
     chat_id = int(event.pattern_match.group(2))
     await delete_summary(chat_id)
     await event.reply(f"Summary deleted for chat {chat_id}.")
+
+
+@bot.on(
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/list_traits$")
+)
+async def on_list_traits(event):
+    traits = await get_traits()
+    if not traits:
+        await event.reply("No traits found.")
+        return
+    lines = [f"[{t['id']}] {t['name']}: {t['current_value']}" for t in traits]
+    await event.reply("\n".join(lines))
+
+
+@bot.on(
+    events.NewMessage(
+        incoming=True, from_users=[ADMIN], pattern=r"\/set_trait\s+(\d+)\s+(low|medium|high)$"
+    )
+)
+async def on_set_trait(event):
+    trait_id = int(event.pattern_match.group(1))
+    value = event.pattern_match.group(2)
+    found = await set_trait_value(trait_id, value)
+    if not found:
+        await event.reply(f"No trait with id {trait_id}.")
+    else:
+        await event.reply(f"Trait {trait_id} set to {value}.")
+
+
+@bot.on(
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/reset_traits$")
+)
+async def on_reset_traits(event):
+    await reset_traits()
+    await event.reply("All traits reset to medium.")

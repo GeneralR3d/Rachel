@@ -12,11 +12,80 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import session_scope
-from app.models import History, Summary, SystemPrompt, User
-from app.prompts import SYSTEM_PROMPT
+from app.models import History, PersonalityTrait, Summary, SystemPrompt, User
+from app.prompts import DEFAULT_TRAITS, SYSTEM_PROMPT
 
 # Cached system prompt (mirrors the original module-level global cache).
 _system_prompt: Optional[str] = None
+
+
+async def ensure_traits_seeded() -> None:
+    """Insert default personality traits only if the table is empty."""
+    async with session_scope() as session:
+        existing = await session.scalar(select(PersonalityTrait.id).limit(1))
+        if existing is None:
+            for trait in DEFAULT_TRAITS:
+                session.add(PersonalityTrait(**trait, current_value="medium"))
+
+
+# --- personality traits --------------------------------------------------
+
+
+async def get_traits() -> list[dict]:
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(PersonalityTrait).order_by(PersonalityTrait.sort_order)
+            )
+        ).scalars().all()
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "sort_order": t.sort_order,
+            "low_prompt": t.low_prompt,
+            "medium_prompt": t.medium_prompt,
+            "high_prompt": t.high_prompt,
+            "current_value": t.current_value,
+        }
+        for t in rows
+    ]
+
+
+async def set_trait_value(trait_id: int, value: str) -> bool:
+    """Set current_value for a trait. Returns False if the trait does not exist."""
+    async with session_scope() as session:
+        result = await session.execute(
+            update(PersonalityTrait)
+            .where(PersonalityTrait.id == trait_id)
+            .values(current_value=value)
+        )
+    return result.rowcount > 0
+
+
+async def reset_traits() -> None:
+    """Set all traits back to 'medium'."""
+    async with session_scope() as session:
+        await session.execute(update(PersonalityTrait).values(current_value="medium"))
+
+
+async def get_active_trait_prompts() -> str:
+    """Assemble all active trait prompts into a single block for the system prompt."""
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(
+                    PersonalityTrait.name,
+                    sa.case(
+                        (PersonalityTrait.current_value == "low", PersonalityTrait.low_prompt),
+                        (PersonalityTrait.current_value == "medium", PersonalityTrait.medium_prompt),
+                        (PersonalityTrait.current_value == "high", PersonalityTrait.high_prompt),
+                    ).label("active_prompt"),
+                ).order_by(PersonalityTrait.sort_order)
+            )
+        ).all()
+    lines = [f"- {r.name}: {r.active_prompt}" for r in rows]
+    return "\n".join(lines)
 
 
 async def ensure_system_prompt_seeded() -> None:

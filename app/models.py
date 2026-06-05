@@ -48,6 +48,18 @@ class User(Base):
     )
 
 
+class PersonalityTrait(Base):
+    __tablename__ = "personality_traits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    low_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    medium_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    high_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    current_value: Mapped[str] = mapped_column(Text, nullable=False, default="medium")
+
+
 class History(Base):
     __tablename__ = "history"
 
