@@ -25,7 +25,8 @@ async def ensure_traits_seeded() -> None:
         existing = await session.scalar(select(PersonalityTrait.id).limit(1))
         if existing is None:
             for trait in DEFAULT_TRAITS:
-                session.add(PersonalityTrait(**trait, current_value="medium"))
+                trait_data = {k: v for k, v in trait.items() if k != "default_value"}
+                session.add(PersonalityTrait(**trait_data, current_value=trait.get("default_value", "medium")))
 
 
 # --- personality traits --------------------------------------------------
@@ -64,9 +65,15 @@ async def set_trait_value(trait_id: int, value: str) -> bool:
 
 
 async def reset_traits() -> None:
-    """Set all traits back to 'medium'."""
+    """Set all traits back to their individual default values."""
+    defaults = {t["name"]: t.get("default_value", "medium") for t in DEFAULT_TRAITS}
     async with session_scope() as session:
-        await session.execute(update(PersonalityTrait).values(current_value="medium"))
+        for name, value in defaults.items():
+            await session.execute(
+                update(PersonalityTrait)
+                .where(PersonalityTrait.name == name)
+                .values(current_value=value)
+            )
 
 
 async def get_active_trait_prompts() -> str:
