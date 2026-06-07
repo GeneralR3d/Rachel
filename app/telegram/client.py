@@ -3,7 +3,7 @@
 Ported from Reference/app/client.py. Behaviour is unchanged; the only edits are:
   - the client is built from app.config settings,
   - all (now async) repository calls are awaited,
-  - get_response / summarise_text are awaited (already async),
+  - get_response is awaited (already async),
   - the client is NOT started here — app.main's lifespan owns the lifecycle.
 """
 
@@ -19,16 +19,14 @@ from app.config import get_settings
 from app.repository import (
     add_history_batch,
     clear_history,
-    delete_history,
     delete_summary,
-    get_history,
     get_history_min_id,
     get_summary,
     rewrite_history,
     set_summary,
     upsert_user,
 )
-from app.services.gemini import get_response, summarise_text
+from app.services.gemini import get_response
 from app.utils import parse_history
 
 settings = get_settings()
@@ -41,8 +39,6 @@ CHAT_BLACKOUT_TIME = 60          # seconds of inactivity before flushing buffer 
 N_PAST_MSG_REQUIRED = 20         # messages pre-loaded on first contact and fed to LLM as context
 MAX_BUFFER_LEN = 150             # flush to DB immediately if buffer hits this length
 TYPING_SPEED = 20                # characters per second
-HISTORY_LENGTH_THRESHOLD = 500   # when to initiate summary
-HISTORY_LENGTH_TO_SUMMARISE = 20 # number of histories to take out and summarise
 
 # only used for summarisation
 USER_NAME = settings.user_name
@@ -65,7 +61,6 @@ current_messages_buffer: Dict[int, List[BufferedMessage]] = {}
 wait_tasks: Dict[int, asyncio.Task] = {}
 flush_tasks: Dict[int, asyncio.Task] = {}
 last_message_time: Dict[int, float] = {}
-summarising_statuses: Dict[int, bool] = {}
 
 
 # helper functions
@@ -174,44 +169,6 @@ async def flush_all_buffers() -> None:
         except Exception as e:
             print(f"[{chat_id}] Error flushing buffer on shutdown: {e}")
 
-
-async def summarise(chat_id: int):
-    """
-    grab first X pieces of history
-    summarise using model A
-    get previous summary if available
-    combine summaries if available with model B
-    update summary
-    delete initially grabbed history (only at this stage in case convo continues)
-    """
-    print(f"[{chat_id}] Summary initiated")
-    summarising_statuses[chat_id] = True
-
-    try:
-        to_summarise = await get_history(chat_id, HISTORY_LENGTH_TO_SUMMARISE)
-        ids = []
-        temp = []
-        for item in to_summarise:
-            ids.append(item["telegram_message_id"])
-            for msg in item["content"].split("\n"):
-                temp.append(f"{item['sender']}: {msg}")
-
-        to_summarise_text = "\n".join(temp)
-        new_summary = await summarise_text(to_summarise_text)
-
-        current_summary = await get_summary(chat_id)
-        if current_summary is not None:
-            new_summary = await summarise_text(f"{current_summary}\n{new_summary}")
-
-        await set_summary(chat_id, new_summary)
-        await delete_history(chat_id, ids)
-
-        print(f"[{chat_id}] new summary generated: {new_summary}")
-
-    except Exception as e:
-        raise e
-    finally:
-        summarising_statuses[chat_id] = False
 
 
 # event handlers

@@ -174,7 +174,3 @@ async def get_response(
 
     new_summary = result["current_summary"] if result["current_summary"] != current_summary else None
     return result["response_text"], new_summary, time.time() - start
-
-
-async def summarise_text(text: str) -> str:
-    return "Summarised text"
