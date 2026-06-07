@@ -53,7 +53,7 @@ Mood detected by `summarizer_node` is stored in the module-level `_chat_mood: Di
 
 `get_response()` returns `(response_text, new_summary | None, elapsed_seconds)`. `new_summary` is `None` when the summarizer returned NIL (no DB write needed).
 
-**Prompt template injection**: Both system prompts contain `{variable}` placeholders filled by `ChatPromptTemplate.format_messages()` at call time. Variables: `RESPONDER_SYSTEM_PROMPT` uses `{examples_text}` and `{current_summary}`; `SUMMARIZER_SYSTEM_PROMPT` uses `{mood_list}` and `{old_summary}`. History messages are formatted as `"SenderName: content"` for `human` turns; Rachel's own messages use just the content under the `assistant` role.
+**Prompt template injection**: Both system prompts contain `{variable}` placeholders filled by `ChatPromptTemplate.format_messages()` at call time. Variables: `RESPONDER_SYSTEM_PROMPT` uses `{examples_text}`, `{current_summary}`, and `{personality_traits}`; `SUMMARIZER_SYSTEM_PROMPT` uses `{mood_list}` and `{old_summary}`. History messages are formatted as `"SenderName: content"` for `human` turns; Rachel's own messages use just the content under the `assistant` role.
 
 **Mood / tone system** (`app/prompts.py`): `CONVERSATION_TONE_TEMPLATES` is a dict keyed by mood name (e.g. `"default"`, `"excited"`, `"sad"`, `"flirt"`). Each value is a list of `{input, response}` example pairs that are formatted into `{examples_text}` to steer Rachel's tone. `MOOD_LABELS = list(CONVERSATION_TONE_TEMPLATES)` is the single source of truth for valid mood values — the summarizer's structured-output schema is built from it dynamically.
 
@@ -61,7 +61,7 @@ Mood detected by `summarizer_node` is stored in the module-level `_chat_mood: Di
 
 **Data layer** (`app/repository.py`): all DB functions, each opening its own session via `session_scope`. Both system prompts are cached in module-level globals (`_responder_system_prompt`, `_summarizer_system_prompt`) — setters update both cache and Postgres. `get_history()` joins `History` with `User` to resolve `sender_user_id` into a display name (`username` → `first_name` → stringified ID).
 
-**Personality traits**: stored in `personality_traits`. Each row has `low_prompt`/`medium_prompt`/`high_prompt` and `current_value`. Defaults are in `DEFAULT_TRAITS` in `app/prompts.py` and seeded on startup. `get_active_trait_prompts()` assembles the active prompt block injected into the responder system prompt.
+**Personality traits**: stored in `personality_traits`. Each row has `low_prompt`/`medium_prompt`/`high_prompt` and `current_value`. Defaults are in `DEFAULT_TRAITS` in `app/prompts.py` and seeded on startup. `get_active_trait_prompts()` assembles the active prompt block (one `- Name: active_prompt` line per trait, ordered by `sort_order`) and is injected into `responder_node` as `{personality_traits}`. Its result is cached in module globals (`_active_trait_prompts_cache`/`_active_trait_prompts_cache_time`) for `TRAIT_CACHE_TTL = 5 min` since it's read on every message; `set_trait_value`/`reset_traits` call `_invalidate_trait_prompt_cache()` so admin edits take effect immediately rather than waiting out the TTL.
 
 **Config** (`app/config.py`): pydantic-settings with `@lru_cache`. `DATABASE_URL` must use `localhost:5433` locally (Docker port-mapped) and `db:5432` inside Docker.
 
