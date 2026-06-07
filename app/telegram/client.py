@@ -36,9 +36,10 @@ settings = get_settings()
 client = TelegramClient("anon", settings.telegram_api_id, settings.telegram_api_hash)
 
 # constants
-REPLY_DELAY = 3                  # seconds to wait after last message before replying
+REPLY_DELAY = 5              # seconds to wait after last message before replying
 CHAT_BLACKOUT_TIME = 60          # seconds of inactivity before flushing buffer to DB
 N_PAST_MSG_REQUIRED = 20         # messages pre-loaded on first contact and fed to LLM as context
+MAX_BUFFER_LEN = 150             # flush to DB immediately if buffer hits this length
 TYPING_SPEED = 20                # characters per second
 HISTORY_LENGTH_THRESHOLD = 500   # when to initiate summary
 HISTORY_LENGTH_TO_SUMMARISE = 20 # number of histories to take out and summarise
@@ -117,6 +118,12 @@ async def reply(event):
             )
         )
 
+    if len(current_messages_buffer.get(chat_id, [])) >= MAX_BUFFER_LEN:
+        print(f"[{chat_id}] Buffer hit MAX_BUFFER_LEN ({MAX_BUFFER_LEN}), flushing immediately")
+        if chat_id in flush_tasks and not flush_tasks[chat_id].done():
+            flush_tasks[chat_id].cancel()
+        flush_tasks[chat_id] = asyncio.create_task(_flush_chat(chat_id))
+
 
 async def wait_before_reply(event, delay: int):
     """Wait ``delay`` seconds, then reply (awaited so it completes in-task)."""
@@ -136,6 +143,8 @@ async def _flush_chat(chat_id: int) -> None:
             telegram_message_ids=[m.telegram_message_id for m in to_persist],
         )
         print(f"[{chat_id}] Flushed {len(to_persist)} messages to DB")
+
+    #TODO: fix this gap. Any messages that arrive between these will be lost.    
 
     current_messages_buffer.pop(chat_id, None)
     last_message_time.pop(chat_id, None)
