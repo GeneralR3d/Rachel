@@ -77,6 +77,10 @@ async def reply(event):
     buffer = current_messages_buffer[chat_id]
     me = await client.get_me()
 
+    if not client.is_connected():
+        print(f"[{chat_id}] Client disconnected — skipping reply")
+        return
+
     async with client.action(event.chat_id, "typing"):  # pyright: ignore
         current_summary = await get_summary(chat_id)
         context = [m.to_llm_dict() for m in buffer[-N_PAST_MSG_REQUIRED:]]
@@ -126,8 +130,16 @@ async def reply(event):
 
 async def wait_before_reply(event, delay: int):
     """Wait ``delay`` seconds, then reply (awaited so it completes in-task)."""
-    await asyncio.sleep(delay)
-    await reply(event)
+    try:
+        await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        return  # New message arrived during wait — correct, abort
+    # Past the delay: committed to replying. Shield the LLM call from external
+    # cancellation so a racing new message doesn't kill an in-flight response.
+    try:
+        await asyncio.shield(reply(event))
+    except asyncio.CancelledError:
+        pass  # Outer task was cancelled but reply() continues shielded
 
 
 async def _flush_chat(chat_id: int) -> None:

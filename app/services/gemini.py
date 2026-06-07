@@ -22,7 +22,7 @@ from typing_extensions import TypedDict
 
 from app.config import get_settings
 from app.prompts import CONVERSATION_TONE_TEMPLATES
-from app.repository import get_responder_system_prompt, get_summarizer_system_prompt
+from app.repository import get_active_trait_prompts, get_responder_system_prompt, get_summarizer_system_prompt
 
 settings = get_settings()
 BOT_NAME = settings.bot_name
@@ -106,6 +106,7 @@ async def responder_node(state: GraphState) -> Dict:
     )
 
     system_prompt_str = await get_responder_system_prompt()
+    personality_traits = await get_active_trait_prompts()
 
     history_msgs = [
         (
@@ -119,6 +120,7 @@ async def responder_node(state: GraphState) -> Dict:
     msgs = prompt.format_messages(
         examples_text=examples_text,
         current_summary=state.get("current_summary") or "",
+        personality_traits=personality_traits,
     )
 
 

@@ -5,6 +5,7 @@ HTTP routes change as little as possible. Each function opens its own session
 (mirroring the original "connect per call" style) via ``session_scope``.
 """
 
+import time
 from typing import Optional, Union
 
 import sqlalchemy as sa
@@ -18,6 +19,11 @@ from app.prompts import DEFAULT_TRAITS, SUMMARIZER_SYSTEM_PROMPT, RESPONDER_SYST
 # Cached system prompts (mirrors the original module-level global cache).
 _responder_system_prompt: Optional[str] = None
 _summarizer_system_prompt: Optional[str] = None
+
+# Cached active trait prompt block, refreshed at most every TRAIT_CACHE_TTL seconds.
+TRAIT_CACHE_TTL = 5 * 60    # 5 min
+_active_trait_prompts_cache: Optional[str] = None
+_active_trait_prompts_cache_time: float = 0.0
 
 
 async def ensure_traits_seeded() -> None:
@@ -54,6 +60,12 @@ async def get_traits() -> list[dict]:
     ]
 
 
+def _invalidate_trait_prompt_cache() -> None:
+    global _active_trait_prompts_cache, _active_trait_prompts_cache_time
+    _active_trait_prompts_cache = None
+    _active_trait_prompts_cache_time = 0.0
+
+
 async def set_trait_value(trait_id: int, value: str) -> bool:
     """Set current_value for a trait. Returns False if the trait does not exist."""
     async with session_scope() as session:
@@ -62,6 +74,8 @@ async def set_trait_value(trait_id: int, value: str) -> bool:
             .where(PersonalityTrait.id == trait_id)
             .values(current_value=value)
         )
+    if result.rowcount > 0:
+        _invalidate_trait_prompt_cache()
     return result.rowcount > 0
 
 
@@ -75,10 +89,20 @@ async def reset_traits() -> None:
                 .where(PersonalityTrait.name == name)
                 .values(current_value=value)
             )
+    _invalidate_trait_prompt_cache()
 
 
 async def get_active_trait_prompts() -> str:
-    """Assemble all active trait prompts into a single block for the system prompt."""
+    """Assemble all active trait prompts into a single block for the system prompt.
+
+    Cached for TRAIT_CACHE_TTL seconds since this is read on every message.
+    """
+    global _active_trait_prompts_cache, _active_trait_prompts_cache_time
+
+    now = time.monotonic()
+    if _active_trait_prompts_cache is not None and (now - _active_trait_prompts_cache_time) < TRAIT_CACHE_TTL:
+        return _active_trait_prompts_cache
+
     async with session_scope() as session:
         rows = (
             await session.execute(
@@ -93,7 +117,9 @@ async def get_active_trait_prompts() -> str:
             )
         ).all()
     lines = [f"- {r.name}: {r.active_prompt}" for r in rows]
-    return "\n".join(lines)
+    _active_trait_prompts_cache = "\n".join(lines)
+    _active_trait_prompts_cache_time = now
+    return _active_trait_prompts_cache
 
 
 async def ensure_system_prompts_seeded() -> None:
