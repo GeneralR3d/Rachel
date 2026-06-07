@@ -59,6 +59,7 @@ class BufferedMessage(BaseModel):
 
 # state
 current_messages_buffer: Dict[int, List[BufferedMessage]] = {}
+pending_summaries: Dict[int, str] = {}
 wait_tasks: Dict[int, asyncio.Task] = {}
 flush_tasks: Dict[int, asyncio.Task] = {}
 last_message_time: Dict[int, float] = {}
@@ -82,7 +83,7 @@ async def reply(event):
         return
 
     async with client.action(event.chat_id, "typing"):  # pyright: ignore
-        current_summary = await get_summary(chat_id)
+        current_summary = pending_summaries.get(chat_id) or await get_summary(chat_id)
         context = [m.to_llm_dict() for m in buffer[-N_PAST_MSG_REQUIRED:]]
 
         response, new_summary, load_time = await get_response(
@@ -92,8 +93,8 @@ async def reply(event):
         )
 
         if new_summary is not None:
-            await set_summary(chat_id, new_summary)
-            print(f"[{chat_id}] Summary updated: {new_summary}")
+            pending_summaries[chat_id] = new_summary
+            print(f"[{chat_id}] Summary buffered (pending flush): {new_summary}")
         print(f"[{chat_id}] Current summary: {current_summary}")
         print(f"[{chat_id}] Context ({len(context)} messages):")
         pprint(context)
@@ -155,7 +156,11 @@ async def _flush_chat(chat_id: int) -> None:
         )
         print(f"[{chat_id}] Flushed {len(to_persist)} messages to DB")
 
-    #TODO: fix this gap. Any messages that arrive between these will be lost.    
+    if chat_id in pending_summaries:
+        await set_summary(chat_id, pending_summaries.pop(chat_id))
+        print(f"[{chat_id}] Flushed summary to DB")
+
+    #TODO: fix this gap. Any messages that arrive between these will be lost.
 
     current_messages_buffer.pop(chat_id, None)
     last_message_time.pop(chat_id, None)
@@ -208,7 +213,7 @@ async def on_clear_history(event):
     await clear_history(chat_id)
     await delete_summary(chat_id)
 
-    for state in (current_messages_buffer, last_message_time, wait_tasks, flush_tasks):
+    for state in (current_messages_buffer, pending_summaries, last_message_time, wait_tasks, flush_tasks):
         state.pop(chat_id, None)
 
     await event.respond("History cleared.")
