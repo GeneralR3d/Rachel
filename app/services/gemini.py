@@ -12,16 +12,17 @@ responder_node:  generates Rachel's reply using the mood detected in the
 """
 
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_openrouter import ChatOpenRouter
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
 from app.config import get_settings
-from app.prompts import CONVERSATION_TONE_TEMPLATES, SUMMARIZER_SYSTEM_PROMPT
-from app.repository import get_responder_system_prompt
+from app.prompts import CONVERSATION_TONE_TEMPLATES
+from app.repository import get_responder_system_prompt, get_summarizer_system_prompt
 
 settings = get_settings()
 BOT_NAME = settings.bot_name
@@ -35,7 +36,11 @@ DEFAULT_MOOD = "default"
 MOOD_LABELS = list(CONVERSATION_TONE_TEMPLATES)
 
 
-class MoodOutput(BaseModel):
+class SummarizerOutput(BaseModel):
+    summary: str = Field(
+        ...,
+        description="New 100-word summary of the conversation, or the literal string 'NIL' if the old summary is still sufficient.",
+    )
     mood: str = Field(
         ...,
         description="The detected conversational mood.",
@@ -51,7 +56,6 @@ class ResponseOutput(BaseModel):
 class GraphState(TypedDict):
     history: List[Dict[str, Any]]
     current_summary: str | None
-    responser_system_prompt: str
     mood: str
     response_text: str
 
@@ -60,7 +64,7 @@ _summarizer_llm = ChatOpenRouter(
     model=settings.openrouter_model,
     api_key=settings.openrouter_api_key,
     temperature=0.0,
-).with_structured_output(MoodOutput)
+).with_structured_output(SummarizerOutput)
 
 _responder_llm = ChatOpenRouter(
     model=settings.openrouter_model,
@@ -70,18 +74,26 @@ _responder_llm = ChatOpenRouter(
 
 
 async def summarizer_node(state: GraphState) -> Dict:
-    msgs: List[tuple] = [("system", SUMMARIZER_SYSTEM_PROMPT)]
+    history_msgs = [
+        (
+            "assistant" if entry["sender"] == BOT_NAME else "human",
+            f"{entry['sender']}: {entry['content']}",
+        )
+        for entry in state["history"]
+    ]
 
-    if state.get("current_summary"):
-        msgs.append(("human", f"Previous context: {state['current_summary']}"))
+    system_prompt_str = await get_summarizer_system_prompt()
 
-    # Use history since current_messages is always empty in practice
-    for entry in state["history"]:
-        msgs.append(("human", f"{entry['sender']}: {entry['content']}"))
+    prompt = ChatPromptTemplate.from_messages([("system", system_prompt_str), *history_msgs])
+    msgs = prompt.format_messages(
+        mood_list = MOOD_LABELS,
+        old_summary=state.get("current_summary") or "")
 
-    result: MoodOutput = await _summarizer_llm.ainvoke(msgs)
-    print(f"Detected mood: {result.mood}")
-    return {"mood": result.mood}
+    result: SummarizerOutput = await _summarizer_llm.ainvoke(msgs)
+    print(f"Detected mood: {result.mood} | Summary: {result.summary}")
+    if result.summary.strip().upper() == "NIL":
+        return {"mood": result.mood}
+    return {"mood": result.mood, "current_summary": result.summary}
 
 
 async def responder_node(state: GraphState) -> Dict:
@@ -93,19 +105,21 @@ async def responder_node(state: GraphState) -> Dict:
         for ex in tone_examples
     )
 
-    responser_system_prompt = (await get_responder_system_prompt()).replace(
-        "<Communication Examples>\n</Communication Examples>",
-        f"<Communication Examples>\n{examples_text}\n</Communication Examples>",
+    system_prompt_str = await get_responder_system_prompt()
+
+    history_msgs = [
+        (
+            "assistant" if entry["sender"] == BOT_NAME else "human",
+            f"{entry['sender']}: {entry['content']}",
+        )
+        for entry in state["history"]
+    ]
+
+    prompt = ChatPromptTemplate.from_messages([("system", system_prompt_str), *history_msgs])
+    msgs = prompt.format_messages(
+        examples_text=examples_text,
+        current_summary=state.get("current_summary") or "",
     )
-
-    if state.get("current_summary"):
-        responser_system_prompt += "\n\n" + state["current_summary"]
-
-    msgs: List[tuple] = [("system", responser_system_prompt)]
-
-    for entry in state["history"]:
-        role = "assistant" if entry["sender"] == BOT_NAME else "human"
-        msgs.append((role, str({"sender": entry["sender"], "content": entry["content"]})))
 
 
     print(f"Responder mood: {mood} | history length: {len(state['history'])}")
@@ -133,7 +147,7 @@ async def get_response(
     history: List[Dict[str, str]],
     current_summary: str | None = None,
     chat_id: int | None = None,
-) -> Tuple[str, float]:
+) -> Tuple[str, str | None, float]:
     """Run the LangGraph pipeline and return ``(response_text, elapsed_seconds)``.
 
     summarizer_node and responder_node run in parallel.  The mood detected this
@@ -158,7 +172,8 @@ async def get_response(
         _chat_mood[chat_id] = result["mood"]
         print(f"[{chat_id}] Stored mood for next call: {result['mood']}")
 
-    return result["response_text"], time.time() - start
+    new_summary = result["current_summary"] if result["current_summary"] != current_summary else None
+    return result["response_text"], new_summary, time.time() - start
 
 
 async def summarise_text(text: str) -> str:
