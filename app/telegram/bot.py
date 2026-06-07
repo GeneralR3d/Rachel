@@ -32,7 +32,10 @@ ADMIN = settings.admin_id
     events.NewMessage(incoming=True, from_users=[ADMIN], pattern="\\/get_system_prompt")
 )
 async def on_get_system_prompt(event):
-    await event.reply(await get_system_prompt())
+    prompt = await get_system_prompt()
+    chunk_size = 4000
+    for i in range(0, len(prompt), chunk_size):
+        await event.reply(prompt[i : i + chunk_size])
 
 
 @bot.on(

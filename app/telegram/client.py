@@ -8,21 +8,20 @@ Ported from Reference/app/client.py. Behaviour is unchanged; the only edits are:
 """
 
 import asyncio
-import random
+import time
 from pprint import pprint
 from typing import Dict, List
 
+from pydantic import BaseModel
 from telethon import TelegramClient, events
 
 from app.config import get_settings
 from app.repository import (
-    add_history,
     add_history_batch,
     clear_history,
     delete_history,
     delete_summary,
     get_history,
-    get_history_length,
     get_history_min_id,
     get_summary,
     rewrite_history,
@@ -37,23 +36,35 @@ settings = get_settings()
 client = TelegramClient("anon", settings.telegram_api_id, settings.telegram_api_hash)
 
 # constants
-MAX_OFFLINE_TIME = 10  # seconds
-TYPING_SPEED = 20  # characters per second
-HISTORY_LENGTH_THRESHOLD = 500  # when to initiate summary
-HISTORY_LENGTH_TO_SUMMARISE = 20  # number of histories to take out and summarise
-INPUT_BUFFER_SIZE = 15
+REPLY_DELAY = 3                  # seconds to wait after last message before replying
+CHAT_BLACKOUT_TIME = 60          # seconds of inactivity before flushing buffer to DB
+N_PAST_MSG_REQUIRED = 20         # messages pre-loaded on first contact and fed to LLM as context
+TYPING_SPEED = 20                # characters per second
+HISTORY_LENGTH_THRESHOLD = 500   # when to initiate summary
+HISTORY_LENGTH_TO_SUMMARISE = 20 # number of histories to take out and summarise
 
 # only used for summarisation
 USER_NAME = settings.user_name
 BOT_NAME = settings.bot_name
 
+
+class BufferedMessage(BaseModel):
+    telegram_message_id: int
+    sender_user_id: int
+    sender_name: str
+    content: str
+    is_persisted: bool = False
+
+    def to_llm_dict(self) -> Dict[str, str]:
+        return {"sender": self.sender_name, "content": self.content}
+
+
 # state
-current_message_ids: dict = {}
-current_message_parts: dict = {}
-wait_tasks: dict = {}
-cancel_tasks: dict = {}
-client_typing_statuses: dict = {}
-summarising_statuses: dict = {}
+current_messages_buffer: Dict[int, List[BufferedMessage]] = {}
+wait_tasks: Dict[int, asyncio.Task] = {}
+flush_tasks: Dict[int, asyncio.Task] = {}
+last_message_time: Dict[int, float] = {}
+summarising_statuses: Dict[int, bool] = {}
 
 
 # helper functions
@@ -61,80 +72,49 @@ summarising_statuses: dict = {}
 
 async def reply(event):
     """
-    retrieve and clear message parts
-    initiate api call
-    send reply on tg
-    check if history is too long, if so, initiate summary task
+    Feed the most recent N_PAST_MSG_REQUIRED messages from the buffer as context,
+    call the LLM, send the reply, and append the bot response back into the buffer.
+    Persistence is handled by flush_buffer().
     """
     chat_id = event.chat_id
-
-    global current_message_parts
-    if chat_id not in current_message_parts or len(current_message_parts[chat_id]) == 0:
-        print(f"[{chat_id}] No messages to reply to, exiting")
-        return
-
-    current_messages: List[Dict] = [
-        {
-            "sender": part["sender_name"],
-            "sender_user_id": part["sender_user_id"],
-            "content": part["content"],
-            "telegram_message_id": part["telegram_message_id"],
-        }
-        for part in current_message_parts[chat_id]
-    ]
-    current_message_parts[chat_id].clear()
-
+    buffer = current_messages_buffer[chat_id]
     me = await client.get_me()
 
     async with client.action(event.chat_id, "typing"):  # pyright: ignore
-        # a few "human-like" message-response pairs to set the tone of the
-        # conversation are appended to the start of the history
-        history_and_template: List[Dict[str, str]] = [
-            # *CONVERSATION_TONE_TEMPLATES["default"],
-            *(await get_history(chat_id)),
-        ]
         current_summary = await get_summary(chat_id)
+        context = [m.to_llm_dict() for m in buffer[-N_PAST_MSG_REQUIRED:]]
 
         response, load_time = await get_response(
-            current_messages, history_and_template, current_summary
-        )  # pyright: ignore
-
-        await add_history_batch(
-            chat_ids=[chat_id] * len(current_messages),
-            sender_user_ids=[msg["sender_user_id"] for msg in current_messages],
-            contents=[msg["content"] for msg in current_messages],
-            telegram_message_ids=[msg["telegram_message_id"] for msg in current_messages],
+            current_messages=[],
+            history=context,
+            current_summary=current_summary,
         )
 
         print(f"[{chat_id}] Current summary: {current_summary}")
-        print(f"[{chat_id}] Current history (without prompts) is: ")
-        pprint(history_and_template)
-
-    # check if summarising is necessary, if so initiate it
-    history_len = await get_history_length(chat_id)
-    print(f"[{chat_id}] History length is {history_len} ")
-    if history_len > HISTORY_LENGTH_THRESHOLD:
-        print(f"[{chat_id}] History length is too long, initiating summarisation")
-        if not (chat_id in summarising_statuses and summarising_statuses[chat_id]):
-            asyncio.create_task(summarise(chat_id))
+        print(f"[{chat_id}] Context ({len(context)} messages):")
+        pprint(context)
 
     bot_message_id = None
     for i, raw_text in enumerate(response.split("\n\n")):
-        if raw_text == "":  # speechless
+        if raw_text == "":
             continue
-
         wait = len(raw_text) / TYPING_SPEED
-        if i != 0:  # dont need to wait before sending first message
+        if i != 0: #dont need to wait before sending very first msg
             async with client.action(event.chat_id, "typing"):  # pyright: ignore
                 await asyncio.sleep(wait)
-
         sent = await event.respond(raw_text)
         if bot_message_id is None:
             bot_message_id = sent.id
 
     if bot_message_id is not None:
-        await add_history(
-            chat_id=chat_id, sender_user_id=me.id, content=response, telegram_message_id=bot_message_id
+        current_messages_buffer[chat_id].append(
+            BufferedMessage(
+                telegram_message_id=bot_message_id,
+                sender_user_id=me.id,
+                sender_name=BOT_NAME,
+                content=response,
+                is_persisted=False,
+            )
         )
 
 
@@ -144,14 +124,26 @@ async def wait_before_reply(event, delay: int):
     await reply(event)
 
 
-async def stop_typing(chat_id):
-    """Background task to set the tracked user typing status back to False."""
-    await asyncio.sleep(6)  # typing status lasts for 6s, cancel after 6s
+async def flush_buffer(chat_id: int, delay: float):
+    """After ``delay`` seconds of inactivity, persist unpersisted buffer messages to DB."""
+    await asyncio.sleep(delay)
 
-    global client_typing_statuses
-    client_typing_statuses[chat_id] = False
+    if chat_id not in current_messages_buffer:
+        return
 
-    print(f"[{chat_id}] typing=False (timeout)")
+    to_persist = [m for m in current_messages_buffer[chat_id] if not m.is_persisted]
+
+    if to_persist:
+        await add_history_batch(
+            chat_ids=[chat_id] * len(to_persist),
+            sender_user_ids=[m.sender_user_id for m in to_persist],
+            contents=[m.content for m in to_persist],
+            telegram_message_ids=[m.telegram_message_id for m in to_persist],
+        )
+        print(f"[{chat_id}] Flushed {len(to_persist)} messages to DB")
+
+    del current_messages_buffer[chat_id]
+    last_message_time.pop(chat_id, None)
 
 
 async def summarise(chat_id: int):
@@ -196,24 +188,6 @@ async def summarise(chat_id: int):
 # event handlers
 
 
-@client.on(events.UserUpdate())
-async def user_update(event):
-    """Track the user's typing status; reset it after 6s of no typing events."""
-    print(f"[{event.chat_id}] user update received")
-    if not event.typing:
-        return
-
-    global client_typing_statuses
-    client_typing_statuses[event.chat_id] = True
-
-    print(f"[{event.chat_id}] typing=True (event handler)")
-
-    global cancel_tasks
-    if event.chat_id in cancel_tasks and cancel_tasks[event.chat_id]:
-        cancel_tasks[event.chat_id].cancel()
-    cancel_tasks[event.chat_id] = asyncio.create_task(stop_typing(event.chat_id))
-
-
 @client.on(events.NewMessage(pattern="\\/clear_history"))
 async def on_clear_history(event):
     print(f"[{event.chat_id}] clear history command received")
@@ -222,18 +196,18 @@ async def on_clear_history(event):
         await event.respond("I can't clear history in groups yet.")
         return  # ignore group messages
 
-    global wait_tasks  # cancel any pending messages
-    if event.chat_id in wait_tasks and wait_tasks[event.chat_id]:
-        wait_tasks[event.chat_id].cancel()
+    chat_id = event.chat_id
 
-    await clear_history(event.chat_id)
-    await delete_summary(event.chat_id)
+    if chat_id in wait_tasks and wait_tasks[chat_id]:
+        wait_tasks[chat_id].cancel()
+    if chat_id in flush_tasks and flush_tasks[chat_id]:
+        flush_tasks[chat_id].cancel()
 
-    global current_message_ids, current_message_parts
-    if event.chat_id in current_message_ids:
-        del current_message_ids[event.chat_id]
-    if event.chat_id in current_message_parts:
-        del current_message_parts[event.chat_id]
+    await clear_history(chat_id)
+    await delete_summary(chat_id)
+
+    for state in (current_messages_buffer, last_message_time, wait_tasks, flush_tasks):
+        state.pop(chat_id, None)
 
     await event.respond("History cleared.")
     raise events.StopPropagation
@@ -273,26 +247,24 @@ async def on_update_history(event):
 
 @client.on(events.NewMessage(incoming=True))
 async def new_message(event):
-    """
-    handle new tg message
-    set client_typing status
-    cancel current reply if have
-    """
-    print(f"[{event.chat_id}] new message received")
+    """Handle new incoming message: populate buffer cache if needed, then schedule a reply."""
     chat_id = event.chat_id
+    print(f"[{chat_id}] new message received")
 
-    # message received, cancel typing task and immediately set typing False
-    global cancel_tasks
-    if chat_id in cancel_tasks and cancel_tasks[chat_id]:
-        cancel_tasks[chat_id].cancel()
-
-    global client_typing_statuses
-    client_typing_statuses[chat_id] = False
-    print(f"[{chat_id}] typing=False (message received)")
-
-    global current_message_parts
-    if chat_id not in current_message_parts:
-        current_message_parts[chat_id] = []
+    # On first contact for this chat, pre-load recent history into the buffer
+    if chat_id not in current_messages_buffer:
+        current_messages_buffer[chat_id] = []
+        past = await get_history(chat_id, N_PAST_MSG_REQUIRED)
+        for h in past:
+            current_messages_buffer[chat_id].append(
+                BufferedMessage(
+                    telegram_message_id=h["telegram_message_id"],
+                    sender_user_id=h["sender_user_id"],
+                    sender_name=h["sender"],
+                    content=h["content"],
+                    is_persisted=True,
+                )
+            )
 
     sender = await event.get_sender()
     event_username = sender.username if sender and sender.username else "Unknown"
@@ -305,29 +277,28 @@ async def new_message(event):
             username=getattr(sender, "username", None),
         )
 
-    current_message_parts[chat_id].append(
-        {
-            "telegram_message_id": event.message.id,
-            "sender_user_id": sender.id if sender else 0,
-            "sender_name": event_username,
-            "content": event.raw_text,
-        }
+    current_messages_buffer[chat_id].append(
+        BufferedMessage(
+            telegram_message_id=event.message.id,
+            sender_user_id=sender.id if sender else 0,
+            sender_name=event_username,
+            content=event.raw_text,
+            is_persisted=False,
+        )
     )
-    print(
-        f"[{chat_id}] current_message_parts length: "
-        f"{len(current_message_parts[chat_id])}"
-    )
+    print(f"[{chat_id}] buffer length: {len(current_messages_buffer[chat_id])}")
 
-    global wait_tasks
-    if chat_id not in wait_tasks or wait_tasks[chat_id].done():
-        # No wait task (or the existing one is done): start one with a random delay
-        delay = random.randint(1, MAX_OFFLINE_TIME)
-        wait_tasks[chat_id] = asyncio.create_task(wait_before_reply(event, delay))
+    last_message_time[chat_id] = time.time()
 
-    # Buffer threshold reached: reply immediately
-    if len(current_message_parts[chat_id]) >= INPUT_BUFFER_SIZE:
+    # Always reset the reply timer: respond 3 s after the last message
+    if chat_id in wait_tasks and not wait_tasks[chat_id].done():
         wait_tasks[chat_id].cancel()
-        wait_tasks[chat_id] = asyncio.create_task(wait_before_reply(event, 0))
+    wait_tasks[chat_id] = asyncio.create_task(wait_before_reply(event, REPLY_DELAY))
+
+    # Always reset the flush timer: persist buffer 60 s after the last message
+    if chat_id in flush_tasks and not flush_tasks[chat_id].done():
+        flush_tasks[chat_id].cancel()
+    flush_tasks[chat_id] = asyncio.create_task(flush_buffer(chat_id, CHAT_BLACKOUT_TIME))
 
 
 @client.on(events.ChatAction)
