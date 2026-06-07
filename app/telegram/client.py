@@ -124,14 +124,9 @@ async def wait_before_reply(event, delay: int):
     await reply(event)
 
 
-async def flush_buffer(chat_id: int, delay: float):
-    """After ``delay`` seconds of inactivity, persist unpersisted buffer messages to DB."""
-    await asyncio.sleep(delay)
-
-    if chat_id not in current_messages_buffer:
-        return
-
-    to_persist = [m for m in current_messages_buffer[chat_id] if not m.is_persisted]
+async def _flush_chat(chat_id: int) -> None:
+    """Persist all unpersisted buffer messages for one chat and clear its entry."""
+    to_persist = [m for m in current_messages_buffer.get(chat_id, []) if not m.is_persisted]
 
     if to_persist:
         await add_history_batch(
@@ -142,8 +137,33 @@ async def flush_buffer(chat_id: int, delay: float):
         )
         print(f"[{chat_id}] Flushed {len(to_persist)} messages to DB")
 
-    del current_messages_buffer[chat_id]
+    current_messages_buffer.pop(chat_id, None)
     last_message_time.pop(chat_id, None)
+
+
+async def flush_buffer(chat_id: int, delay: float):
+    """After ``delay`` seconds of inactivity, persist unpersisted buffer messages to DB."""
+    await asyncio.sleep(delay)
+    await _flush_chat(chat_id)
+
+
+async def flush_all_buffers() -> None:
+    """Cancel all pending tasks and flush every chat's buffer to DB.
+
+    Called on graceful shutdown (SIGTERM / lifespan teardown) so in-memory
+    messages are not lost when the process exits.
+    """
+    for task in list(wait_tasks.values()) + list(flush_tasks.values()):
+        task.cancel()
+    wait_tasks.clear()
+    flush_tasks.clear()
+
+    chat_ids = list(current_messages_buffer.keys())
+    for chat_id in chat_ids:
+        try:
+            await _flush_chat(chat_id)
+        except Exception as e:
+            print(f"[{chat_id}] Error flushing buffer on shutdown: {e}")
 
 
 async def summarise(chat_id: int):

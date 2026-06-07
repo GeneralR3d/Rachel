@@ -15,7 +15,7 @@ from app.database import dispose_engine
 from app.repository import ensure_system_prompt_seeded, ensure_traits_seeded
 from app.routers import admin
 from app.telegram.bot import bot
-from app.telegram.client import client
+from app.telegram.client import client, flush_all_buffers
 
 logger = logging.getLogger("rachel")
 settings = get_settings()
@@ -38,6 +38,8 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         # shutdown
+        logger.info("Flushing message buffers...")
+        await flush_all_buffers()
         logger.info("Disconnecting Telethon clients...")
         await client.disconnect()
         await bot.disconnect()
