@@ -28,6 +28,7 @@ from app.repository import (
     upsert_user,
 )
 from app.services.gemini import get_response
+from app.telegram.bot import ADMIN
 from app.utils import parse_history
 
 settings = get_settings()
@@ -255,6 +256,8 @@ async def on_update_history(event):
 @client.on(events.NewMessage(incoming=True))
 async def new_message(event):
     """Handle new incoming message: populate buffer cache if needed, then schedule a reply."""
+    if event.raw_text.startswith("/") and event.sender_id == ADMIN:
+        return  # slash commands are handled by dedicated handlers; don't feed them to the LLM
     chat_id = event.chat_id
     print(f"[{chat_id}] new message received")
 
