@@ -7,7 +7,7 @@ This is a **FastAPI** re-platform of the original Telethon/SQLite bot: both Tele
 ## Architecture
 
 - **Rachel client** (`app/telegram/client.py`) — the bot your friends talk to. Buffers incoming messages, waits a randomised delay, calls Gemini, and replies with fake typing delays. Session: `anon.session`.
-- **Admin bot** (`app/telegram/bot.py`) — only you talk to this; `/get_system_prompt` and `/set_system_prompt` manage Rachel's personality. Session: `bot.session`.
+- **Admin bot** (`app/telegram/bot.py`) — only you talk to this; `/get_responder_system_prompt` and `/set_responder_system_prompt` manage Rachel's personality. Session: `bot.session`.
 - **Admin HTTP API** (`app/routers/admin.py`) — manage the same state over HTTP.
 - **Gemini service** (`app/services/gemini.py`) — generates replies (blocking SDK call offloaded to a thread).
 - **Data layer** (`app/models.py`, `app/repository.py`, `app/database.py`) — async Postgres access.
@@ -82,8 +82,10 @@ To set a per-chat scope, you need to use the Bot API directly instead of BotFath
     -H "Content-Type: application/json" \
     -d '{
       "commands": [
-        {"command": "get_system_prompt", "description": "Get the current system prompt"},
-        {"command": "set_system_prompt", "description": "Set a new system prompt"},
+        {"command": "get_responder_system_prompt", "description": "Get the current responder system prompt"},
+        {"command": "set_responder_system_prompt", "description": "Set a new responder system prompt"},
+        {"command": "get_summarizer_system_prompt", "description": "Get the current summarizer system prompt"},
+        {"command": "set_summarizer_system_prompt", "description": "Set a new summarizer system prompt"},
         {"command": "list_chats", "description": "List all chats with message counts"},
         {"command": "get_history", "description": "Get message history for a chat"},
         {"command": "clear_history", "description": "Clear message history for a chat"},

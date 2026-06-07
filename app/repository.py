@@ -13,10 +13,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import session_scope
 from app.models import History, PersonalityTrait, Summary, SystemPrompt, User
-from app.prompts import DEFAULT_TRAITS, SYSTEM_PROMPT
+from app.prompts import DEFAULT_TRAITS, SUMMARIZER_SYSTEM_PROMPT, RESPONDER_SYSTEM_PROMPT
 
-# Cached system prompt (mirrors the original module-level global cache).
-_system_prompt: Optional[str] = None
+# Cached system prompts (mirrors the original module-level global cache).
+_responder_system_prompt: Optional[str] = None
+_summarizer_system_prompt: Optional[str] = None
 
 
 async def ensure_traits_seeded() -> None:
@@ -95,7 +96,7 @@ async def get_active_trait_prompts() -> str:
     return "\n".join(lines)
 
 
-async def ensure_system_prompt_seeded() -> None:
+async def ensure_system_prompts_seeded() -> None:
     """Insert the default system prompt only if the table is empty.
 
     Replaces db.py's import-time INSERT, which blindly added a new row on every
@@ -104,31 +105,64 @@ async def ensure_system_prompt_seeded() -> None:
     async with session_scope() as session:
         existing = await session.scalar(select(SystemPrompt.id).limit(1))
         if existing is None:
-            session.add(SystemPrompt(system_prompt=SYSTEM_PROMPT))
+            session.add(
+                SystemPrompt(
+                    responder_system_prompt=RESPONDER_SYSTEM_PROMPT,
+                    summarizer_system_prompt=SUMMARIZER_SYSTEM_PROMPT,
+                )
+            )
+        else:
+            current = await session.scalar(select(SystemPrompt.summarizer_system_prompt).limit(1))
+            if not current:
+                await session.execute(
+                    update(SystemPrompt).values(summarizer_system_prompt=SUMMARIZER_SYSTEM_PROMPT)
+                )
 
 
 # --- system prompt -------------------------------------------------------
 
 
-async def get_system_prompt() -> str:
-    global _system_prompt
-    if _system_prompt:
-        return _system_prompt
+async def get_responder_system_prompt() -> str:
+    global _responder_system_prompt
+    if _responder_system_prompt:
+        return _responder_system_prompt
 
     async with session_scope() as session:
-        _system_prompt = await session.scalar(
-            select(SystemPrompt.system_prompt).limit(1)
+        _responder_system_prompt = await session.scalar(
+            select(SystemPrompt.responder_system_prompt).limit(1)
         )
-    return _system_prompt
+    return _responder_system_prompt
 
 
-async def set_system_prompt(new_system_prompt: str) -> None:
-    global _system_prompt
-    _system_prompt = new_system_prompt
+async def set_responder_system_prompt(new_system_prompt: str) -> None:
+    global _responder_system_prompt
+    _responder_system_prompt = new_system_prompt
 
     async with session_scope() as session:
         await session.execute(
-            update(SystemPrompt).values(system_prompt=new_system_prompt)
+            update(SystemPrompt).values(responder_system_prompt=new_system_prompt)
+        )
+
+
+async def get_summarizer_system_prompt() -> str:
+    global _summarizer_system_prompt
+    if _summarizer_system_prompt:
+        return _summarizer_system_prompt
+
+    async with session_scope() as session:
+        _summarizer_system_prompt = await session.scalar(
+            select(SystemPrompt.summarizer_system_prompt).limit(1)
+        )
+    return _summarizer_system_prompt
+
+
+async def set_summarizer_system_prompt(new_summarizer_system_prompt: str) -> None:
+    global _summarizer_system_prompt
+    _summarizer_system_prompt = new_summarizer_system_prompt
+
+    async with session_scope() as session:
+        await session.execute(
+            update(SystemPrompt).values(summarizer_system_prompt=new_summarizer_system_prompt)
         )
 
 

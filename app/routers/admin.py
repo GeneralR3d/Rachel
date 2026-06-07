@@ -22,6 +22,14 @@ class SystemPromptOut(BaseModel):
     prompt: str
 
 
+class SummarizerSystemPromptIn(BaseModel):
+    prompt: str
+
+
+class SummarizerSystemPromptOut(BaseModel):
+    prompt: str
+
+
 class HistoryItem(BaseModel):
     sender: str
     content: str
@@ -49,18 +57,32 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
-@router.get("/system-prompt", response_model=SystemPromptOut)
+@router.get("/responder-system-prompt", response_model=SystemPromptOut)
 async def read_system_prompt() -> SystemPromptOut:
-    prompt = await repository.get_system_prompt()
+    prompt = await repository.get_responder_system_prompt()
     if prompt is None:
-        raise HTTPException(status_code=404, detail="System prompt not seeded")
+        raise HTTPException(status_code=404, detail="responder System prompt not seeded")
     return SystemPromptOut(prompt=prompt)
 
 
-@router.put("/system-prompt", response_model=SystemPromptOut)
+@router.put("/responder-system-prompt", response_model=SystemPromptOut)
 async def update_system_prompt(body: SystemPromptIn) -> SystemPromptOut:
-    await repository.set_system_prompt(body.prompt)
+    await repository.set_responder_system_prompt(body.prompt)
     return SystemPromptOut(prompt=body.prompt)
+
+
+@router.get("/summarizer-system-prompt", response_model=SummarizerSystemPromptOut)
+async def read_summarizer_system_prompt() -> SummarizerSystemPromptOut:
+    prompt = await repository.get_summarizer_system_prompt()
+    if prompt is None:
+        raise HTTPException(status_code=404, detail="Summarizer system prompt not seeded")
+    return SummarizerSystemPromptOut(prompt=prompt)
+
+
+@router.put("/summarizer-system-prompt", response_model=SummarizerSystemPromptOut)
+async def update_summarizer_system_prompt(body: SummarizerSystemPromptIn) -> SummarizerSystemPromptOut:
+    await repository.set_summarizer_system_prompt(body.prompt)
+    return SummarizerSystemPromptOut(prompt=body.prompt)
 
 @router.get("/users/names", response_model=list[UserNameOut])
 async def read_user_names() -> list[UserNameOut]:

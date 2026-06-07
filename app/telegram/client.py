@@ -86,9 +86,9 @@ async def reply(event):
         context = [m.to_llm_dict() for m in buffer[-N_PAST_MSG_REQUIRED:]]
 
         response, load_time = await get_response(
-            current_messages=[],
             history=context,
             current_summary=current_summary,
+            chat_id=chat_id,
         )
 
         print(f"[{chat_id}] Current summary: {current_summary}")

@@ -19,11 +19,12 @@ class Base(DeclarativeBase):
 
 
 class SystemPrompt(Base):
-    __tablename__ = "system_prompt"
+    __tablename__ = "system_prompts"
 
     # Single-row table; surrogate PK added (SQLite version had no explicit PK).
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    responder_system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    summarizer_system_prompt: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
 
 
 class Summary(Base):

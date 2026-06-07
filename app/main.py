@@ -12,7 +12,7 @@ from fastapi import FastAPI
 
 from app.config import get_settings
 from app.database import dispose_engine
-from app.repository import ensure_system_prompt_seeded, ensure_traits_seeded
+from app.repository import ensure_system_prompts_seeded, ensure_traits_seeded
 from app.routers import admin
 from app.telegram.bot import bot
 from app.telegram.client import client, flush_all_buffers
@@ -24,7 +24,7 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # startup
-    await ensure_system_prompt_seeded()
+    await ensure_system_prompts_seeded()
     await ensure_traits_seeded()
 
     logger.info("Starting Telethon clients...")

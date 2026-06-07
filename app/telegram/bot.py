@@ -13,11 +13,13 @@ from app.repository import (
     get_all_chats,
     get_all_users,
     get_history,
+    get_summarizer_system_prompt,
     get_summary,
-    get_system_prompt,
+    get_responder_system_prompt,
     get_traits,
     reset_traits,
-    set_system_prompt,
+    set_summarizer_system_prompt,
+    set_responder_system_prompt,
     set_trait_value,
 )
 
@@ -29,10 +31,10 @@ ADMIN = settings.admin_id
 
 
 @bot.on(
-    events.NewMessage(incoming=True, from_users=[ADMIN], pattern="\\/get_system_prompt")
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern="\\/get_responder_system_prompt")
 )
-async def on_get_system_prompt(event):
-    prompt = await get_system_prompt()
+async def on_get_responder_system_prompt(event):
+    prompt = await get_responder_system_prompt()
     chunk_size = 4000
     for i in range(0, len(prompt), chunk_size):
         await event.reply(prompt[i : i + chunk_size])
@@ -40,13 +42,36 @@ async def on_get_system_prompt(event):
 
 @bot.on(
     events.NewMessage(
-        incoming=True, from_users=[ADMIN], pattern="\\/set_system_prompt\\s.*"
+        incoming=True, from_users=[ADMIN], pattern="\\/set_responder_system_prompt\\s.*"
     )
 )
-async def on_set_system_prompt(event):
-    new_system_prompt = event.raw_text.replace("/set_system_prompt ", "")
-    await set_system_prompt(new_system_prompt)
+async def on_set_responder_system_prompt(event):
+    new_system_prompt = event.raw_text.replace("/set_responder_system_prompt ", "")
+    await set_responder_system_prompt(new_system_prompt)
     await event.reply("System prompt set!")
+
+
+@bot.on(
+    events.NewMessage(
+        incoming=True, from_users=[ADMIN], pattern="\\/get_summarizer_system_prompt"
+    )
+)
+async def on_get_summarizer_system_prompt(event):
+    prompt = await get_summarizer_system_prompt()
+    chunk_size = 4000
+    for i in range(0, len(prompt), chunk_size):
+        await event.reply(prompt[i : i + chunk_size])
+
+
+@bot.on(
+    events.NewMessage(
+        incoming=True, from_users=[ADMIN], pattern="\\/set_summarizer_system_prompt\\s.*"
+    )
+)
+async def on_set_summarizer_system_prompt(event):
+    new_summarizer_system_prompt = event.raw_text.replace("/set_summarizer_system_prompt ", "")
+    await set_summarizer_system_prompt(new_summarizer_system_prompt)
+    await event.reply("Summarizer system prompt set!")
 
 
 @bot.on(
