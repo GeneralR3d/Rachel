@@ -12,7 +12,7 @@ responder_node:  generates Rachel's reply using the mood detected in the
 """
 
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openrouter import ChatOpenRouter
@@ -39,7 +39,7 @@ MOOD_LABELS = list(CONVERSATION_TONE_TEMPLATES)
 class SummarizerOutput(BaseModel):
     summary: str = Field(
         ...,
-        description="New 100-word summary of the conversation, or the literal string 'NIL' if the old summary is still sufficient.",
+        description='New 100-word summary of the conversation, or the exact string "NIL" if the old summary is still sufficient.',
     )
     mood: str = Field(
         ...,
@@ -91,7 +91,7 @@ async def summarizer_node(state: GraphState) -> Dict:
 
     result: SummarizerOutput = await _summarizer_llm.ainvoke(msgs)
     print(f"Detected mood: {result.mood} | Summary: {result.summary}")
-    if result.summary.strip().upper() == "NIL":
+    if result.summary == "NIL":
         return {"mood": result.mood}
     return {"mood": result.mood, "current_summary": result.summary}
 

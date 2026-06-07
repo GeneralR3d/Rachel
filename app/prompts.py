@@ -122,6 +122,7 @@ Your job is to:
 1. Identify the mood of the current conversation based on the **most recent** messages
 2. Output a new 100 word summary of the current conversation identifying the main topic and key things mentioned. 
 If you think that the main topic has not changed and the old summary can sufficiently represent the conversation at hand, output NIL for new summary.
+You do this by paying the most focus to the newest messages. If there is no old summary, you MUST generate a new summary.
 
 <Mood list>
 {mood_list}
