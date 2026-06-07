@@ -123,11 +123,12 @@ async def get_active_trait_prompts() -> str:
 
 
 async def ensure_system_prompts_seeded() -> None:
-    """Insert the default system prompt only if the table is empty.
+    """Upsert system prompts from prompts.py on every startup.
 
-    Replaces db.py's import-time INSERT, which blindly added a new row on every
-    startup. Called once during application startup.
+    prompts.py is the source of truth — edits there take effect on next restart.
+    Bot-side edits via /set_*_system_prompt survive until the next restart.
     """
+    global _responder_system_prompt, _summarizer_system_prompt
     async with session_scope() as session:
         existing = await session.scalar(select(SystemPrompt.id).limit(1))
         if existing is None:
@@ -138,11 +139,15 @@ async def ensure_system_prompts_seeded() -> None:
                 )
             )
         else:
-            current = await session.scalar(select(SystemPrompt.summarizer_system_prompt).limit(1))
-            if not current:
-                await session.execute(
-                    update(SystemPrompt).values(summarizer_system_prompt=SUMMARIZER_SYSTEM_PROMPT)
+            await session.execute(
+                update(SystemPrompt).values(
+                    responder_system_prompt=RESPONDER_SYSTEM_PROMPT,
+                    summarizer_system_prompt=SUMMARIZER_SYSTEM_PROMPT,
                 )
+            )
+    # Invalidate in-memory cache so first read picks up the new values
+    _responder_system_prompt = None
+    _summarizer_system_prompt = None
 
 
 # --- system prompt -------------------------------------------------------
