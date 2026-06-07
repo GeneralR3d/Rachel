@@ -231,10 +231,9 @@ async def get_all_chats() -> list[dict]:
 
 
 async def get_history(chat_id: int, count: int = -1) -> list[dict]:
-    """count: number of pieces to get (earliest first), -1 for all.
+    """Return history rows in ascending message order.
 
-    Returns dicts with ``sender`` set to the user's display name (username,
-    first_name, or stringified ID) for backward compatibility with the LLM layer.
+    count: number of most-recent rows to return (-1 for all).
     """
     display_name = func.coalesce(
         User.username,
@@ -242,14 +241,17 @@ async def get_history(chat_id: int, count: int = -1) -> list[dict]:
         sa.cast(History.sender_user_id, sa.Text),
     ).label("sender")
 
-    stmt = (
+    base = (
         select(History.chat_id, History.sender_user_id, History.content, History.telegram_message_id, display_name)
         .outerjoin(User, History.sender_user_id == User.telegram_user_id)
         .where(History.chat_id == chat_id)
-        .order_by(History.telegram_message_id.asc())
     )
+
     if count != -1:
-        stmt = stmt.limit(count)
+        subq = base.order_by(History.telegram_message_id.desc()).limit(count).subquery()
+        stmt = select(subq).order_by(subq.c.telegram_message_id.asc())
+    else:
+        stmt = base.order_by(History.telegram_message_id.asc())
 
     async with session_scope() as session:
         rows = (await session.execute(stmt)).all()
@@ -260,7 +262,7 @@ async def get_history(chat_id: int, count: int = -1) -> list[dict]:
             "sender_user_id": r.sender_user_id,
             "content": r.content,
             "telegram_message_id": r.telegram_message_id,
-            "chat_id":r.chat_id
+            "chat_id": r.chat_id,
         }
         for r in rows
     ]
@@ -336,27 +338,6 @@ async def rewrite_history(chat_id: int, parsed_history: list[dict]) -> None:
                     content=item["content"],
                 )
             )
-
-
-async def get_history_length(chat_id: int) -> int:
-    async with session_scope() as session:
-        count = await session.scalar(
-            select(func.count(History.telegram_message_id)).where(History.chat_id == chat_id)
-        )
-    return count or 0
-
-
-async def delete_history(chat_id: int, telegram_message_ids: list[int]) -> None:
-    """For summary purposes — delete specific messages."""
-    if not telegram_message_ids:
-        return
-    async with session_scope() as session:
-        await session.execute(
-            delete(History).where(
-                History.chat_id == chat_id,
-                History.telegram_message_id.in_(telegram_message_ids),
-            )
-        )
 
 
 # --- summary -------------------------------------------------------------

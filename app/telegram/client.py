@@ -20,6 +20,7 @@ from app.repository import (
     add_history_batch,
     clear_history,
     delete_summary,
+    get_history,
     get_history_min_id,
     get_summary,
     rewrite_history,
@@ -80,12 +81,15 @@ async def reply(event):
         current_summary = await get_summary(chat_id)
         context = [m.to_llm_dict() for m in buffer[-N_PAST_MSG_REQUIRED:]]
 
-        response, load_time = await get_response(
+        response, new_summary, load_time = await get_response(
             history=context,
             current_summary=current_summary,
             chat_id=chat_id,
         )
 
+        if new_summary is not None:
+            await set_summary(chat_id, new_summary)
+            print(f"[{chat_id}] Summary updated: {new_summary}")
         print(f"[{chat_id}] Current summary: {current_summary}")
         print(f"[{chat_id}] Context ({len(context)} messages):")
         pprint(context)
