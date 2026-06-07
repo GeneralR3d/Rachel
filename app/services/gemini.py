@@ -49,8 +49,10 @@ class SummarizerOutput(BaseModel):
 
 
 class ResponseOutput(BaseModel):
-    sender: str
-    content: str
+    content: str = Field(
+        ...,
+        description="Rachel's reply as plain text in her natural Singlish voice. Use \\n\\n to separate message bursts. Do NOT include her name or any prefix.",
+    )
 
 
 class GraphState(TypedDict):
@@ -66,11 +68,12 @@ _summarizer_llm = ChatOpenRouter(
     temperature=0.0,
 ).with_structured_output(SummarizerOutput)
 
+# json_mode avoids tool-calling, which hangs on this model.
 _responder_llm = ChatOpenRouter(
     model=settings.openrouter_model,
     api_key=settings.openrouter_api_key,
     temperature=0.2,
-).with_structured_output(ResponseOutput)
+).with_structured_output(ResponseOutput, method="json_mode")
 
 
 async def summarizer_node(state: GraphState) -> Dict:
@@ -97,38 +100,51 @@ async def summarizer_node(state: GraphState) -> Dict:
 
 
 async def responder_node(state: GraphState) -> Dict:
-    mood = state.get("mood", "default")
-    tone_examples = CONVERSATION_TONE_TEMPLATES.get(mood, CONVERSATION_TONE_TEMPLATES["default"])
+    print("[responder] node entered")
+    try:
+        mood = state.get("mood", "default")
+        tone_examples = CONVERSATION_TONE_TEMPLATES.get(mood, CONVERSATION_TONE_TEMPLATES["default"])
 
-    examples_text = "\n\n".join(
-        f"User: {ex['input']}\nRachel: {ex['response']}"
-        for ex in tone_examples
-    )
-
-    system_prompt_str = await get_responder_system_prompt()
-    personality_traits = await get_active_trait_prompts()
-
-    history_msgs = [
-        (
-            "assistant" if entry["sender"] == BOT_NAME else "human",
-            f"{entry['sender']}: {entry['content']}",
+        examples_text = "\n\n".join(
+            f"User: {ex['input']}\nRachel: {ex['response']}"
+            for ex in tone_examples
         )
-        for entry in state["history"]
-    ]
+        print(f"[responder] mood={mood} | examples built")
 
-    prompt = ChatPromptTemplate.from_messages([("system", system_prompt_str), *history_msgs])
-    msgs = prompt.format_messages(
-        examples_text=examples_text,
-        current_summary=state.get("current_summary") or "",
-        personality_traits=personality_traits,
-    )
+        system_prompt_str = await get_responder_system_prompt()
+        print(f"[responder] system prompt fetched (len={len(system_prompt_str)})")
 
+        personality_traits = await get_active_trait_prompts()
+        print(f"[responder] personality traits fetched (len={len(personality_traits)})")
 
-    print(f"Responder mood: {mood} | history length: {len(state['history'])}")
+        history_msgs = [
+            (
+                "assistant" if entry["sender"] == BOT_NAME else "human",
+                f"{entry['sender']}: {entry['content']}",
+            )
+            for entry in state["history"]
+        ]
+        print(f"[responder] history_msgs built (count={len(history_msgs)})")
 
-    result: ResponseOutput = await _responder_llm.ainvoke(msgs)
-    print(f"Response from LLM: {result.content}")
-    return {"response_text": result.content}
+        prompt = ChatPromptTemplate.from_messages([("system", system_prompt_str), *history_msgs])
+        print(f"[responder] template created, input_variables={prompt.input_variables}")
+
+        msgs = prompt.format_messages(
+            examples_text=examples_text,
+            current_summary=state.get("current_summary") or "",
+            personality_traits=personality_traits,
+        )
+        print(f"[responder] messages formatted (count={len(msgs)})")
+
+        print("[responder] calling LLM now...")
+        result: ResponseOutput = await _responder_llm.ainvoke(msgs)
+        print(f"[responder] LLM returned: content={result.content[:80]!r}")
+        return {"response_text": result.content}
+    except BaseException as e:
+        import traceback
+        print(f"[responder] EXCEPTION {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise
 
 
 def _build_graph():
