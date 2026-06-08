@@ -13,8 +13,9 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import session_scope
-from app.models import History, PersonalityTrait, Summary, SystemPrompt, User
+from app.models import History, PersonalityTrait, ScheduleActivity, Summary, SystemPrompt, User
 from app.prompts import DEFAULT_TRAITS, SUMMARIZER_SYSTEM_PROMPT, RESPONDER_SYSTEM_PROMPT
+from app.schedule_data import DEFAULT_SCHEDULE
 
 # Cached system prompts (mirrors the original module-level global cache).
 _responder_system_prompt: Optional[str] = None
@@ -120,6 +121,90 @@ async def get_active_trait_prompts() -> str:
     _active_trait_prompts_cache = "\n".join(lines)
     _active_trait_prompts_cache_time = now
     return _active_trait_prompts_cache
+
+
+async def ensure_schedule_seeded() -> None:
+    """Upsert the weekly schedule from schedule_data.py on every startup.
+
+    schedule_data.py is the source of truth — edits there (including new
+    entries appended after the first run) take effect on next restart, keyed
+    on the (day_of_week, start_hour) unique constraint.
+    """
+    async with session_scope() as session:
+        for activity in DEFAULT_SCHEDULE:
+            stmt = (
+                pg_insert(ScheduleActivity)
+                .values(**activity)
+                .on_conflict_do_update(
+                    index_elements=[ScheduleActivity.day_of_week, ScheduleActivity.start_hour],
+                    set_={k: v for k, v in activity.items() if k not in ("day_of_week", "start_hour")},
+                )
+            )
+            await session.execute(stmt)
+
+
+# --- weekly schedule ------------------------------------------------------
+
+
+def _activity_to_dict(a: ScheduleActivity, partial: bool = False) -> dict:
+    if partial:
+        return {
+            "name": a.name,
+            "duration_hours": a.duration_hours,
+            "location": a.location,
+        }
+    return {
+        "day_of_week": a.day_of_week,
+        "start_hour": a.start_hour,
+        "name": a.name,
+        "description": a.description,
+        "location": a.location,
+        "duration_hours": a.duration_hours,
+        "ends_at": f"{(a.start_hour + a.duration_hours) % 24:02d}:00",
+        "companions": a.companions,
+        "reason": a.reason,
+        "interesting_event": a.interesting_event,
+    }
+
+
+async def get_current_activity(day_of_week: int, hour: int) -> Optional[dict]:
+    """Return the activity covering the given hour of the given day, if any.
+
+    Also checks the previous day for activities that start late and run past
+    midnight (e.g. start_hour=23, duration_hours=8 covers 23:00-07:00).
+    """
+    previous_day = (day_of_week - 1) % 7
+    async with session_scope() as session:
+        activity = await session.scalar(
+            select(ScheduleActivity).where(
+                sa.or_(
+                    sa.and_(
+                        ScheduleActivity.day_of_week == day_of_week,
+                        ScheduleActivity.start_hour <= hour,
+                        ScheduleActivity.start_hour + ScheduleActivity.duration_hours > hour,
+                    ),
+                    sa.and_(
+                        ScheduleActivity.day_of_week == previous_day,
+                        ScheduleActivity.start_hour + ScheduleActivity.duration_hours > 24,
+                        ScheduleActivity.start_hour + ScheduleActivity.duration_hours - 24 > hour,
+                    ),
+                )
+            )
+        )
+    return _activity_to_dict(activity) if activity is not None else None
+
+
+async def get_day_summary(day_of_week: int) -> list[dict]:
+    """Return only name, duration_hours and location for the day's activities, ordered by start time."""
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(ScheduleActivity)
+                .where(ScheduleActivity.day_of_week == day_of_week)
+                .order_by(ScheduleActivity.start_hour)
+            )
+        ).scalars().all()
+    return [_activity_to_dict(a, partial=True) for a in rows]
 
 
 async def ensure_system_prompts_seeded() -> None:

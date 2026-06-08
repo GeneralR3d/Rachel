@@ -84,7 +84,12 @@ async def reply(event):
         return
 
     async with client.action(event.chat_id, "typing"):  # pyright: ignore
-        current_summary = pending_summaries.get(chat_id) or await get_summary(chat_id)
+        if chat_id in pending_summaries:
+            current_summary = pending_summaries.get(chat_id)
+        else:
+            current_summary = await get_summary(chat_id)
+            pending_summaries[chat_id] = current_summary
+            
         context = [m.to_llm_dict() for m in buffer[-N_PAST_MSG_REQUIRED:]]
 
         response, new_summary, load_time = await get_response(

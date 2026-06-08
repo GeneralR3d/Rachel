@@ -12,6 +12,7 @@ responder_node:  generates Rachel's reply using the mood detected in the
 """
 
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -22,13 +23,25 @@ from typing_extensions import TypedDict
 
 from app.config import get_settings
 from app.prompts import CONVERSATION_TONE_TEMPLATES
-from app.repository import get_active_trait_prompts, get_responder_system_prompt, get_summarizer_system_prompt
+from app.repository import (
+    get_active_trait_prompts,
+    get_current_activity,
+    get_day_summary,
+    get_responder_system_prompt,
+    get_summarizer_system_prompt,
+)
 
 settings = get_settings()
 BOT_NAME = settings.bot_name
 
 _chat_mood: Dict[int, str] = {}
 DEFAULT_MOOD = "default"
+
+# Schedule lookups only change once per hour (current_activity) / once per day
+# (day_summary), so cache the last result keyed on what it depends on instead
+# of hitting the DB on every message.
+_current_activity_cache: Tuple[int, int, Any] | None = None  # (day_of_week, hour, activity)
+_day_summary_cache: Tuple[int, List[Dict[str, Any]]] | None = None  # (day_of_week, summary)
 
 # Mood labels are defined by CONVERSATION_TONE_TEMPLATES' keys, not a static
 # Literal — Field(json_schema_extra={"enum": ...}) lets the structured-output
@@ -117,6 +130,31 @@ async def responder_node(state: GraphState) -> Dict:
         personality_traits = await get_active_trait_prompts()
         print(f"[responder] personality traits fetched (len={len(personality_traits)})")
 
+        now = datetime.now()
+        formatted_datetime = (
+            f"The current date is {now.strftime('%d %B %Y')}, "
+            f"the current month is {now.strftime('%B')}, "
+            f"the current day of week is {now.strftime('%A')}, "
+            f"the current time is {now.strftime('%H:%M')}"
+        )
+        day_of_week = now.weekday()
+
+        global _current_activity_cache, _day_summary_cache
+
+        if _current_activity_cache is not None and _current_activity_cache[:2] == (day_of_week, now.hour):
+            current_activity = _current_activity_cache[2]
+        else:
+            current_activity = await get_current_activity(day_of_week, now.hour)
+            _current_activity_cache = (day_of_week, now.hour, current_activity)
+
+        if _day_summary_cache is not None and _day_summary_cache[0] == day_of_week:
+            day_summary = _day_summary_cache[1]
+        else:
+            day_summary = await get_day_summary(day_of_week)
+            _day_summary_cache = (day_of_week, day_summary)
+
+        print(f"[responder] schedule fetched (current_activity={current_activity}, current datetime = {formatted_datetime}")
+
         history_msgs = [
             (
                 "assistant" if entry["sender"] == BOT_NAME else "human",
@@ -133,6 +171,10 @@ async def responder_node(state: GraphState) -> Dict:
             examples_text=examples_text,
             current_summary=state.get("current_summary") or "",
             personality_traits=personality_traits,
+            conversation_mood=mood,
+            datetime=formatted_datetime,
+            current_activity=current_activity or "Nothing scheduled right now",
+            day_summary=day_summary,
         )
         print(f"[responder] messages formatted (count={len(msgs)})")
 

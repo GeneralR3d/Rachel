@@ -9,7 +9,7 @@ Original SQLite tables (see Reference/app/db.py):
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, Integer, Text
+from sqlalchemy import BigInteger, DateTime, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -59,6 +59,22 @@ class PersonalityTrait(Base):
     medium_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     high_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     current_value: Mapped[str] = mapped_column(Text, nullable=False, default="medium")
+
+
+class ScheduleActivity(Base):
+    __tablename__ = "schedule_activities"
+    __table_args__ = (UniqueConstraint("day_of_week", "start_hour", name="uq_schedule_day_start"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    day_of_week: Mapped[int] = mapped_column(Integer, nullable=False)  # 0=Mon..6=Sun
+    start_hour: Mapped[int] = mapped_column(Integer, nullable=False)   # 0-23
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    location: Mapped[str] = mapped_column(Text, nullable=False)
+    duration_hours: Mapped[int] = mapped_column(Integer, nullable=False)
+    companions: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    interesting_event: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class History(Base):

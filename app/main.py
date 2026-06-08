@@ -12,7 +12,7 @@ from fastapi import FastAPI
 
 from app.config import get_settings
 from app.database import dispose_engine
-from app.repository import ensure_system_prompts_seeded, ensure_traits_seeded, upsert_user
+from app.repository import ensure_schedule_seeded, ensure_system_prompts_seeded, ensure_traits_seeded, upsert_user
 from app.routers import admin
 from app.telegram.bot import bot
 from app.telegram.client import client, flush_all_buffers
@@ -26,6 +26,7 @@ async def lifespan(app: FastAPI):
     # startup
     await ensure_system_prompts_seeded()
     await ensure_traits_seeded()
+    await ensure_schedule_seeded()
 
     logger.info("Starting Telethon clients...")
     # Rachel's user-facing client. Requires anon.session to already exist
