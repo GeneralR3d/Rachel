@@ -74,6 +74,10 @@ class ResponseOutput(BaseModel):
         ...,
         description="Rachel's reply as plain text in her natural Singlish voice. Use \\n\\n to separate message bursts. Do NOT include her name or any prefix.",
     )
+    reason: str = Field(
+        ...,
+        description="A single sentence explaining why this reply was given, naming which part of the personality traits or system prompt instructions drove it. For traceability and debugging.",
+    )
 
 
 class GraphState(TypedDict):
@@ -81,6 +85,7 @@ class GraphState(TypedDict):
     current_summary: str | None
     mood: str
     response_text: str
+    response_reason: str
 
 
 _summarizer_llm = ChatOpenRouter(
@@ -189,8 +194,8 @@ async def responder_node(state: GraphState) -> Dict:
 
         print("[responder] calling LLM now...")
         result: ResponseOutput = await _responder_llm.ainvoke(msgs)
-        print(f"[responder] LLM returned: content={result.content[:80]!r}")
-        return {"response_text": result.content}
+        print(f"[responder] LLM returned: content={result.content[:80]!r} | reason={result.reason!r}")
+        return {"response_text": result.content, "response_reason": result.reason}
     except BaseException as e:
         import traceback
         print(f"[responder] EXCEPTION {type(e).__name__}: {e}")
@@ -216,8 +221,8 @@ async def get_response(
     history: List[Dict[str, str]],
     current_summary: str | None = None,
     chat_id: int | None = None,
-) -> Tuple[str, str | None, float]:
-    """Run the LangGraph pipeline and return ``(response_text, elapsed_seconds)``.
+) -> Tuple[str, str, str | None, float]:
+    """Run the LangGraph pipeline and return ``(response_text, reason, new_summary, elapsed_seconds)``.
 
     summarizer_node and responder_node run in parallel.  The mood detected this
     call is stored in _chat_mood and injected on the *next* call.
@@ -233,6 +238,7 @@ async def get_response(
         "current_summary": current_summary,
         "mood": current_mood,
         "response_text": "",
+        "response_reason": "",
     }
 
     result = await _graph.ainvoke(initial_state)
@@ -242,4 +248,4 @@ async def get_response(
         print(f"[{chat_id}] Stored mood for next call: {result['mood']}")
 
     new_summary = result["current_summary"] if result["current_summary"] != current_summary else None
-    return result["response_text"], new_summary, time.time() - start
+    return result["response_text"], result["response_reason"], new_summary, time.time() - start

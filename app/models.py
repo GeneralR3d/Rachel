@@ -86,6 +86,10 @@ class History(Base):
     # References users.telegram_user_id — no FK constraint to avoid cascade issues.
     sender_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    # The responder LLM's one-sentence justification for its reply (which part
+    # of its personality/system prompt drove the response). NULL for inbound
+    # user messages, which have no reason.
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

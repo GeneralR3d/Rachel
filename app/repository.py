@@ -358,7 +358,7 @@ async def get_history(chat_id: int, count: int = -1) -> list[dict]:
     ).label("sender")
 
     base = (
-        select(History.chat_id, History.sender_user_id, History.content, History.telegram_message_id, display_name)
+        select(History.chat_id, History.sender_user_id, History.content, History.reason, History.telegram_message_id, display_name)
         .outerjoin(User, History.sender_user_id == User.telegram_user_id)
         .where(History.chat_id == chat_id)
     )
@@ -377,6 +377,7 @@ async def get_history(chat_id: int, count: int = -1) -> list[dict]:
             "sender": r.sender,
             "sender_user_id": r.sender_user_id,
             "content": r.content,
+            "reason": r.reason,
             "telegram_message_id": r.telegram_message_id,
             "chat_id": r.chat_id,
         }
@@ -403,11 +404,18 @@ async def add_history_batch(
     sender_user_ids: list[int],
     contents: list[str],
     telegram_message_ids: list[int],
+    reasons: list[Optional[str]] | None = None,
 ) -> None:
-    """Insert multiple history entries. Works for a single message too."""
-    if not len(chat_ids) == len(sender_user_ids) == len(contents) == len(telegram_message_ids):
+    """Insert multiple history entries. Works for a single message too.
+
+    reasons is optional and parallel to the other lists; entries are None for
+    inbound user messages, which have no responder reason.
+    """
+    if reasons is None:
+        reasons = [None] * len(chat_ids)
+    if not len(chat_ids) == len(sender_user_ids) == len(contents) == len(telegram_message_ids) == len(reasons):
         raise ValueError(
-            "chat_ids, sender_user_ids, contents, and telegram_message_ids must be lists of the same length"
+            "chat_ids, sender_user_ids, contents, telegram_message_ids, and reasons must be lists of the same length"
         )
 
     rows = [
@@ -416,6 +424,7 @@ async def add_history_batch(
             "sender_user_id": sender_user_ids[i],
             "content": contents[i],
             "telegram_message_id": telegram_message_ids[i],
+            "reason": reasons[i],
         }
         for i in range(len(chat_ids))
     ]

@@ -10,7 +10,7 @@ Ported from Reference/app/client.py. Behaviour is unchanged; the only edits are:
 import asyncio
 import time
 from pprint import pprint
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 from telethon import TelegramClient, events
@@ -27,7 +27,7 @@ from app.repository import (
     set_summary,
     upsert_user,
 )
-from app.services.gemini import get_response
+from app.services.llm import get_response
 from app.telegram.bot import ADMIN
 from app.utils import parse_history
 
@@ -53,6 +53,8 @@ class BufferedMessage(BaseModel):
     sender_name: str
     content: str
     is_persisted: bool = False
+    # The responder LLM's one-sentence justification; None for user messages.
+    reason: Optional[str] = None
 
     def to_llm_dict(self) -> Dict[str, str]:
         return {"sender": self.sender_name, "content": self.content}
@@ -92,7 +94,7 @@ async def reply(event):
             
         context = [m.to_llm_dict() for m in buffer[-N_PAST_MSG_REQUIRED:]]
 
-        response, new_summary, load_time = await get_response(
+        response, response_reason, new_summary, load_time = await get_response(
             history=context,
             current_summary=current_summary,
             chat_id=chat_id,
@@ -125,6 +127,7 @@ async def reply(event):
                 sender_name=BOT_NAME,
                 content=response,
                 is_persisted=False,
+                reason=response_reason,
             )
         )
 
@@ -159,6 +162,7 @@ async def _flush_chat(chat_id: int) -> None:
             sender_user_ids=[m.sender_user_id for m in to_persist],
             contents=[m.content for m in to_persist],
             telegram_message_ids=[m.telegram_message_id for m in to_persist],
+            reasons=[m.reason for m in to_persist],
         )
         print(f"[{chat_id}] Flushed {len(to_persist)} messages to DB")
 

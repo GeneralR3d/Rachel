@@ -192,6 +192,10 @@ Activities today: {day_summary}
 {current_summary}
 </Conversation context>
 
+<Reason for response>
+For every response you give, you must also output a reason for that response. The reason is a SINGLE sentence that explains why you replied the way you did, specifically highlighting which part of your personality traits or system prompt instructions gave rise to that response (ie which of your instructions you were following). This is purely for traceability and debugging and is never shown to the person you are talking to.
+</Reason for response>
+
 """
 
 SUMMARIZER_SYSTEM_PROMPT = """

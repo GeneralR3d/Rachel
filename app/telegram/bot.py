@@ -113,7 +113,11 @@ async def on_get_history(event):
     if not items:
         await event.reply(f"No history for chat {chat_id}.")
         return
-    lines = [f"[{i['telegram_message_id']}] {i['sender']}: {i['content']}" for i in items]
+    lines = []
+    for i in items:
+        lines.append(f"[{i['telegram_message_id']}] {i['sender']}: {i['content']}")
+        if i.get("reason"):
+            lines.append(f"    ↳ reason: {i['reason']}")
     text = "\n".join(lines)
     # Telegram message limit is 4096 chars
     if len(text) > 4000:
