@@ -95,11 +95,19 @@ async def reply(event):
             
         context = [m.to_llm_dict() for m in buffer[-N_PAST_MSG_REQUIRED:]]
 
-        response, response_reason, new_summary, load_time = await get_response(
-            history=context,
-            current_summary=current_summary,
-            chat_id=chat_id,
-        )
+        try:
+            response, response_reason, new_summary, load_time = await get_response(
+                history=context,
+                current_summary=current_summary,
+                chat_id=chat_id,
+            )
+        except Exception as e:
+            print(f"[{chat_id}] get_response failed ({type(e).__name__}: {e}), retrying once...")
+            response, response_reason, new_summary, load_time = await get_response(
+                history=context,
+                current_summary=current_summary,
+                chat_id=chat_id,
+            )
 
         if new_summary is not None:
             pending_summaries[chat_id] = new_summary

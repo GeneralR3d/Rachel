@@ -119,7 +119,11 @@ async def summarizer_node(state: GraphState) -> Dict:
         mood_list = MOOD_LABELS,
         old_summary=state.get("current_summary") or "")
 
-    result: SummarizerOutput = await _summarizer_llm.ainvoke(msgs)
+    try:
+        result: SummarizerOutput = await _summarizer_llm.ainvoke(msgs)
+    except Exception as e:
+        print(f"[summarizer] LLM error (keeping current mood/summary): {type(e).__name__}: {e}")
+        return {}
     print(f"Detected mood: {result.mood} | Summary: {result.summary}")
     if result.summary == "NIL":
         return {"mood": result.mood}

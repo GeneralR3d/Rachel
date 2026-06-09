@@ -433,7 +433,7 @@ async def add_history_batch(
         return
 
     async with session_scope() as session:
-        await session.execute(pg_insert(History), rows)
+        await session.execute(pg_insert(History).on_conflict_do_nothing(), rows)
 
 
 async def clear_history(chat_id: int) -> None:
