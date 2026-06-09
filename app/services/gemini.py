@@ -15,6 +15,14 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
+import tiktoken
+
+_tokenizer = tiktoken.get_encoding("cl100k_base")
+
+
+def _count_tokens(text: str) -> int:
+    return len(_tokenizer.encode(text))
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openrouter import ChatOpenRouter
 from langgraph.graph import END, START, StateGraph
@@ -125,10 +133,10 @@ async def responder_node(state: GraphState) -> Dict:
         print(f"[responder] mood={mood} | examples built")
 
         system_prompt_str = await get_responder_system_prompt()
-        print(f"[responder] system prompt fetched (len={len(system_prompt_str)})")
+        print(f"[responder] system prompt fetched (tokens={_count_tokens(system_prompt_str)})")
 
         personality_traits = await get_active_trait_prompts()
-        print(f"[responder] personality traits fetched (len={len(personality_traits)})")
+        print(f"[responder] personality traits fetched (tokens={_count_tokens(personality_traits)})")
 
         now = datetime.now()
         formatted_datetime = (
@@ -162,7 +170,8 @@ async def responder_node(state: GraphState) -> Dict:
             )
             for entry in state["history"]
         ]
-        print(f"[responder] history_msgs built (count={len(history_msgs)})")
+        history_tokens = sum(_count_tokens(f"{role}: {content}") for role, content in history_msgs)
+        print(f"[responder] history_msgs built (count={len(history_msgs)}, tokens={history_tokens})")
 
         prompt = ChatPromptTemplate.from_messages([("system", system_prompt_str), *history_msgs])
         print(f"[responder] template created, input_variables={prompt.input_variables}")
