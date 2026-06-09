@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Async SQLAlchemy connection string (asyncpg driver)
     database_url: str = "postgresql+asyncpg://rachel:rachel@localhost:5432/rachel"
 
+    # Markdown file holding Rachel's persistent "world view" (learned facts)
+    worldview_path: str = "worldview.md"
+
 
 @lru_cache
 def get_settings() -> Settings:

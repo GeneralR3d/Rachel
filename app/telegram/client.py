@@ -28,6 +28,7 @@ from app.repository import (
     upsert_user,
 )
 from app.services.llm import get_response
+from app.services.worldview import update_worldview
 from app.telegram.bot import ADMIN
 from app.utils import parse_history
 
@@ -37,7 +38,7 @@ client = TelegramClient("anon", settings.telegram_api_id, settings.telegram_api_
 
 # constants
 REPLY_DELAY = 5              # seconds to wait after last message before replying
-CHAT_BLACKOUT_TIME = 180          # 3 min of inactivity before flushing buffer to DB
+CHAT_BLACKOUT_TIME = 60          # 3 min of inactivity before flushing buffer to DB
 N_PAST_MSG_REQUIRED = 20         # messages pre-loaded on first contact and fed to LLM as context
 MAX_BUFFER_LEN = 150             # flush to DB immediately if buffer hits this length
 TYPING_SPEED = 20                # characters per second
@@ -75,7 +76,7 @@ async def reply(event):
     """
     Feed the most recent N_PAST_MSG_REQUIRED messages from the buffer as context,
     call the LLM, send the reply, and append the bot response back into the buffer.
-    Persistence is handled by flush_buffer().
+    Persistence is handled by finalize_conversation().
     """
     chat_id = event.chat_id
     buffer = current_messages_buffer[chat_id]
@@ -119,7 +120,7 @@ async def reply(event):
         if bot_message_id is None:
             bot_message_id = sent.id
 
-    if bot_message_id is not None:
+    if bot_message_id is not None and chat_id in current_messages_buffer:
         current_messages_buffer[chat_id].append(
             BufferedMessage(
                 telegram_message_id=bot_message_id,
@@ -176,10 +177,22 @@ async def _flush_chat(chat_id: int) -> None:
     last_message_time.pop(chat_id, None)
 
 
-async def flush_buffer(chat_id: int, delay: float):
-    """After ``delay`` seconds of inactivity, persist unpersisted buffer messages to DB."""
+async def finalize_conversation(chat_id: int, delay: float):
+    """After ``delay`` seconds of inactivity, treat the conversation as finished:
+    persist unpersisted buffer messages to DB and extract world-view facts.
+
+    This is the "conversation finished" signal, so it also kicks off world-view
+    fact extraction for the dialogue that just ended. The conversation is
+    snapshotted *before* _flush_chat clears the buffer, and extraction runs as a
+    detached task so it never blocks the flush (and never runs on the shutdown
+    path, which calls _flush_chat directly).
+    """
     await asyncio.sleep(delay)
+    conversation = [m.to_llm_dict() for m in current_messages_buffer.get(chat_id, [])]
     await _flush_chat(chat_id)
+    if conversation:
+        asyncio.create_task(update_worldview(conversation))
+        print("Worldview pipleline called")
 
 
 async def flush_all_buffers() -> None:
@@ -317,7 +330,7 @@ async def new_message(event):
     # Always reset the flush timer: persist buffer 60 s after the last message
     if chat_id in flush_tasks and not flush_tasks[chat_id].done():
         flush_tasks[chat_id].cancel()
-    flush_tasks[chat_id] = asyncio.create_task(flush_buffer(chat_id, CHAT_BLACKOUT_TIME))
+    flush_tasks[chat_id] = asyncio.create_task(finalize_conversation(chat_id, CHAT_BLACKOUT_TIME))
 
 
 @client.on(events.ChatAction)

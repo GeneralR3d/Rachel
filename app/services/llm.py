@@ -31,6 +31,7 @@ from typing_extensions import TypedDict
 
 from app.config import get_settings
 from app.prompts import CONVERSATION_TONE_TEMPLATES
+from app.services.worldview import read_worldview
 from app.repository import (
     get_active_trait_prompts,
     get_current_activity,
@@ -189,6 +190,7 @@ async def responder_node(state: GraphState) -> Dict:
             datetime=formatted_datetime,
             current_activity=current_activity or "Nothing scheduled right now",
             day_summary=day_summary,
+            world_view=read_worldview() or "Nothing learned yet.",
         )
         print(f"[responder] messages formatted (count={len(msgs)})")
 
