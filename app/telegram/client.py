@@ -344,7 +344,7 @@ async def new_message(event):
 @client.on(events.ChatAction)
 async def say_hi_added(event):
     """Send a greeting when the bot is added to a group."""
-    if event.user_added or event.user_joined:
+    if event.user_added:
         me = await client.get_me()
         if event.user_id == me.id:
             print(f"Bot added to group: {event.chat_id}")
