@@ -28,13 +28,30 @@ _active_trait_prompts_cache_time: float = 0.0
 
 
 async def ensure_traits_seeded() -> None:
-    """Insert default personality traits only if the table is empty."""
+    """Upsert default personality traits by name.
+
+    Inserts any trait missing from the table, and refreshes
+    sort_order/low_prompt/medium_prompt/high_prompt for existing ones so
+    edits to DEFAULT_TRAITS take effect on restart. current_value is left
+    untouched so admin-tuned levels survive prompt-text edits.
+    """
     async with session_scope() as session:
-        existing = await session.scalar(select(PersonalityTrait.id).limit(1))
-        if existing is None:
-            for trait in DEFAULT_TRAITS:
-                trait_data = {k: v for k, v in trait.items() if k != "default_value"}
-                session.add(PersonalityTrait(**trait_data, current_value=trait.get("default_value", "medium")))
+        for trait in DEFAULT_TRAITS:
+            trait_data = {k: v for k, v in trait.items() if k != "default_value"}
+            stmt = pg_insert(PersonalityTrait).values(
+                **trait_data, current_value=trait.get("default_value", "medium")
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[PersonalityTrait.name],
+                set_={
+                    "sort_order": stmt.excluded.sort_order,
+                    "low_prompt": stmt.excluded.low_prompt,
+                    "medium_prompt": stmt.excluded.medium_prompt,
+                    "high_prompt": stmt.excluded.high_prompt,
+                },
+            )
+            await session.execute(stmt)
+    _invalidate_trait_prompt_cache()
 
 
 # --- personality traits --------------------------------------------------
