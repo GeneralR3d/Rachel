@@ -190,6 +190,14 @@ async def on_set_trait(event):
         await event.reply(f"No trait with id {trait_id}.")
     else:
         await event.reply(f"Trait {trait_id} set to {value}.")
+    raise events.StopPropagation
+
+
+@bot.on(
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/set_trait(\s+.*)?$")
+)
+async def on_set_trait_usage(event):
+    await event.reply("Usage: /set_trait <id> <low|medium|high>")
 
 
 @bot.on(
