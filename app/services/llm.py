@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
 from app.config import get_settings
-from app.prompts import CONVERSATION_TONE_TEMPLATES
+from app.prompts import CONVERSATION_STYLE
 from app.services.worldview import read_worldview
 from app.repository import (
     get_active_trait_prompts,
@@ -52,10 +52,10 @@ DEFAULT_MOOD = "default"
 _current_activity_cache: Tuple[int, int, Any] | None = None  # (day_of_week, hour, activity)
 _day_summary_cache: Tuple[int, List[Dict[str, Any]]] | None = None  # (day_of_week, summary)
 
-# Mood labels are defined by CONVERSATION_TONE_TEMPLATES' keys, not a static
+# Mood labels are defined by CONVERSATION_STYLE's keys, not a static
 # Literal — Field(json_schema_extra={"enum": ...}) lets the structured-output
 # schema track that dict dynamically.
-MOOD_LABELS = list(CONVERSATION_TONE_TEMPLATES)
+MOOD_LABELS = list(CONVERSATION_STYLE)
 
 
 class SummarizerOutput(BaseModel):
@@ -134,12 +134,7 @@ async def responder_node(state: GraphState) -> Dict:
     print("[responder] node entered")
     try:
         mood = state.get("mood", "default")
-        tone_examples = CONVERSATION_TONE_TEMPLATES.get(mood, CONVERSATION_TONE_TEMPLATES["default"])
-
-        examples_text = "\n\n".join(
-            f"User: {ex['input']}\nRachel: {ex['response']}"
-            for ex in tone_examples
-        )
+        communication_style = CONVERSATION_STYLE.get(mood, CONVERSATION_STYLE["default"])
         print(f"[responder] mood={mood} | examples built")
 
         system_prompt_str = await get_responder_system_prompt()
@@ -187,7 +182,7 @@ async def responder_node(state: GraphState) -> Dict:
         print(f"[responder] template created, input_variables={prompt.input_variables}")
 
         msgs = prompt.format_messages(
-            examples_text=examples_text,
+            communication_style=communication_style,
             current_summary=state.get("current_summary") or "",
             personality_traits=personality_traits,
             conversation_mood=mood,
