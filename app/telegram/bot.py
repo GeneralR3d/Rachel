@@ -10,6 +10,7 @@ from app.config import get_settings
 from app.repository import (
     clear_history,
     delete_summary,
+    delete_user_facts,
     get_all_chats,
     get_all_users,
     get_history,
@@ -17,10 +18,12 @@ from app.repository import (
     get_summary,
     get_responder_system_prompt,
     get_traits,
+    get_user_facts,
     reset_traits,
     set_summarizer_system_prompt,
     set_responder_system_prompt,
     set_trait_value,
+    set_user_facts,
 )
 
 settings = get_settings()
@@ -163,6 +166,53 @@ async def on_delete_summary(event):
     chat_id = int(event.pattern_match.group(2))
     await delete_summary(chat_id)
     await event.reply(f"Summary deleted for chat {chat_id}.")
+
+
+@bot.on(
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/get_user_facts(\s+(-?\d+))?$")
+)
+async def on_get_user_facts(event):
+    if event.pattern_match.group(2) is None:
+        await event.reply("Usage: /get_user_facts <user_id>")
+        return
+    user_id = int(event.pattern_match.group(2))
+    facts = await get_user_facts(user_id)
+    if not facts:
+        await event.reply(f"No facts/preferences for user {user_id}.")
+    else:
+        await event.reply(f"Facts/preferences for {user_id}:\n{facts}")
+
+
+@bot.on(
+    events.NewMessage(
+        incoming=True, from_users=[ADMIN], pattern=r"\/set_user_facts\s+(-?\d+)\s+([\s\S]+)$"
+    )
+)
+async def on_set_user_facts(event):
+    user_id = int(event.pattern_match.group(1))
+    facts = event.pattern_match.group(2)
+    await set_user_facts(user_id, facts)
+    await event.reply(f"Facts/preferences set for user {user_id}.")
+    raise events.StopPropagation
+
+
+@bot.on(
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/set_user_facts(\s+.*)?$")
+)
+async def on_set_user_facts_usage(event):
+    await event.reply("Usage: /set_user_facts <user_id> <facts text>")
+
+
+@bot.on(
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/delete_user_facts(\s+(-?\d+))?$")
+)
+async def on_delete_user_facts(event):
+    if event.pattern_match.group(2) is None:
+        await event.reply("Usage: /delete_user_facts <user_id>")
+        return
+    user_id = int(event.pattern_match.group(2))
+    await delete_user_facts(user_id)
+    await event.reply(f"Facts/preferences deleted for user {user_id}.")
 
 
 @bot.on(

@@ -13,7 +13,15 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import session_scope
-from app.models import History, PersonalityTrait, ScheduleActivity, Summary, SystemPrompt, User
+from app.models import (
+    History,
+    PersonalityTrait,
+    ScheduleActivity,
+    Summary,
+    SystemPrompt,
+    User,
+    UserFactsPreferences,
+)
 from app.prompts import DEFAULT_TRAITS, SUMMARIZER_SYSTEM_PROMPT, RESPONDER_SYSTEM_PROMPT
 from app.schedule_data import DEFAULT_SCHEDULE
 
@@ -505,3 +513,33 @@ async def set_summary(chat_id: int, summary: str) -> None:
 async def delete_summary(chat_id: int) -> None:
     async with session_scope() as session:
         await session.execute(delete(Summary).where(Summary.chat_id == chat_id))
+
+
+# --- user facts / preferences ---------------------------------------------
+
+
+async def get_user_facts(user_id: int) -> str:
+    """Return the raw facts/preferences text for a user, or "" if none stored yet."""
+    async with session_scope() as session:
+        facts = await session.scalar(
+            select(UserFactsPreferences.facts).where(UserFactsPreferences.user_id == user_id)
+        )
+    return facts or ""
+
+
+async def set_user_facts(user_id: int, facts: str) -> None:
+    """Upsert the full facts/preferences text for a user."""
+    async with session_scope() as session:
+        stmt = pg_insert(UserFactsPreferences).values(user_id=user_id, facts=facts)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[UserFactsPreferences.user_id],
+            set_={"facts": facts, "updated_at": func.now()},
+        )
+        await session.execute(stmt)
+
+
+async def delete_user_facts(user_id: int) -> None:
+    async with session_scope() as session:
+        await session.execute(
+            delete(UserFactsPreferences).where(UserFactsPreferences.user_id == user_id)
+        )

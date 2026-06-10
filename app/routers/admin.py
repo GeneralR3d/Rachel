@@ -53,6 +53,15 @@ class SummaryOut(BaseModel):
     summary: str | None
 
 
+class UserFactsOut(BaseModel):
+    user_id: int
+    facts: str
+
+
+class UserFactsIn(BaseModel):
+    facts: str
+
+
 @router.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -113,6 +122,22 @@ async def read_summary(chat_id: int) -> SummaryOut:
 @router.delete("/summary/{chat_id}", status_code=204)
 async def delete_chat_summary(chat_id: int) -> None:
     await repository.delete_summary(chat_id)
+
+
+@router.get("/user-facts/{user_id}", response_model=UserFactsOut)
+async def read_user_facts(user_id: int) -> UserFactsOut:
+    return UserFactsOut(user_id=user_id, facts=await repository.get_user_facts(user_id))
+
+
+@router.put("/user-facts/{user_id}", response_model=UserFactsOut)
+async def update_user_facts(user_id: int, body: UserFactsIn) -> UserFactsOut:
+    await repository.set_user_facts(user_id, body.facts)
+    return UserFactsOut(user_id=user_id, facts=body.facts)
+
+
+@router.delete("/user-facts/{user_id}", status_code=204)
+async def delete_user_facts(user_id: int) -> None:
+    await repository.delete_user_facts(user_id)
 
 
 # --- personality traits --------------------------------------------------

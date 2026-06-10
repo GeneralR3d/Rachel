@@ -77,6 +77,17 @@ class ScheduleActivity(Base):
     interesting_event: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class UserFactsPreferences(Base):
+    __tablename__ = "user_facts_preferences"
+
+    # References users.telegram_user_id — no FK constraint to avoid cascade issues.
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    facts: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class History(Base):
     __tablename__ = "history"
 
