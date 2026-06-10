@@ -37,7 +37,7 @@ settings = get_settings()
 client = TelegramClient("anon", settings.telegram_api_id, settings.telegram_api_hash)
 
 # constants
-REPLY_DELAY = 5              # seconds to wait after last message before replying
+REPLY_DELAY = 7             # seconds to wait after last message before replying
 CHAT_BLACKOUT_TIME = 60          # 3 min of inactivity before flushing buffer to DB
 N_PAST_MSG_REQUIRED = 20         # messages pre-loaded on first contact and fed to LLM as context
 MAX_BUFFER_LEN = 150             # flush to DB immediately if buffer hits this length
