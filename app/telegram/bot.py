@@ -86,7 +86,7 @@ async def on_list_user_names(event):
         await event.reply("No users found.")
         return
     lines = [
-        f"@{u['username'] or '—'} | {u['first_name'] or ''} {u['last_name'] or ''}".strip()
+        f"{u['telegram_user_id']} | @{u['username'] or '—'} | {u['first_name'] or ''} {u['last_name'] or ''}".strip()
         for u in users
     ]
     await event.reply("\n".join(lines))

@@ -114,7 +114,7 @@ To set a per-chat scope, you need to use the Bot API directly instead of BotFath
         {"command": "clear_history", "description": "Clear message history for a chat"},
         {"command": "get_summary", "description": "Get the conversation summary for a chat"},
         {"command": "delete_summary", "description": "Delete the conversation summary for a chat"},
-        {"command": "list_user_names", "description": "List all usernames and names"},
+        {"command": "list_user_names", "description": "List all usernames and names and telegram_user_id"},
         {"command": "get_user_facts", "description": "Get stored facts/preferences for a user: /get_user_facts <user_id>"},
         {"command": "set_user_facts", "description": "Set facts/preferences for a user: /set_user_facts <user_id> <facts text>"},
         {"command": "delete_user_facts", "description": "Delete stored facts/preferences for a user: /delete_user_facts <user_id>"},

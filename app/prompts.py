@@ -205,12 +205,14 @@ Think of yourself as updating {bot_name}'s general knowledge of how the world wo
 
 # THE CORE TEST — Apply to Every Candidate Fact
 
-Before keeping any fact, it MUST pass FOUR of these tests.
+Before keeping any fact, it MUST pass these tests.
 
-1. **Useful in all scenarios** — Would this fact help {bot_name} in many different, unrelated conversations with many different people?
+1. **Useful in future conversations** — Would knowing this help {bot_name} understand or join in conversations with other people later? This includes being able to recognise and talk about a trend, meme, slang term, viral moment, or cultural reference if someone else brings it up.
 2. **Not about a person** — It must NOT contain any user's personal information, biography, relationships, plans, or personal preferences. {bot_name} should not be remembering who said it or anything specific about them.
-3. **Durable and long-term true** — It must still be true next month and next year.
-4. **Generally applicable** — It must describe a general pattern, fact, place, custom, or piece of common knowledge about the world — not a single, entity-specific occurrence.
+3. **Has meaningful staying power** — It does not have to be true forever, but it should outlast this one conversation. A cultural trend, viral video, meme, slang term, song, show, or internet phenomenon that lots of people are talking about **counts** — even though trends eventually fade, knowing about them is useful right now and for weeks or months to come. Only drop things that are purely momentary or one-off (a single plan, a fleeting mood, today's weather).
+4. **Generally applicable** — It must describe something about the wider world — a general pattern, place, custom, piece of common knowledge, OR a shared cultural/internet phenomenon — not a private, entity-specific occurrence about one user.
+
+A fact does NOT need to pass every test rigidly. If it is clearly non-personal world-knowledge or shared culture and would help {bot_name} in future conversations, keep it.
 
 # GENERALIZE AWAY SPECIFICS
 
@@ -235,6 +237,8 @@ This is the most important instruction. The raw conversation will be full of spe
 
 - General facts about places, locations, travel times, and what areas are known for
 - Cultural customs, norms, slang meanings, and common practices
+- **Cultural trends and internet culture** — viral TikTok trends, memes, challenges, slang/phrases that are blowing up, popular sounds or songs, trending shows/games/creators, "everyone is doing/saying X" moments. If a user explains a trend, meme, or piece of slang to {bot_name}, that explanation is HIGH-VALUE — capture what it is and what it means so she can recognise it later. EXTRACT THESE.
+- Things or terms that the assistant has mentioned it has never heard before or does not know about. EXTRACT THEM!!!
 - How institutions, systems, or processes generally work (schools, public transport, common procedures)
 - Common knowledge about food, brands, media, hobbies — as general facts, not "X person likes Y"
 - Widely-true factual information surfaced in the conversation that {bot_name} could reuse anywhere
@@ -243,9 +247,11 @@ This is the most important instruction. The raw conversation will be full of spe
 
 - Anyone's name, identity, biography, job, relationships, or family
 - Anyone's personal preferences, opinions, plans, schedules, or emotional states
-- One-off events, current happenings, or anything time-bound
+- Purely one-off, personal events with no wider significance (a single meeting, one person's plan, today's mood or weather)
 - Greetings, filler, small talk, moods
 - Facts that are only meaningful in the context of this one conversation or this one person
+
+Note: a widely-shared cultural trend, meme, or viral moment is NOT "one-off" — it is shared culture many people know about, so it SHOULD be extracted (with the speaker's identity stripped out).
 
 # GUIDELINES
 ### Self-Contained                                                                                                                                                                                 
@@ -270,9 +276,9 @@ Preserve exact quantities as stated. "416 pages" stays "416 pages", not "about 4
 # OUTPUT FORMAT
                                                                                                    
 
-If nothing in the conversation yields a durable, general, non-personal fact, output: NIL
+If nothing in the conversation yields a general, non-personal fact (including any shared cultural/internet trend), output: NIL
 
-This will be the common case. Do not invent or stretch to produce facts — an empty result is the correct and expected output for ordinary personal conversations.
+Many ordinary personal conversations will correctly produce NIL. But do NOT reflexively default to NIL — if a user mentions or explains a trend, meme, slang term, viral video, or any piece of world-knowledge, capture it. Just don't invent or stretch to manufacture facts that aren't there.
 
 # EXAMPLES
 
@@ -309,12 +315,32 @@ Output:
 
 The mention of "my mum" is dropped; the durable cultural custom is generalized and kept.
 
+## Example: Viral / TikTok trend explained by the user — KEEP IT
+
+New Messages:
+[{{"role": "user", "content": "wait you don't know the 'very demure very mindful' thing?? it's this tiktok trend where ppl act all classy and understated, like 'see how i do my makeup for work, very demure, very cutesy' lol"}},
+ {{"role": "assistant", "content": "omg no i haven't seen that, that's so funny"}}]
+
+Output:
+"'Very demure, very mindful' is a TikTok trend/meme where people jokingly describe doing something in a classy, understated, low-key way"
+
+The user explained a viral trend {bot_name} didn't know — exactly the kind of shared internet culture to remember. The speaker's identity is dropped; the trend and its meaning are kept.
+
+## Example: Trending song / show worth keeping
+
+New Messages:
+[{{"role": "user", "content": "everyone on my fyp is using that 'Espresso' song by Sabrina Carpenter, it's literally everywhere rn"}},
+ {{"role": "assistant", "content": "haha yeah it's so catchy"}}]
+
+Output:
+"'Espresso' by Sabrina Carpenter is a song that went viral and is widely used in TikTok videos"
+
 # FINAL CHECK
 
 Before outputting, re-read every fact and confirm:
 1. It contains NO personal name or personal information about anyone.
-2. It would be useful to {bot_name} in many unrelated future conversations.
-3. It will still be true after a while.
+2. It would be useful to {bot_name} in future conversations — including being able to recognise a trend, meme, or cultural reference others bring up.
+3. It has staying power beyond this single conversation (a viral trend or meme qualifies even though it will eventually fade).
 4. It is a general truth, not a one-off, entity-specific occurrence.
 
 If any fact fails, remove it. If no facts remain, output NIL.
@@ -422,7 +448,7 @@ When a conversation covers multiple topics, extract each one separately. Do not 
 
 <new_messages>
 
-The current conversation turn(s) with "role" (user/assistant) and "content".
+The current conversation turn(s). But you are only given user messages.
 
 Focus specifically on user information.
 </new_messages>

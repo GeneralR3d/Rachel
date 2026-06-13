@@ -146,7 +146,7 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
     formatted_date = (
         f"The current date is {now.strftime('%d %B %Y')}, "
         f"the current month is {now.strftime('%B')}, "
-        f"the current day of week is {now.strftime('%A')}, "
+        f"the current day of week is {now.strftime('%A')}. "
     )
 
     prompt = ChatPromptTemplate.from_messages(
