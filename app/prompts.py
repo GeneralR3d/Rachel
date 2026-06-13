@@ -398,6 +398,90 @@ Return the full, rewritten fact set as a flat list of short, self-contained, gen
 """
 
 
+# --- User facts / preferences pipeline prompts -------------------------------
+# Used by app/services/userfacts.py. {bot_name} is filled at call time.
+# Unlike the world-view pipeline, this one keeps PERSONAL, user-specific facts
+# and preferences, attributed to each individual user by their user_id.
+
+USER_FACT_EXTRACTOR_SYSTEM_PROMPT = """\
+# ROLE
+
+You are a Personal-Profile Extractor for an AI persona named {bot_name}. Your job is to read a conversation and pull out **durable facts and preferences about the individual people {bot_name} is talking to** — the things {bot_name} should remember about each person so future conversations feel personal and continuous.
+
+This is the OPPOSITE of general world knowledge: here you WANT the personal details — who someone is, what they like and dislike, their relationships, their ongoing situations, and how they prefer {bot_name} to talk to them.
+
+# ATTRIBUTING FACTS TO THE RIGHT PERSON
+
+Each message is prefixed with the speaker's name, like:
+
+    Alex: i hate coriander btw
+
+Every fact you extract MUST be attributed to the exact `sender` name (copied verbatim, character-for-character, from the conversation) of the person the fact is **about** — almost always the person who said it. Messages from {bot_name} are the assistant's own turns; never create facts for {bot_name}, but you may use her turns as context to understand the user.
+
+If a single conversation involves multiple users, separate the facts so each user only gets the facts that are about them.
+
+# WHAT TO EXTRACT (per user)
+
+- Identity & biography: name, age, where they study/work, where they live, family, relationships
+- Stable preferences: foods, music, hobbies, things they love or hate
+- Ongoing situations and plans that will stay relevant (their course, their job hunt, a recurring struggle)
+- How they like to communicate with {bot_name} (tone, nicknames, boundaries, inside jokes)
+- Anything {bot_name} would feel rude or forgetful for not remembering next time
+
+# WHAT NOT TO EXTRACT
+
+- General world knowledge with no personal angle (that belongs in a different system)
+- Pure filler, greetings, or fleeting moods with no lasting relevance ("i'm bored rn")
+- One-off logistics that won't matter later ("brb getting water")
+
+# GUIDELINES
+
+- **Self-contained**: each fact must make sense on its own, e.g. "Dislikes coriander" not "hates it".
+- **Concise**: one short sentence per fact.
+- **Keep the person implicit**: write the fact about them ("Studies Computer Science at NTU"); the attribution is carried by the `sender` name, so you don't need to repeat their name inside the fact.
+- **Numerically precise**: preserve exact quantities and proper nouns exactly as stated.
+
+# OUTPUT FORMAT
+
+Return one entry per user who yielded at least one fact, each with that user's `sender` name (copied exactly as it appears in the conversation) and the list of facts about them. If the conversation yields nothing durable about anyone, return an empty list. Do not invent or stretch to produce facts — an empty result is acceptable and common for pure small talk.
+"""
+
+USER_FACT_CONSOLIDATION_SYSTEM_PROMPT = """\
+You maintain the long-term personal profile that an AI persona named {bot_name} keeps about ONE individual user.
+
+This profile holds durable, personal facts and preferences about this single person — who they are, what they like and dislike, their relationships and ongoing situations, and how they like {bot_name} to talk to them.
+
+You are given:
+- EXISTING FACTS: what {bot_name} currently remembers about this person.
+- NEW FACTS: facts just extracted about this same person from the latest conversation.
+
+Merge them into a single, clean list of short factual sentences about this one person.
+
+# MERGE RULES
+
+- **De-duplicate**: never keep two facts that say the same thing. If two facts overlap, keep the single clearer, more complete version.
+- **Resolve conflicts**: if a new fact contradicts an existing one, keep the new one and discard the old. Newer information is always correct.
+- **Preserve** every non-conflicting existing fact.
+
+**Same topic**: A new fact about something already recorded -> combine the overlapping portions into one richer fact.
+**Continuation**: A follow-up or next step in an existing situation -> update the existing fact to reflect it.
+**Contradiction**: New information that conflicts with an existing fact. If there is overlap, combine and replace only the contradicted detail; if completely contradictory, go with the newer fact.
+
+Do not invent or embellish facts. Every fact in your output must come from EXISTING FACTS or NEW FACTS.
+
+Return the full, rewritten profile as a flat list of short, self-contained statements about this person.
+
+<existing facts>
+{existing_facts}
+</existing facts>
+
+<new facts>
+{new_facts}
+</new facts>
+
+"""
+
+
 NTU_FOOD_GUIDE = """
 Top 16 Dishes by Location at NTU:
 

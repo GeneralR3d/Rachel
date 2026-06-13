@@ -10,7 +10,7 @@ Ported from Reference/app/client.py. Behaviour is unchanged; the only edits are:
 import asyncio
 import time
 from pprint import pprint
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 from telethon import TelegramClient, events
@@ -28,6 +28,7 @@ from app.repository import (
     upsert_user,
 )
 from app.services.llm import get_response
+from app.services.userfacts import update_user_facts
 from app.services.worldview import update_worldview
 from app.telegram.bot import ADMIN
 from app.utils import parse_history
@@ -57,8 +58,17 @@ class BufferedMessage(BaseModel):
     # The responder LLM's one-sentence justification; None for user messages.
     reason: Optional[str] = None
 
-    def to_llm_dict(self) -> Dict[str, str]:
-        return {"sender": self.sender_name, "content": self.content}
+    def to_llm_dict(self) -> Dict[str, Any]:
+        return {
+            "sender": self.sender_name,
+            "content": self.content,
+        }
+    def to_llm_dict_full(self) -> Dict[str, Any]:
+        return {
+            "sender": self.sender_name,
+            "sender_user_id": self.sender_user_id,
+            "content": self.content,
+        }
 
 
 # state
@@ -196,11 +206,12 @@ async def finalize_conversation(chat_id: int, delay: float):
     path, which calls _flush_chat directly).
     """
     await asyncio.sleep(delay)
-    conversation = [m.to_llm_dict() for m in current_messages_buffer.get(chat_id, [])]
+    conversation = [m.to_llm_dict_full() for m in current_messages_buffer.get(chat_id, [])]
     await _flush_chat(chat_id)
     if conversation:
         asyncio.create_task(update_worldview(conversation))
-        print("Worldview pipleline called")
+        asyncio.create_task(update_user_facts(conversation))
+        print("Worldview + user-facts pipelines called")
 
 
 async def flush_all_buffers() -> None:
