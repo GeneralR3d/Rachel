@@ -58,6 +58,29 @@ uv run uvicorn app.main:app --reload
 
 On startup the app seeds the default system prompt (only if not already present), starts both Telegram clients, and serves the HTTP API at `http://localhost:8000`.
 
+## Admin bot commands
+
+Sent as Telegram messages to the admin bot (`bot.session`); only `ADMIN_ID` is allowed.
+
+| Command | Description |
+|---|---|
+| `/get_responder_system_prompt` | Show the current responder system prompt |
+| `/set_responder_system_prompt <text>` | Set a new responder system prompt |
+| `/get_summarizer_system_prompt` | Show the current summarizer system prompt |
+| `/set_summarizer_system_prompt <text>` | Set a new summarizer system prompt |
+| `/list_user_names` | List all known usernames and names |
+| `/list_chats` | List all chats with message counts |
+| `/get_history <chat_id>` | Show stored history for a chat (includes responder `reason` lines) |
+| `/clear_history <chat_id>` | Clear a chat's history |
+| `/get_summary <chat_id>` | Show a chat's conversation summary |
+| `/delete_summary <chat_id>` | Delete a chat's conversation summary |
+| `/get_user_facts <user_id>` | Show stored facts/preferences for a user |
+| `/set_user_facts <user_id> <facts text>` | Set facts/preferences for a user |
+| `/delete_user_facts <user_id>` | Delete a user's stored facts/preferences |
+| `/list_traits` | List all personality trait sliders and current values |
+| `/set_trait <id> <low\|medium\|high>` | Set one personality trait |
+| `/reset_traits` | Reset all personality traits to `medium` |
+
 ## Admin HTTP API
 
 | Method | Path | Description |
@@ -92,6 +115,9 @@ To set a per-chat scope, you need to use the Bot API directly instead of BotFath
         {"command": "get_summary", "description": "Get the conversation summary for a chat"},
         {"command": "delete_summary", "description": "Delete the conversation summary for a chat"},
         {"command": "list_user_names", "description": "List all usernames and names"},
+        {"command": "get_user_facts", "description": "Get stored facts/preferences for a user: /get_user_facts <user_id>"},
+        {"command": "set_user_facts", "description": "Set facts/preferences for a user: /set_user_facts <user_id> <facts text>"},
+        {"command": "delete_user_facts", "description": "Delete stored facts/preferences for a user: /delete_user_facts <user_id>"},
         {"command": "list_traits", "description": "List all personality trait sliders and current values"},
         {"command": "set_trait", "description": "Set a trait value: /set_trait <id> <low|medium|high>"},
         {"command": "reset_traits", "description": "Reset all personality traits to medium"}
