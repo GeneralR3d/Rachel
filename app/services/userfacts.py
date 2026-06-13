@@ -29,6 +29,7 @@ import asyncio
 import traceback
 from collections import defaultdict
 from typing import Any, Dict, List
+from datetime import datetime
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openrouter import ChatOpenRouter
@@ -86,6 +87,9 @@ class UserFactsState(TypedDict):
     conversation: List[Dict[str, Any]]
     # Maps each sender name in the conversation to its numeric user_id.
     name_to_id: Dict[str, int]
+    # Narrative summary of the just-finished conversation, injected into the
+    # extractor prompt as {chat_summary} to enrich extractions.
+    summary: str
     # Extracted new facts keyed by user_id.
     extracted: Dict[int, List[str]]
 
@@ -138,10 +142,19 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
         for entry in state["conversation"]
     ]
 
+    now = datetime.now()
+    formatted_date = (
+        f"The current date is {now.strftime('%d %B %Y')}, "
+        f"the current month is {now.strftime('%B')}, "
+        f"the current day of week is {now.strftime('%A')}, "
+    )
+
     prompt = ChatPromptTemplate.from_messages(
         [("system", USER_FACT_EXTRACTOR_SYSTEM_PROMPT), *history_msgs]
     )
-    msgs = prompt.format_messages(bot_name=BOT_NAME)
+    msgs = prompt.format_messages(
+        bot_name=BOT_NAME, chat_summary=state.get("summary") or "(none)", observation_date=formatted_date
+    )
     print(f"\n[userfacts] ===== EXTRACTOR LLM context ({len(msgs)} messages) =====")
     for m in msgs:
         print(f"  [{m.type}] {m.content}")
@@ -229,7 +242,9 @@ def _build_graph():
 _graph = _build_graph()
 
 
-async def update_user_facts(conversation: List[Dict[str, Any]]) -> None:
+async def update_user_facts(
+    conversation: List[Dict[str, Any]], summary: str = ""
+) -> None:
     """Extract per-user facts from a finished conversation and merge each into DB.
 
     Never raises — errors are caught and logged so memory upkeep can't crash the
@@ -251,6 +266,7 @@ async def update_user_facts(conversation: List[Dict[str, Any]]) -> None:
     state: UserFactsState = {
         "conversation": conversation,
         "name_to_id": name_to_id,
+        "summary": summary or "",
         "extracted": {},
     }
     try:
