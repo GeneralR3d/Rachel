@@ -331,7 +331,13 @@ async def new_message(event):
             )
 
     sender = await event.get_sender()
-    event_username = sender.username if sender and sender.username else "Unknown"
+    # Prioritize first name, better for summary and fact extraction
+    # Might cause conflicts if 2 ppl in same chat have exact same first name, which is unlikely
+    if sender:
+        event_name = getattr(sender, "first_name", None)
+        event_name = event_name or sender.user_name
+    else:
+        event_name = "Unknown"
 
     if sender:
         await upsert_user(
@@ -345,7 +351,7 @@ async def new_message(event):
         BufferedMessage(
             telegram_message_id=event.message.id,
             sender_user_id=sender.id if sender else 0,
-            sender_name=event_username,
+            sender_name=event_name,
             content=event.raw_text,
             is_persisted=False,
         )

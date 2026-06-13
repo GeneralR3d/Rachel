@@ -376,9 +376,11 @@ async def get_history(chat_id: int, count: int = -1) -> list[dict]:
 
     count: number of most-recent rows to return (-1 for all).
     """
+    # Prioritize first name, better for summary and fact extraction
+    # Might cause conflicts if 2 ppl in same chat have exact same first name, which is unlikely
     display_name = func.coalesce(
-        User.username,
         User.first_name,
+        User.username,
         sa.cast(History.sender_user_id, sa.Text),
     ).label("sender")
 
