@@ -14,8 +14,11 @@ responder_node:  generates Rachel's reply using the mood detected in the
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
+from pprint import pprint
 
 import tiktoken
+
+from app.services import worldview
 
 _tokenizer = tiktoken.get_encoding("cl100k_base")
 
@@ -23,6 +26,8 @@ _tokenizer = tiktoken.get_encoding("cl100k_base")
 def _count_tokens(text: str) -> int:
     return len(_tokenizer.encode(text))
 
+from langchain_core.exceptions import OutputParserException
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openrouter import ChatOpenRouter
 from langgraph.graph import END, START, StateGraph
@@ -131,24 +136,31 @@ _responder_llm = ChatOpenRouter(
     model=settings.openrouter_model,
     api_key=settings.openrouter_api_key,
     temperature=0.2,
-).with_structured_output(ResponseOutput, method="json_mode")
+).with_structured_output(ResponseOutput)
 
 
 async def summarizer_node(state: GraphState) -> Dict:
+    # History is built as concrete Message objects (not templated tuples) so any
+    # literal '{' or '}' in user content is passed through verbatim rather than
+    # parsed as an f-string placeholder, which would crash from_messages.
     history_msgs = [
-        (
-            "assistant" if entry["sender"] == BOT_NAME else "human",
-            f"{entry['sender']}: {entry['content']}",
-        )
+        AIMessage(content=f"{entry['sender']}: {entry['content']}")
+        if entry["sender"] == BOT_NAME
+        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
         for entry in state["history"]
     ]
 
     system_prompt_str = await get_summarizer_system_prompt()
 
-    prompt = ChatPromptTemplate.from_messages([("system", system_prompt_str), *history_msgs])
-    msgs = prompt.format_messages(
-        mood_list = MOOD_LABELS,
+    system_msgs = ChatPromptTemplate.from_messages(
+        [("system", system_prompt_str)]
+    ).format_messages(
+        mood_list=MOOD_LABELS,
         old_summary=state.get("current_summary") or "")
+    msgs = [*system_msgs, *history_msgs]
+
+    msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
+    print(f"[summarizer] context: {len(msgs)} messages, {msgs_tokens} tokens")
 
     try:
         result: SummarizerOutput = await _summarizer_llm.ainvoke(msgs)
@@ -162,17 +174,24 @@ async def summarizer_node(state: GraphState) -> Dict:
 
 
 async def responder_node(state: GraphState) -> Dict:
-    print("[responder] node entered")
     try:
-        mood = state.get("mood", "default")
-        communication_style = CONVERSATION_STYLE.get(mood, CONVERSATION_STYLE["default"])
-        print(f"[responder] mood={mood} | examples built")
+
 
         system_prompt_str = await get_responder_system_prompt()
         print(f"[responder] system prompt fetched (tokens={_count_tokens(system_prompt_str)})")
+    
 
         personality_traits = await get_active_trait_prompts()
         print(f"[responder] personality traits fetched (tokens={_count_tokens(personality_traits)})")
+
+        mood = state.get("mood", "default")
+        communication_style = CONVERSATION_STYLE.get(mood, CONVERSATION_STYLE["default"])
+        print(f"[responder] communication style fetched (tokens={_count_tokens(communication_style)})")
+
+        world_view = read_worldview() or "Nothing learned yet."
+        print(f"[responder] world view fetched (tokens={_count_tokens(communication_style)})")
+        pprint(world_view)
+
 
         # Pull stored facts/preferences for all participants (cached per user).
         sender_user_ids = state.get("sender_user_ids") or []
@@ -184,6 +203,7 @@ async def responder_node(state: GraphState) -> Dict:
         ]
         user_facts = "\n\n".join(facts_blocks) or "Nothing learned yet."
         print(f"[responder] user facts fetched for {len(sender_user_ids)} sender(s) (tokens={_count_tokens(user_facts)})")
+        pprint(user_facts)
 
         now = datetime.now()
         formatted_datetime = (
@@ -210,20 +230,21 @@ async def responder_node(state: GraphState) -> Dict:
 
         print(f"[responder] schedule fetched (current_activity={current_activity}, current datetime = {formatted_datetime}")
 
+        # History is built as concrete Message objects (not templated tuples) so
+        # any literal '{' or '}' in user content is passed through verbatim rather
+        # than parsed as an f-string placeholder, which would crash from_messages.
         history_msgs = [
-            (
-                "assistant" if entry["sender"] == BOT_NAME else "human",
-                f"{entry['sender']}: {entry['content']}",
-            )
+            AIMessage(content=f"{entry['sender']}: {entry['content']}")
+            if entry["sender"] == BOT_NAME
+            else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
             for entry in state["history"]
         ]
-        history_tokens = sum(_count_tokens(f"{role}: {content}") for role, content in history_msgs)
-        print(f"[responder] history_msgs built (count={len(history_msgs)}, tokens={history_tokens})")
+        history_tokens = sum(_count_tokens(f"{m.type}: {m.content}") for m in history_msgs)
+        print(f"[responder] history fetched (count={len(history_msgs)}, tokens={history_tokens})")
 
-        prompt = ChatPromptTemplate.from_messages([("system", system_prompt_str), *history_msgs])
-        print(f"[responder] template created, input_variables={prompt.input_variables}")
+        system_tmpl = ChatPromptTemplate.from_messages([("system", system_prompt_str)])
 
-        msgs = prompt.format_messages(
+        system_msgs = system_tmpl.format_messages(
             communication_style=communication_style,
             current_summary=state.get("current_summary") or "",
             personality_traits=personality_traits,
@@ -231,13 +252,30 @@ async def responder_node(state: GraphState) -> Dict:
             datetime=formatted_datetime,
             current_activity=current_activity or "Nothing scheduled right now",
             day_summary=day_summary,
-            world_view=read_worldview() or "Nothing learned yet.",
+            world_view=world_view,
             user_facts=user_facts,
         )
-        print(f"[responder] messages formatted (count={len(msgs)})")
+        msgs = [*system_msgs, *history_msgs]
+        msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
+        print(f"[responder] context: {len(msgs)} messages, {msgs_tokens} tokens")
 
-        print("[responder] calling LLM now...")
-        result: ResponseOutput = await _responder_llm.ainvoke(msgs)
+        try:
+            result: ResponseOutput = await _responder_llm.ainvoke(msgs)
+        except OutputParserException as e:
+            # The model sometimes ignores json_mode and returns Rachel's reply as
+            # plain prose. The raw text is still a usable reply, so salvage it from
+            # the exception rather than crashing the whole reply task.
+            raw = (e.llm_output or "").strip()
+            prefix = f"{BOT_NAME}:"
+            if raw.startswith(prefix):
+                raw = raw[len(prefix):].strip()
+            if not raw:
+                raise
+            print(f"[responder] json parse failed; salvaging raw text ({len(raw)} chars)")
+            return {
+                "response_text": raw,
+                "response_reason": "Salvaged from non-JSON model output (json_mode parse failure).",
+            }
         print(f"[responder] LLM returned: content={result.content[:80]!r} | reason={result.reason!r}")
         return {"response_text": result.content, "response_reason": result.reason}
     except BaseException as e:

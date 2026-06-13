@@ -30,7 +30,11 @@ import traceback
 from collections import defaultdict
 from typing import Any, Dict, List
 from datetime import datetime
+from pprint import pprint
 
+import tiktoken
+
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openrouter import ChatOpenRouter
 from langgraph.graph import END, START, StateGraph
@@ -47,6 +51,12 @@ from app.repository import get_user_facts, set_user_facts
 
 settings = get_settings()
 BOT_NAME = settings.bot_name
+
+_tokenizer = tiktoken.get_encoding("cl100k_base")
+
+
+def _count_tokens(text: str) -> int:
+    return len(_tokenizer.encode(text))
 
 # Per-user lock guarding the read-modify-write in consolidation_node. Two
 # conversations finishing at once that both involve the same user would
@@ -134,11 +144,13 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
     # Only the sender NAME is shown to the model — it is far less likely to
     # hallucinate a name than a numeric id. We resolve names back to ids below
     # via name_to_id.
+    # History is built as concrete Message objects (not templated tuples) so any
+    # literal '{' or '}' in user content is passed through verbatim rather than
+    # parsed as an f-string placeholder, which would crash from_messages.
     history_msgs = [
-        (
-            "assistant" if entry["sender"] == BOT_NAME else "human",
-            f"{entry['sender']}: {entry['content']}",
-        )
+        AIMessage(content=f"{entry['sender']}: {entry['content']}")
+        if entry["sender"] == BOT_NAME
+        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
         for entry in state["conversation"]
     ]
 
@@ -149,16 +161,14 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
         f"the current day of week is {now.strftime('%A')}. "
     )
 
-    prompt = ChatPromptTemplate.from_messages(
-        [("system", USER_FACT_EXTRACTOR_SYSTEM_PROMPT), *history_msgs]
-    )
-    msgs = prompt.format_messages(
+    system_msgs = ChatPromptTemplate.from_messages(
+        [("system", USER_FACT_EXTRACTOR_SYSTEM_PROMPT)]
+    ).format_messages(
         bot_name=BOT_NAME, chat_summary=state.get("summary") or "(none)", observation_date=formatted_date
     )
-    print(f"\n[userfacts] ===== EXTRACTOR LLM context ({len(msgs)} messages) =====")
-    for m in msgs:
-        print(f"  [{m.type}] {m.content}")
-    print("[userfacts] ===== end EXTRACTOR context =====\n")
+    msgs = [*system_msgs, *history_msgs]
+    msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
+    print(f"[userfacts] extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
     result: ExtractorOutput = await _extractor_llm.ainvoke(msgs)
 
     name_to_id = state["name_to_id"]
@@ -175,7 +185,9 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
             continue
         extracted.setdefault(user_id, []).extend(facts)
 
-    print(f"[userfacts] extracted facts for {len(extracted)} user(s): {extracted}")
+    for uid, facts in extracted.items():
+        print(f"[userfacts] extracted facts for user {uid}")
+        pprint(facts)
     return {"extracted": extracted}
 
 
@@ -202,10 +214,8 @@ async def consolidation_node(payload: Dict) -> Dict:
         msgs = prompt.format_messages(
             bot_name=BOT_NAME, existing_facts=existing_facts_text, new_facts=new_facts_text
         )
-        print(f"\n[userfacts] ===== CONSOLIDATION LLM context (user {user_id}) =====")
-        for m in msgs:
-            print(f"  [{m.type}] {m.content}")
-        print(f"[userfacts] ===== end CONSOLIDATION context (user {user_id}) =====\n")
+        msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
+        print(f"[userfacts] consolidation context (user {user_id}): {len(msgs)} messages, {msgs_tokens} tokens")
         result: ConsolidationOutput = await _consolidation_llm.ainvoke(msgs)
         facts = [f.strip() for f in result.facts if f.strip()]
 

@@ -133,8 +133,6 @@ async def reply(event):
             pending_summaries[chat_id] = new_summary
             print(f"[{chat_id}] Summary buffered (pending flush): {new_summary}")
         print(f"[{chat_id}] Current summary: {current_summary}")
-        print(f"[{chat_id}] Context ({len(context)} messages):")
-        pprint(context)
 
     bot_message_id = None
     for i, raw_text in enumerate(response.split("\n\n")):

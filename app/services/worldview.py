@@ -29,6 +29,9 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List
 
+import tiktoken
+
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openrouter import ChatOpenRouter
 from langgraph.graph import END, START, StateGraph
@@ -42,6 +45,12 @@ from app.prompts import CONSOLIDATION_SYSTEM_PROMPT, FACT_EXTRACTOR_SYSTEM_PROMP
 settings = get_settings()
 BOT_NAME = settings.bot_name
 _WORLDVIEW_PATH = Path(settings.worldview_path)
+
+_tokenizer = tiktoken.get_encoding("cl100k_base")
+
+
+def _count_tokens(text: str) -> int:
+    return len(_tokenizer.encode(text))
 
 # The file is read-modify-written as a whole, so serialise concurrent
 # consolidations (two chats finishing near-simultaneously) to avoid clobbering.
@@ -121,17 +130,21 @@ def _write_facts(facts: List[str]) -> None:
 
 
 async def fact_extractor_node(state: WorldviewState) -> Dict:
+    # History is built as concrete Message objects (not templated tuples) so any
+    # literal '{' or '}' in user content is passed through verbatim rather than
+    # parsed as an f-string placeholder, which would crash from_messages.
     history_msgs = [
-        (
-            "assistant" if entry["sender"] == BOT_NAME else "human",
-            f"{entry['sender']}: {entry['content']}",
-        )
+        AIMessage(content=f"{entry['sender']}: {entry['content']}")
+        if entry["sender"] == BOT_NAME
+        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
         for entry in state["conversation"]
     ]
-    prompt = ChatPromptTemplate.from_messages(
-        [("system", FACT_EXTRACTOR_SYSTEM_PROMPT), *history_msgs]
-    )
-    msgs = prompt.format_messages(bot_name=BOT_NAME)
+    system_msgs = ChatPromptTemplate.from_messages(
+        [("system", FACT_EXTRACTOR_SYSTEM_PROMPT)]
+    ).format_messages(bot_name=BOT_NAME)
+    msgs = [*system_msgs, *history_msgs]
+    msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
+    print(f"[worldview] extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
     result: ExtractorOutput = await _extractor_llm.ainvoke(msgs)
     facts = [f.strip() for f in result.facts if f.strip()]
     print(f"[worldview] extracted {len(facts)} new fact(s): {facts}")
@@ -149,6 +162,8 @@ async def consolidation_node(state: WorldviewState) -> Dict:
     msgs = prompt.format_messages(
         bot_name=BOT_NAME, existing_facts=existing_facts_text, new_facts=new_facts_text
     )
+    msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
+    print(f"[worldview] consolidation context: {len(msgs)} messages, {msgs_tokens} tokens")
     result: ConsolidationOutput = await _consolidation_llm.ainvoke(msgs)
     facts = [f.strip() for f in result.facts if f.strip()]
     print(f"[worldview] consolidated to {len(facts)} fact(s)")
