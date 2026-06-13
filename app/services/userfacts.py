@@ -59,6 +59,11 @@ _tokenizer = tiktoken.get_encoding("cl100k_base")
 def _count_tokens(text: str) -> int:
     return len(_tokenizer.encode(text))
 
+
+def _tag(chat_id: int | None) -> str:
+    """Log prefix for userfacts lines, with the chat id when we know it."""
+    return f"[userfacts][{chat_id}]" if chat_id is not None else "[userfacts]"
+
 # Per-user lock guarding the read-modify-write in consolidation_node. Two
 # conversations finishing at once that both involve the same user would
 # otherwise race (both read the old profile, second write clobbers the first).
@@ -103,6 +108,9 @@ class UserFactsState(TypedDict):
     summary: str
     # Extracted new facts keyed by user_id.
     extracted: Dict[int, List[str]]
+    # Originating chat, threaded through purely so node logs can be tagged and
+    # disambiguated when multiple chats finalize concurrently.
+    chat_id: int | None
 
 
 _extractor_llm = ChatOpenRouter(
@@ -142,6 +150,7 @@ def _format_facts(facts: List[str]) -> str:
 
 
 async def fact_extractor_node(state: UserFactsState) -> Dict:
+    tag = _tag(state.get("chat_id"))
     # Only the sender NAME is shown to the model — it is far less likely to
     # hallucinate a name than a numeric id. We resolve names back to ids below
     # via name_to_id.
@@ -169,7 +178,7 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
     )
     msgs = [*system_msgs, *history_msgs]
     msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
-    print(f"[userfacts] extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
+    print(f"{tag} extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
     result: ExtractorOutput = await _extractor_llm.ainvoke(msgs)
 
     name_to_id = state["name_to_id"]
@@ -178,7 +187,7 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
     # genuine facts) are distinguishable in the logs.
     returned = [(e.sender, len([f for f in e.facts if f.strip()])) for e in result.user_facts]
     print(
-        f"[userfacts] extractor returned {len(result.user_facts)} entry(ies): {returned} | "
+        f"{tag} extractor returned {len(result.user_facts)} entry(ies): {returned} | "
         f"resolvable names: {list(name_to_id.keys())}"
     )
 
@@ -192,16 +201,16 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
             # Model returned a name we don't recognise (e.g. Rachel herself or a
             # hallucinated name) — drop it rather than guess an id.
             print(
-                f"[userfacts] skipping unknown sender {entry.sender!r} "
+                f"{tag} skipping unknown sender {entry.sender!r} "
                 f"({len(facts)} fact(s) dropped); known names: {list(name_to_id.keys())}"
             )
             continue
         extracted.setdefault(user_id, []).extend(facts)
 
     if not extracted:
-        print("[userfacts] nothing to consolidate (no resolvable new facts), ending")
+        print(f"{tag} nothing to consolidate (no resolvable new facts), ending")
     for uid, facts in extracted.items():
-        print(f"[userfacts] extracted facts for user {uid}")
+        print(f"{tag} extracted facts for user {uid}")
         pprint(facts)
     return {"extracted": extracted}
 
@@ -214,6 +223,7 @@ async def consolidation_node(payload: Dict) -> Dict:
     """
     user_id: int = payload["user_id"]
     extracted: List[str] = payload["new_facts"]
+    tag = _tag(payload.get("chat_id"))
 
     # Serialise the whole read-modify-write per user so concurrent conversations
     # touching the same user can't clobber each other's profile.
@@ -230,7 +240,7 @@ async def consolidation_node(payload: Dict) -> Dict:
             bot_name=BOT_NAME, existing_facts=existing_facts_text, new_facts=new_facts_text
         )
         msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
-        print(f"[userfacts] consolidation context (user {user_id}): {len(msgs)} messages, {msgs_tokens} tokens")
+        print(f"{tag} consolidation context (user {user_id}): {len(msgs)} messages, {msgs_tokens} tokens")
         result: ConsolidationOutput = await _consolidation_llm.ainvoke(msgs)
         facts = [f.strip() for f in result.facts if f.strip()]
 
@@ -239,7 +249,7 @@ async def consolidation_node(payload: Dict) -> Dict:
         # Write-through the responder's cache so it doesn't serve the stale
         # pre-consolidation profile for up to USER_FACTS_CACHE_TTL.
         update_user_facts_cache(user_id, facts_text)
-        print(f"[userfacts] user {user_id} profile updated ({len(facts)} fact(s))")
+        print(f"{tag} user {user_id} profile updated ({len(facts)} fact(s))")
     return {}
 
 
@@ -248,8 +258,9 @@ def _route_after_extraction(state: UserFactsState):
     extracted = state["extracted"]
     if not extracted:
         return END
+    chat_id = state.get("chat_id")
     return [
-        Send("consolidation_node", {"user_id": user_id, "new_facts": facts})
+        Send("consolidation_node", {"user_id": user_id, "new_facts": facts, "chat_id": chat_id})
         for user_id, facts in extracted.items()
     ]
 
@@ -272,7 +283,7 @@ _graph = _build_graph()
 
 
 async def update_user_facts(
-    conversation: List[Dict[str, Any]], summary: str = ""
+    conversation: List[Dict[str, Any]], summary: str = "", chat_id: int | None = None
 ) -> None:
     """Extract per-user facts from a finished conversation and merge each into DB.
 
@@ -297,9 +308,10 @@ async def update_user_facts(
         "name_to_id": name_to_id,
         "summary": summary or "",
         "extracted": {},
+        "chat_id": chat_id,
     }
     try:
         await _graph.ainvoke(state)
     except Exception as e:  # never let memory upkeep crash the caller
-        print(f"[userfacts] update failed: {e}")
+        print(f"{_tag(chat_id)} update failed: {e}")
         traceback.print_exc()

@@ -79,6 +79,14 @@ class WorldviewState(TypedDict):
     existing_facts: List[str]
     extracted_facts: List[str]
     consolidated_facts: List[str]
+    # Originating chat, threaded through purely so node logs can be tagged and
+    # disambiguated when multiple chats finalize concurrently.
+    chat_id: int | None
+
+
+def _tag(chat_id: int | None) -> str:
+    """Log prefix for worldview lines, with the chat id when we know it."""
+    return f"[worldview][{chat_id}]" if chat_id is not None else "[worldview]"
 
 
 _extractor_llm = ChatOpenRouter(
@@ -130,6 +138,7 @@ def _write_facts(facts: List[str]) -> None:
 
 
 async def fact_extractor_node(state: WorldviewState) -> Dict:
+    tag = _tag(state.get("chat_id"))
     # History is built as concrete Message objects (not templated tuples) so any
     # literal '{' or '}' in user content is passed through verbatim rather than
     # parsed as an f-string placeholder, which would crash from_messages.
@@ -144,14 +153,15 @@ async def fact_extractor_node(state: WorldviewState) -> Dict:
     ).format_messages(bot_name=BOT_NAME)
     msgs = [*system_msgs, *history_msgs]
     msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
-    print(f"[worldview] extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
+    print(f"{tag} extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
     result: ExtractorOutput = await _extractor_llm.ainvoke(msgs)
     facts = [f.strip() for f in result.facts if f.strip()]
-    print(f"[worldview] extracted {len(facts)} new fact(s): {facts}")
+    print(f"{tag} extracted {len(facts)} new fact(s): {facts}")
     return {"extracted_facts": facts}
 
 
 async def consolidation_node(state: WorldviewState) -> Dict:
+    tag = _tag(state.get("chat_id"))
     existing = state["existing_facts"]
     extracted = state["extracted_facts"]
 
@@ -163,10 +173,10 @@ async def consolidation_node(state: WorldviewState) -> Dict:
         bot_name=BOT_NAME, existing_facts=existing_facts_text, new_facts=new_facts_text
     )
     msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
-    print(f"[worldview] consolidation context: {len(msgs)} messages, {msgs_tokens} tokens")
+    print(f"{tag} consolidation context: {len(msgs)} messages, {msgs_tokens} tokens")
     result: ConsolidationOutput = await _consolidation_llm.ainvoke(msgs)
     facts = [f.strip() for f in result.facts if f.strip()]
-    print(f"[worldview] consolidated to {len(facts)} fact(s)")
+    print(f"{tag} consolidated to {len(facts)} fact(s)")
     return {"consolidated_facts": facts}
 
 
@@ -202,6 +212,7 @@ async def update_worldview(conversation: List[Dict[str, str]], chat_id: int | No
     if not conversation:
         return None
 
+    tag = _tag(chat_id)
     async with _file_lock:
         existing_facts = _read_facts()
         state: WorldviewState = {
@@ -209,20 +220,21 @@ async def update_worldview(conversation: List[Dict[str, str]], chat_id: int | No
             "existing_facts": existing_facts,
             "extracted_facts": [],
             "consolidated_facts": [],
+            "chat_id": chat_id,
         }
         try:
             result = await _graph.ainvoke(state)
         except Exception as e:  # never let memory upkeep crash the caller
-            print(f"[worldview] update failed: {e}")
+            print(f"{tag} update failed: {e}")
             traceback.print_exc()
             return None
 
-        
+
         if not result["extracted_facts"]:
-            print(f"[worldview] nothing new from chat; file unchanged")
+            print(f"{tag} nothing new from chat; file unchanged")
             return None
 
         new_facts = result["consolidated_facts"]
         _write_facts(new_facts)
-        print(f"[worldview] file updated ({len(new_facts)} fact(s)) after chat")
+        print(f"{tag} file updated ({len(new_facts)} fact(s)) after chat")
         return new_facts

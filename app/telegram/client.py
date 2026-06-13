@@ -220,9 +220,9 @@ async def finalize_conversation(chat_id: int, delay: float):
     summary = pending_summaries.get(chat_id) or await get_summary(chat_id)
     await _flush_chat(chat_id)
     if conversation:
-        asyncio.create_task(update_worldview(conversation))
-        asyncio.create_task(update_user_facts(conversation, summary))
-        print("Worldview + user-facts pipelines called")
+        asyncio.create_task(update_worldview(conversation, chat_id))
+        asyncio.create_task(update_user_facts(conversation, summary, chat_id))
+        print(f"[{chat_id}] Worldview + user-facts pipelines called")
 
 
 async def flush_all_buffers() -> None:
