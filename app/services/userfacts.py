@@ -48,6 +48,7 @@ from app.prompts import (
     USER_FACT_EXTRACTOR_SYSTEM_PROMPT,
 )
 from app.repository import get_user_facts, set_user_facts
+from app.services.llm import update_user_facts_cache
 
 settings = get_settings()
 BOT_NAME = settings.bot_name
@@ -172,6 +173,15 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
     result: ExtractorOutput = await _extractor_llm.ainvoke(msgs)
 
     name_to_id = state["name_to_id"]
+    # Log exactly what the model returned vs. what names we can resolve, so the
+    # three "nothing happened" cases (model returned []; names didn't resolve;
+    # genuine facts) are distinguishable in the logs.
+    returned = [(e.sender, len([f for f in e.facts if f.strip()])) for e in result.user_facts]
+    print(
+        f"[userfacts] extractor returned {len(result.user_facts)} entry(ies): {returned} | "
+        f"resolvable names: {list(name_to_id.keys())}"
+    )
+
     extracted: Dict[int, List[str]] = {}
     for entry in result.user_facts:
         facts = [f.strip() for f in entry.facts if f.strip()]
@@ -181,10 +191,15 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
         if user_id is None:
             # Model returned a name we don't recognise (e.g. Rachel herself or a
             # hallucinated name) — drop it rather than guess an id.
-            print(f"[userfacts] skipping unknown sender {entry.sender!r}")
+            print(
+                f"[userfacts] skipping unknown sender {entry.sender!r} "
+                f"({len(facts)} fact(s) dropped); known names: {list(name_to_id.keys())}"
+            )
             continue
         extracted.setdefault(user_id, []).extend(facts)
 
+    if not extracted:
+        print("[userfacts] nothing to consolidate (no resolvable new facts), ending")
     for uid, facts in extracted.items():
         print(f"[userfacts] extracted facts for user {uid}")
         pprint(facts)
@@ -219,7 +234,11 @@ async def consolidation_node(payload: Dict) -> Dict:
         result: ConsolidationOutput = await _consolidation_llm.ainvoke(msgs)
         facts = [f.strip() for f in result.facts if f.strip()]
 
-        await set_user_facts(user_id, _format_facts(facts))
+        facts_text = _format_facts(facts)
+        await set_user_facts(user_id, facts_text)
+        # Write-through the responder's cache so it doesn't serve the stale
+        # pre-consolidation profile for up to USER_FACTS_CACHE_TTL.
+        update_user_facts_cache(user_id, facts_text)
         print(f"[userfacts] user {user_id} profile updated ({len(facts)} fact(s))")
     return {}
 

@@ -65,6 +65,16 @@ USER_FACTS_CACHE_TTL = 5 * 60    # 5 min
 _user_facts_cache: Dict[int, Tuple[str, float]] = {}  # user_id -> (facts, fetched_at)
 
 
+def update_user_facts_cache(user_id: int, facts: str) -> None:
+    """Write-through the cache after the userfacts pipeline persists a profile.
+
+    Called from userfacts.consolidation_node so the responder sees a freshly
+    consolidated profile immediately instead of waiting out USER_FACTS_CACHE_TTL
+    (or serving the stale pre-consolidation value).
+    """
+    _user_facts_cache[user_id] = (facts, time.monotonic())
+
+
 async def _get_user_facts_cached(user_ids: List[int]) -> Dict[int, str]:
     """Return {user_id: facts} for the given users, serving fresh cache hits and
     batching only the stale/missing ones into a single DB call."""
@@ -195,6 +205,7 @@ async def responder_node(state: GraphState) -> Dict:
 
         # Pull stored facts/preferences for all participants (cached per user).
         sender_user_ids = state.get("sender_user_ids") or []
+        print(f"All users is {sender_user_ids}")
         facts_by_user = await _get_user_facts_cached(sender_user_ids)
         facts_blocks = [
             f"User {uid}:\n{facts.strip()}"
