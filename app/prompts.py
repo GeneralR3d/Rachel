@@ -592,18 +592,18 @@ If a single conversation involves multiple users, separate the facts so each use
 
 Summary: ""
 New Messages:
-[{"role": "user", "content": "Hey! I'm Marcus. I just got promoted to Senior Engineer at Shopify last week - been grinding for two years for this. My wife Elena and I celebrated with dinner at Osteria Francescana, it's our go-to spot for special occasions. We're also expecting our first baby in March!"},
- {"role": "assistant", "content": "Congratulations on everything, Marcus! What exciting times."}]
+[{{"role": "user", "content": "Hey! I'm Marcus. I just got promoted to Senior Engineer at Shopify last week - been grinding for two years for this. My wife Elena and I celebrated with dinner at Osteria Francescana, it's our go-to spot for special occasions. We're also expecting our first baby in March!"}},
+ {{"role": "assistant", "content": "Congratulations on everything, Marcus! What exciting times."}}]
 Observation Date: 2025-08-19
 
 Output:
-{"user_facts": [
-  {"sender": "Marcus", "facts": [
+{{"user_facts": [
+  {{"sender": "Marcus", "facts": [
     "Marcus and was promoted to Senior Engineer at Shopify around August 12, 2025 after working toward it for two years",
     "Marcus has a wife named Elena and they celebrate special occasions at Osteria Francescana, their go-to restaurant",
     "Marcus and his wife Elena are expecting their first baby in March 2026"
-  ]}
-]}
+  ]}}
+]}}
 
 Three distinct topics — career, relationship/dining, family milestone — each get their own memory with full context.
 
@@ -613,18 +613,18 @@ Three distinct topics — career, relationship/dining, family milestone — each
 
 Summary: "Sam is an aspiring actor."
 New Messages:
-[{"role": "user", "content": "As an aspiring actor, I'm looking for advice on improving my craft. Can you recommend some films on Netflix with strong acting performances like Daniel Day-Lewis in 'There Will Be Blood'? I also want to find online resources for acting techniques."},
- {"role": "assistant", "content": "For Netflix films with great acting, check out 'Marriage Story' and 'The Irishman'. For acting techniques, I'd recommend 'An Actor Prepares' by Stanislavski and the MasterClass by Helen Mirren."}]
+[{{"role": "user", "content": "As an aspiring actor, I'm looking for advice on improving my craft. Can you recommend some films on Netflix with strong acting performances like Daniel Day-Lewis in 'There Will Be Blood'? I also want to find online resources for acting techniques."}},
+ {{"role": "assistant", "content": "For Netflix films with great acting, check out 'Marriage Story' and 'The Irishman'. For acting techniques, I'd recommend 'An Actor Prepares' by Stanislavski and the MasterClass by Helen Mirren."}}]
 Observation Date: 2023-06-01
 
 Output:
-{"user_facts": [
-  {"sender": "Sam", "facts": [
+{{"user_facts": [
+  {{"sender": "Sam", "facts": [
     "Sam is an aspiring actor seeking to improve their craft through studying films with strong performances and acting technique resources",
     "Sam enjoys watching films on Netflix with outstanding acting, especially performances like Daniel Day-Lewis in 'There Will Be Blood'",
     "Sam was recommended 'Marriage Story' and 'The Irishman' for performance study, 'An Actor Prepares' by Stanislavski, and Helen Mirren's MasterClass for acting techniques"
-  ]}
-]}
+  ]}}
+]}}
 
 Three dimensions: (1) career aspiration, (2) entertainment viewing preference, (3) specific recommendations. Each extracted separately.
 
@@ -634,18 +634,18 @@ Three dimensions: (1) career aspiration, (2) entertainment viewing preference, (
 
 Summary: ""
 New Messages:
-[{"role": "user", "content": "Linus: Here are the enemy stat blocks for our D&D campaign: Mummies (4): AC 11, HP 45, Speed 20 ft, with Curse of the Pharaohs (DC 15 Wisdom) and Mummy Rot (DC 15 Constitution). Construct Guardians (2): AC 17, HP 110, Speed 30 ft, with Immutable Form, Magic Resistance, and Siege Monster. Skeletal Warriors (6): AC 12, HP 22, Speed 30 ft, with Undead Fortitude."},
- {"role": "assistant", "content": "Got it! I've noted all the stat blocks. Ready when you want to start the encounter."}]
+[{{"role": "user", "content": "Linus: Here are the enemy stat blocks for our D&D campaign: Mummies (4): AC 11, HP 45, Speed 20 ft, with Curse of the Pharaohs (DC 15 Wisdom) and Mummy Rot (DC 15 Constitution). Construct Guardians (2): AC 17, HP 110, Speed 30 ft, with Immutable Form, Magic Resistance, and Siege Monster. Skeletal Warriors (6): AC 12, HP 22, Speed 30 ft, with Undead Fortitude."}},
+ {{"role": "assistant", "content": "Got it! I've noted all the stat blocks. Ready when you want to start the encounter."}}]
 Observation Date: 2024-01-15
 
 Output:
-{"user_facts": [
-  {"sender": "Linus", "facts": [
+{{"user_facts": [
+  {{"sender": "Linus", "facts": [
     "Linus's D&D campaign encounter includes 4 Mummies (AC 11, 45 HP, Speed 20 ft) with Curse of the Pharaohs (DC 15 Wisdom save) and Mummy Rot (DC 15 Constitution save)",
     "Linus's D&D campaign encounter includes 2 Construct Guardians (AC 17, 110 HP, Speed 30 ft) with Immutable Form, Magic Resistance, and Siege Monster traits",
     "Linus's D&D campaign encounter includes 6 Skeletal Warriors (AC 12, 22 HP, Speed 30 ft) with the Undead Fortitude trait"
-  ]}
-]}
+  ]}}
+]}}
 
 Every count (4 Mummies, 2 Construct Guardians, 6 Skeletal Warriors) and every specific value (AC, HP, DCs, trait names) is preserved. Dropping the counts or stat values would destroy the most queryable information.
 
@@ -655,23 +655,23 @@ Every count (4 Mummies, 2 Construct Guardians, 6 Skeletal Warriors) and every sp
 
 Summary: ""
 New Messages:
-[{"role": "user", "content": "Jamie: I adopted a puppy named Max last weekend! He's a beagle mix."},
- {"role": "assistant", "content": "Congratulations! How's he settling in?"},
- {"role": "user", "content": "Jamie: Great! Oh, and I also started pottery classes on Tuesdays. Made a mug with my daughter's face on it."},
- {"role": "assistant", "content": "Fun! Sounds like a lot going on."},
- {"role": "user", "content": "Jamie: Yeah — my sister just moved to Portland too. I'm happy but honestly a bit overwhelmed. My boss gave me a promotion to team lead last week as well."}]
+[{{"role": "user", "content": "Jamie: I adopted a puppy named Max last weekend! He's a beagle mix."}},
+ {{"role": "assistant", "content": "Congratulations! How's he settling in?"}},
+ {{"role": "user", "content": "Jamie: Great! Oh, and I also started pottery classes on Tuesdays. Made a mug with my daughter's face on it."}},
+ {{"role": "assistant", "content": "Fun! Sounds like a lot going on."}},
+ {{"role": "user", "content": "Jamie: Yeah — my sister just moved to Portland too. I'm happy but honestly a bit overwhelmed. My boss gave me a promotion to team lead last week as well."}}]
 Observation Date: 2025-03-10
 
 Output:
-{"user_facts": [
-  {"sender": "Jamie", "facts": [
+{{"user_facts": [
+  {{"sender": "Jamie", "facts": [
     "Jamie adopted a beagle mix puppy named Max around March 1-2, 2025",
     "Jamie started taking pottery classes on Tuesdays",
     "Jamie made a ceramic mug with their daughter's face on it in pottery class",
     "Jamie's sister recently moved to Portland",
     "Jamie was promoted to team lead around March 3, 2025, and feels happy but overwhelmed about all the recent changes"
-  ]}
-]}
+  ]}}
+]}}
 
 FIVE topics across 5 messages — each one extracted separately. Do not stop after the first topic (the puppy). The pottery mug detail, the sister's move, and the emotional reaction to the promotion are all distinct, extractable facts.
 
@@ -680,24 +680,24 @@ FIVE topics across 5 messages — each one extracted separately. Do not stop aft
 <example_5_multi_speaker_conversation_extract_from_all_speakers>
 
 Summary: "John has a dog named Max."
-Recently Extracted: []
-Existing Memories: [{"id": "a1b2c3d4-0000-0000-0000-111111111111", "text": "John has a dog named Max"}]
+
+Existing Memories: [{{"id": "a1b2c3d4-0000-0000-0000-111111111111", "text": "John has a dog named Max"}}]
 New Messages:
-[{"role": "user", "content": "John: Max and I had a blast on our camping trip last summer. We hiked, swam, and made great memories. It was a really peaceful experience."},
- {"role": "assistant", "content": "Maria: That sounds amazing! I actually just got a new cat named Bailey last week — she's been such a joy already. Camping with pets is so soul-nourishing."},
- {"role": "user", "content": "John: Congrats on Bailey! Here's a picture of my family too — that was from a trip we took for my daughter Sara's birthday last fall."}]
+[{{"role": "user", "content": "John: Max and I had a blast on our camping trip last summer. We hiked, swam, and made great memories. It was a really peaceful experience."}},
+ {{"role": "assistant", "content": "Maria: That sounds amazing! I actually just got a new cat named Bailey last week — she's been such a joy already. Camping with pets is so soul-nourishing."}},
+ {{"role": "user", "content": "John: Congrats on Bailey! Here's a picture of my family too — that was from a trip we took for my daughter Sara's birthday last fall."}}]
 Observation Date: 2023-08-11
 
 Output:
-{"user_facts": [
-  {"sender": "John", "facts": [
+{{"user_facts": [
+  {{"sender": "John", "facts": [
     "John and his dog Max went on a camping trip in the summer of 2023 where they hiked, swam, and found it a peaceful experience",
     "John has a daughter named Sara and the family took a trip for her birthday in fall 2022"
-  ]},
-  {"sender": "Maria", "facts": [
+  ]}},
+  {{"sender": "Maria", "facts": [
     "Maria got a new cat named Bailey around early August 2023 and describes her as a joy"
-  ]}
-]}
+  ]}}
+]}}
 
 Three key lessons: (1) The existing memory "John has a dog named Max" does NOT mean all Max-related information is captured — the camping trip is a new event with specific activities (hiking, swimming) and must be extracted and linked. (2) Maria is a named speaker in the "assistant" role but shares a genuine personal fact (new cat Bailey) — this MUST be extracted with the same rigor as user facts. Her echo ("that sounds amazing", "camping is soul-nourishing") is correctly skipped, but her personal fact is not. (3) Sara's name and the birthday trip are separate factual details that each deserve their own extraction.
 

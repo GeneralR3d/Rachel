@@ -527,6 +527,23 @@ async def get_user_facts(user_id: int) -> str:
     return facts or ""
 
 
+async def get_user_facts_batch(user_ids: list[int]) -> dict[int, str]:
+    """Return facts/preferences text for many users in a single query.
+
+    Keyed by user_id; users with no stored facts are simply absent from the dict.
+    """
+    if not user_ids:
+        return {}
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(UserFactsPreferences.user_id, UserFactsPreferences.facts)
+                .where(UserFactsPreferences.user_id.in_(user_ids))
+            )
+        ).all()
+    return {r.user_id: r.facts for r in rows if r.facts}
+
+
 async def set_user_facts(user_id: int, facts: str) -> None:
     """Upsert the full facts/preferences text for a user."""
     async with session_scope() as session:

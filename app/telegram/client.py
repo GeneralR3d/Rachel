@@ -103,13 +103,22 @@ async def reply(event):
             current_summary = await get_summary(chat_id)
             pending_summaries[chat_id] = current_summary
             
-        context = [m.to_llm_dict() for m in buffer[-N_PAST_MSG_REQUIRED:]]
+        context_msgs = buffer[-N_PAST_MSG_REQUIRED:]
+        context = [m.to_llm_dict() for m in context_msgs]
+        # Unique sender ids in the context (excluding Rachel herself), so the
+        # responder can pull each participant's stored facts/preferences.
+        sender_user_ids = list({
+            m.sender_user_id
+            for m in context_msgs
+            if m.sender_user_id and m.sender_user_id != me.id
+        })
 
         try:
             response, response_reason, new_summary, load_time = await get_response(
                 history=context,
                 current_summary=current_summary,
                 chat_id=chat_id,
+                sender_user_ids=sender_user_ids,
             )
         except Exception as e:
             print(f"[{chat_id}] get_response failed ({type(e).__name__}: {e}), retrying once...")
@@ -117,6 +126,7 @@ async def reply(event):
                 history=context,
                 current_summary=current_summary,
                 chat_id=chat_id,
+                sender_user_ids=sender_user_ids,
             )
 
         if new_summary is not None:
@@ -207,10 +217,13 @@ async def finalize_conversation(chat_id: int, delay: float):
     """
     await asyncio.sleep(delay)
     conversation = [m.to_llm_dict_full() for m in current_messages_buffer.get(chat_id, [])]
+    # Snapshot the conversation summary before _flush_chat pops it from
+    # pending_summaries; falls back to the persisted summary in DB.
+    summary = pending_summaries.get(chat_id) or await get_summary(chat_id)
     await _flush_chat(chat_id)
     if conversation:
         asyncio.create_task(update_worldview(conversation))
-        asyncio.create_task(update_user_facts(conversation))
+        asyncio.create_task(update_user_facts(conversation, summary))
         print("Worldview + user-facts pipelines called")
 
 

@@ -38,6 +38,7 @@ from app.repository import (
     get_day_summary,
     get_responder_system_prompt,
     get_summarizer_system_prompt,
+    get_user_facts_batch,
 )
 
 settings = get_settings()
@@ -51,6 +52,35 @@ DEFAULT_MOOD = "default"
 # of hitting the DB on every message.
 _current_activity_cache: Tuple[int, int, Any] | None = None  # (day_of_week, hour, activity)
 _day_summary_cache: Tuple[int, List[Dict[str, Any]]] | None = None  # (day_of_week, summary)
+
+# Per-user facts change only when the userfacts pipeline runs (once per finished
+# conversation), so cache them per user_id with a short TTL instead of hitting
+# the DB on every message. Worst case staleness is USER_FACTS_CACHE_TTL seconds.
+USER_FACTS_CACHE_TTL = 5 * 60    # 5 min
+_user_facts_cache: Dict[int, Tuple[str, float]] = {}  # user_id -> (facts, fetched_at)
+
+
+async def _get_user_facts_cached(user_ids: List[int]) -> Dict[int, str]:
+    """Return {user_id: facts} for the given users, serving fresh cache hits and
+    batching only the stale/missing ones into a single DB call."""
+    now = time.monotonic()
+    result: Dict[int, str] = {}
+    stale: List[int] = []
+    for uid in user_ids:
+        cached = _user_facts_cache.get(uid)
+        if cached is not None and (now - cached[1]) < USER_FACTS_CACHE_TTL:
+            result[uid] = cached[0]
+        else:
+            stale.append(uid)
+
+    if stale:
+        fetched = await get_user_facts_batch(stale)
+        for uid in stale:
+            # Cache "" for users with no facts too, so we don't re-query them.
+            facts = fetched.get(uid, "")
+            _user_facts_cache[uid] = (facts, now)
+            result[uid] = facts
+    return result
 
 # Mood labels are defined by CONVERSATION_STYLE's keys, not a static
 # Literal — Field(json_schema_extra={"enum": ...}) lets the structured-output
@@ -85,6 +115,7 @@ class GraphState(TypedDict):
     history: List[Dict[str, Any]]
     current_summary: str | None
     mood: str
+    sender_user_ids: List[int]
     response_text: str
     response_reason: str
 
@@ -143,6 +174,17 @@ async def responder_node(state: GraphState) -> Dict:
         personality_traits = await get_active_trait_prompts()
         print(f"[responder] personality traits fetched (tokens={_count_tokens(personality_traits)})")
 
+        # Pull stored facts/preferences for all participants (cached per user).
+        sender_user_ids = state.get("sender_user_ids") or []
+        facts_by_user = await _get_user_facts_cached(sender_user_ids)
+        facts_blocks = [
+            f"User {uid}:\n{facts.strip()}"
+            for uid in sender_user_ids
+            if (facts := facts_by_user.get(uid, "").strip())
+        ]
+        user_facts = "\n\n".join(facts_blocks) or "Nothing learned yet."
+        print(f"[responder] user facts fetched for {len(sender_user_ids)} sender(s) (tokens={_count_tokens(user_facts)})")
+
         now = datetime.now()
         formatted_datetime = (
             f"The current date is {now.strftime('%d %B %Y')}, "
@@ -190,6 +232,7 @@ async def responder_node(state: GraphState) -> Dict:
             current_activity=current_activity or "Nothing scheduled right now",
             day_summary=day_summary,
             world_view=read_worldview() or "Nothing learned yet.",
+            user_facts=user_facts,
         )
         print(f"[responder] messages formatted (count={len(msgs)})")
 
@@ -222,6 +265,7 @@ async def get_response(
     history: List[Dict[str, str]],
     current_summary: str | None = None,
     chat_id: int | None = None,
+    sender_user_ids: List[int] | None = None,
 ) -> Tuple[str, str, str | None, float]:
     """Run the LangGraph pipeline and return ``(response_text, reason, new_summary, elapsed_seconds)``.
 
@@ -238,6 +282,7 @@ async def get_response(
         "history": history,
         "current_summary": current_summary,
         "mood": current_mood,
+        "sender_user_ids": sender_user_ids or [],
         "response_text": "",
         "response_reason": "",
     }
