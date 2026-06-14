@@ -23,11 +23,12 @@ from app.repository import (
     get_history,
     get_history_min_id,
     get_summary,
+    get_summary_mood,
     rewrite_history,
     set_summary,
     upsert_user,
 )
-from app.services.llm import get_response
+from app.services.llm import get_chat_mood, get_response, set_chat_mood
 from app.services.userfacts import update_user_facts
 from app.services.worldview import update_worldview
 from app.telegram.bot import ADMIN
@@ -100,8 +101,14 @@ async def reply(event):
         if chat_id in pending_summaries:
             current_summary = pending_summaries.get(chat_id)
         else:
-            current_summary = await get_summary(chat_id)
+            # First contact for this chat since load — pull the persisted
+            # summary *and* mood, re-seeding the in-memory mood so it survives
+            # restarts (otherwise the responder would reset to the default mood).
+            current_summary, persisted_mood = await get_summary_mood(chat_id)
             pending_summaries[chat_id] = current_summary
+            if persisted_mood:
+                set_chat_mood(chat_id, persisted_mood)
+                print(f"[{chat_id}] Restored mood from DB: {persisted_mood}")
             
         context_msgs = buffer[-N_PAST_MSG_REQUIRED:]
         context = [m.to_llm_dict() for m in context_msgs]
@@ -194,8 +201,8 @@ async def _flush_chat(chat_id: int) -> None:
         print(f"[{chat_id}] Flushed {len(to_persist)} messages to DB")
 
     if chat_id in pending_summaries:
-        await set_summary(chat_id, pending_summaries.pop(chat_id))
-        print(f"[{chat_id}] Flushed summary to DB")
+        await set_summary(chat_id, pending_summaries.pop(chat_id), get_chat_mood(chat_id))
+        print(f"[{chat_id}] Flushed summary + mood to DB")
 
     #TODO: fix this gap. Any messages that arrive between these will be lost.
 

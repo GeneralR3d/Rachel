@@ -52,6 +52,16 @@ BOT_NAME = settings.bot_name
 _chat_mood: Dict[int, str] = {}
 DEFAULT_MOOD = "default"
 
+
+def get_chat_mood(chat_id: int) -> str:
+    """Return the last-detected mood for a chat (DEFAULT_MOOD if none)."""
+    return _chat_mood.get(chat_id, DEFAULT_MOOD)
+
+
+def set_chat_mood(chat_id: int, mood: str) -> None:
+    """Seed the in-memory mood for a chat (e.g. restoring from DB on first load)."""
+    _chat_mood[chat_id] = mood
+
 # Schedule lookups only change once per hour (current_activity) / once per day
 # (day_summary), so cache the last result keyed on what it depends on instead
 # of hitting the DB on every message.

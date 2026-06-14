@@ -17,7 +17,7 @@ from app.models import (
     History,
     PersonalityTrait,
     ScheduleActivity,
-    Summary,
+    SummaryMood,
     SystemPrompt,
     User,
     UserFactsPreferences,
@@ -498,23 +498,37 @@ async def rewrite_history(chat_id: int, parsed_history: list[dict]) -> None:
 async def get_summary(chat_id: int) -> Union[str, None]:
     async with session_scope() as session:
         return await session.scalar(
-            select(Summary.summary).where(Summary.chat_id == chat_id)
+            select(SummaryMood.summary).where(SummaryMood.chat_id == chat_id)
         )
 
 
-async def set_summary(chat_id: int, summary: str) -> None:
-    """Upsert the summary for a chat."""
+async def get_summary_mood(chat_id: int) -> tuple[Union[str, None], Union[str, None]]:
+    """Fetch the persisted ``(summary, mood)`` for a chat, or ``(None, None)``."""
     async with session_scope() as session:
-        stmt = pg_insert(Summary).values(chat_id=chat_id, summary=summary)
+        row = (
+            await session.execute(
+                select(SummaryMood.summary, SummaryMood.mood).where(
+                    SummaryMood.chat_id == chat_id
+                )
+            )
+        ).first()
+        return (row[0], row[1]) if row is not None else (None, None)
+
+
+async def set_summary(chat_id: int, summary: str, mood: str = "default") -> None:
+    """Upsert the summary and last-detected mood for a chat."""
+    async with session_scope() as session:
+        stmt = pg_insert(SummaryMood).values(chat_id=chat_id, summary=summary, mood=mood)
         stmt = stmt.on_conflict_do_update(
-            index_elements=[Summary.chat_id], set_={"summary": summary}
+            index_elements=[SummaryMood.chat_id],
+            set_={"summary": summary, "mood": mood},
         )
         await session.execute(stmt)
 
 
 async def delete_summary(chat_id: int) -> None:
     async with session_scope() as session:
-        await session.execute(delete(Summary).where(Summary.chat_id == chat_id))
+        await session.execute(delete(SummaryMood).where(SummaryMood.chat_id == chat_id))
 
 
 # --- user facts / preferences ---------------------------------------------

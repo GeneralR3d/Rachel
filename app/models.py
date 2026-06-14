@@ -2,7 +2,7 @@
 
 Original SQLite tables (see Reference/app/db.py):
     SystemPrompt(SystemPrompt TEXT)
-    Summary(chat_id INTEGER PK, summary TEXT)
+    Summary(chat_id INTEGER PK, summary TEXT)  # now SummaryMood(chat_id, summary, mood)
     History(message_id INTEGER PK AUTOINCREMENT, chat_id INTEGER, sender TEXT, content TEXT)
 """
 
@@ -27,11 +27,15 @@ class SystemPrompt(Base):
     summarizer_system_prompt: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
 
 
-class Summary(Base):
-    __tablename__ = "summary"
+class SummaryMood(Base):
+    __tablename__ = "summary_mood"
 
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
+    # Last conversational mood detected for this chat (one of MOOD_LABELS).
+    # Persisted alongside the summary so it survives restarts and can re-seed
+    # the in-memory mood cache when the chat is next loaded.
+    mood: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
 
 
 class User(Base):
