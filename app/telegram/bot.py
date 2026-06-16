@@ -7,10 +7,12 @@ is started/stopped by app.main's lifespan rather than here.
 from telethon import TelegramClient, events
 
 from app.config import get_settings
+from app.prompts import USER_PROFILE_FIELDS
 from app.repository import (
     clear_history,
     delete_summary,
     delete_user_facts,
+    delete_user_profile,
     get_all_chats,
     get_all_users,
     get_history,
@@ -19,11 +21,13 @@ from app.repository import (
     get_responder_system_prompt,
     get_traits,
     get_user_facts,
+    get_user_profile,
     reset_traits,
     set_summarizer_system_prompt,
     set_responder_system_prompt,
     set_trait_value,
     set_user_facts,
+    set_user_profile,
 )
 
 settings = get_settings()
@@ -178,9 +182,29 @@ async def on_get_user_facts(event):
     user_id = int(event.pattern_match.group(2))
     facts = await get_user_facts(user_id)
     if not facts:
-        await event.reply(f"No facts/preferences for user {user_id}.")
-    else:
-        await event.reply(f"Facts/preferences for {user_id}:\n{facts}")
+        await event.reply(f"No facts for user {user_id}.")
+        return
+    await event.reply(f"Facts for user {user_id}:\n{facts}")
+
+
+@bot.on(
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/get_user_profile(\s+(-?\d+))?$")
+)
+async def on_get_user_profile(event):
+    if event.pattern_match.group(2) is None:
+        await event.reply("Usage: /get_user_profile <user_id>")
+        return
+    user_id = int(event.pattern_match.group(2))
+    profile = await get_user_profile(user_id)
+    profile_text = "\n".join(
+        f"- {label}: {value}"
+        for key, label, _guide in USER_PROFILE_FIELDS
+        if (value := str(profile.get(key, "")).strip())
+    )
+    if not profile_text:
+        await event.reply(f"No profile for user {user_id}.")
+        return
+    await event.reply(f"Profile for user {user_id}:\n{profile_text}")
 
 
 @bot.on(
@@ -213,6 +237,18 @@ async def on_delete_user_facts(event):
     user_id = int(event.pattern_match.group(2))
     await delete_user_facts(user_id)
     await event.reply(f"Facts/preferences deleted for user {user_id}.")
+
+
+@bot.on(
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/delete_user_profile(\s+(-?\d+))?$")
+)
+async def on_delete_user_profile(event):
+    if event.pattern_match.group(2) is None:
+        await event.reply("Usage: /delete_user_profile <user_id>")
+        return
+    user_id = int(event.pattern_match.group(2))
+    await delete_user_profile(user_id)
+    await event.reply(f"Profile deleted for user {user_id}.")
 
 
 @bot.on(

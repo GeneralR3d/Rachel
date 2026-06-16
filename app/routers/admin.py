@@ -58,8 +58,17 @@ class UserFactsOut(BaseModel):
     facts: str
 
 
+class UserProfileOut(BaseModel):
+    user_id: int
+    profile: dict = {}
+
+
 class UserFactsIn(BaseModel):
     facts: str
+
+
+class UserProfileIn(BaseModel):
+    profile: dict
 
 
 @router.get("/health")
@@ -138,6 +147,22 @@ async def update_user_facts(user_id: int, body: UserFactsIn) -> UserFactsOut:
 @router.delete("/user-facts/{user_id}", status_code=204)
 async def delete_user_facts(user_id: int) -> None:
     await repository.delete_user_facts(user_id)
+
+
+@router.get("/user-profile/{user_id}", response_model=UserProfileOut)
+async def read_user_profile(user_id: int) -> UserProfileOut:
+    return UserProfileOut(user_id=user_id, profile=await repository.get_user_profile(user_id))
+
+
+@router.put("/user-profile/{user_id}", response_model=UserProfileOut)
+async def update_user_profile(user_id: int, body: UserProfileIn) -> UserProfileOut:
+    await repository.set_user_profile(user_id, body.profile)
+    return UserProfileOut(user_id=user_id, profile=body.profile)
+
+
+@router.delete("/user-profile/{user_id}", status_code=204)
+async def delete_user_profile(user_id: int) -> None:
+    await repository.delete_user_profile(user_id)
 
 
 # --- personality traits --------------------------------------------------

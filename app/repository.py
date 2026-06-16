@@ -576,3 +576,53 @@ async def delete_user_facts(user_id: int) -> None:
         await session.execute(
             delete(UserFactsPreferences).where(UserFactsPreferences.user_id == user_id)
         )
+
+
+async def delete_user_profile(user_id: int) -> None:
+    async with session_scope() as session:
+        await session.execute(
+            update(UserFactsPreferences)
+            .where(UserFactsPreferences.user_id == user_id)
+            .values(profile=None)
+        )
+
+
+async def get_user_profile(user_id: int) -> dict:
+    """Return the structured profile dict for a user, or {} if none stored yet."""
+    async with session_scope() as session:
+        profile = await session.scalar(
+            select(UserFactsPreferences.profile).where(UserFactsPreferences.user_id == user_id)
+        )
+    return profile or {}
+
+
+async def get_user_profiles_batch(user_ids: list[int]) -> dict[int, dict]:
+    """Return structured profiles for many users in a single query.
+
+    Keyed by user_id; users with an empty/absent profile are omitted.
+    """
+    if not user_ids:
+        return {}
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(UserFactsPreferences.user_id, UserFactsPreferences.profile)
+                .where(UserFactsPreferences.user_id.in_(user_ids))
+            )
+        ).all()
+    return {r.user_id: r.profile for r in rows if r.profile}
+
+
+async def set_user_profile(user_id: int, profile: dict) -> None:
+    """Upsert the structured profile blob for a user.
+
+    Touches only the `profile` column so it never clobbers the free-form `facts`
+    written by the parallel facts pipeline (and vice versa).
+    """
+    async with session_scope() as session:
+        stmt = pg_insert(UserFactsPreferences).values(user_id=user_id, profile=profile)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[UserFactsPreferences.user_id],
+            set_={"profile": profile, "updated_at": func.now()},
+        )
+        await session.execute(stmt)

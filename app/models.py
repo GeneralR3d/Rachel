@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import BigInteger, DateTime, Integer, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -86,7 +87,15 @@ class UserFactsPreferences(Base):
 
     # References users.telegram_user_id — no FK constraint to avoid cascade issues.
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # Open-ended, free-form facts maintained by the userfacts extract→consolidate
+    # pipeline (one fact per `- ` bullet line).
     facts: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    # Fixed-slot structured profile (generation, life stage, food vibe, …). A
+    # single JSONB blob rather than one column per attribute: the field set is
+    # defined in code (app.prompts.USER_PROFILE_FIELDS) and only ever rendered
+    # into the responder prompt, never queried/filtered in SQL — so a flexible
+    # schema with no migration churn beats 15 sparse typed columns.
+    profile: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
