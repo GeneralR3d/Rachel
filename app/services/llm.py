@@ -177,7 +177,7 @@ MOOD_LABELS = list(CONVERSATION_STYLE)
 class SummarizerOutput(BaseModel):
     summary: str = Field(
         ...,
-        description='New 100-word summary of the conversation, or the exact string "NIL" if the old summary is still sufficient.',
+        description='New word summary of the conversation of 200 words maximum, or the exact string "NIL" if the old summary is still sufficient.',
     )
     mood: str = Field(
         ...,

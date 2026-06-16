@@ -41,9 +41,9 @@ client = TelegramClient("anon", settings.telegram_api_id, settings.telegram_api_
 # constants
 REPLY_DELAY = 7             # seconds to wait after last message before replying
 CHAT_BLACKOUT_TIME = 60          # 3 min of inactivity before flushing buffer to DB
-N_PAST_MSG_REQUIRED = 20         # messages pre-loaded on first contact and fed to LLM as context
+N_PAST_MSG_REQUIRED = 40         # messages pre-loaded on first contact and fed to LLM as context
 MAX_BUFFER_LEN = 150             # flush to DB immediately if buffer hits this length
-TYPING_SPEED = 20                # characters per second
+TYPING_SPEED = 22                # characters per second
 
 # only used for summarisation
 USER_NAME = settings.user_name
@@ -166,12 +166,6 @@ async def reply(event):
                 reason=response_reason,
             )
         )
-
-    if len(current_messages_buffer.get(chat_id, [])) >= MAX_BUFFER_LEN:
-        print(f"[{chat_id}] Buffer hit MAX_BUFFER_LEN ({MAX_BUFFER_LEN}), flushing immediately")
-        if chat_id in flush_tasks and not flush_tasks[chat_id].done():
-            flush_tasks[chat_id].cancel()
-        flush_tasks[chat_id] = asyncio.create_task(_flush_chat(chat_id))
 
 
 async def wait_before_reply(event, delay: int):
@@ -367,15 +361,32 @@ async def new_message(event):
 
     last_message_time[chat_id] = time.time()
 
-    # Always reset the reply timer: respond 3 s after the last message
-    if chat_id in wait_tasks and not wait_tasks[chat_id].done():
-        wait_tasks[chat_id].cancel()
-    wait_tasks[chat_id] = asyncio.create_task(wait_before_reply(event, REPLY_DELAY))
+    # In group chats, only reply when Rachel is tagged: an @-mention of her, or
+    # a reply to one of her messages. Private (1-on-1) chats always reply since
+    # people don't tag in DMs. Non-tagged group messages are still buffered
+    # above (so a later tagged message has context) and still flushed below, but
+    # don't trigger a reply.
+    if event.is_private or event.mentioned:
+        # Always reset the reply timer: respond REPLY_DELAY s after the last message
+        if chat_id in wait_tasks and not wait_tasks[chat_id].done():
+            wait_tasks[chat_id].cancel()
+        wait_tasks[chat_id] = asyncio.create_task(wait_before_reply(event, REPLY_DELAY))
 
     # Always reset the flush timer: persist buffer 60 s after the last message
     if chat_id in flush_tasks and not flush_tasks[chat_id].done():
         flush_tasks[chat_id].cancel()
     flush_tasks[chat_id] = asyncio.create_task(finalize_conversation(chat_id, CHAT_BLACKOUT_TIME))
+
+    # Hard cap, enforced on every incoming message (not just when Rachel
+    # replies): a busy group where she is never tagged would otherwise keep
+    # resetting the 60 s flush timer forever and grow the buffer unbounded.
+    # Override the timer with an immediate finalize (delay 0) so the buffer is
+    # persisted and the memory pipelines still run on the dialogue so far.
+    if len(current_messages_buffer.get(chat_id, [])) >= MAX_BUFFER_LEN:
+        print(f"[{chat_id}] Buffer hit MAX_BUFFER_LEN ({MAX_BUFFER_LEN}), flushing immediately")
+        if chat_id in flush_tasks and not flush_tasks[chat_id].done():
+            flush_tasks[chat_id].cancel()
+        flush_tasks[chat_id] = asyncio.create_task(finalize_conversation(chat_id, 0))
 
 
 @client.on(events.ChatAction)
