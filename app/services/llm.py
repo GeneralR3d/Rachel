@@ -11,6 +11,7 @@ responder_node:  generates Rachel's reply using the mood detected in the
                  previous call (defaults to "default" on first contact).
 """
 
+import asyncio
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
@@ -35,7 +36,7 @@ from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
 from app.config import get_settings
-from app.prompts import CONVERSATION_STYLE
+from app.prompts import CONVERSATION_STYLE, USER_PROFILE_ATTRIBUTE_GUIDE, USER_PROFILE_FIELDS
 from app.services.worldview import read_worldview
 from app.repository import (
     get_active_trait_prompts,
@@ -44,6 +45,7 @@ from app.repository import (
     get_responder_system_prompt,
     get_summarizer_system_prompt,
     get_user_facts_batch,
+    get_user_profiles_batch,
 )
 
 settings = get_settings()
@@ -107,6 +109,57 @@ async def _get_user_facts_cached(user_ids: List[int]) -> Dict[int, str]:
             result[uid] = facts
     return result
 
+
+# Structured profiles are kept in their own cache (parallel to the facts cache
+# above) so the two write-throughs never have to preserve each other's value.
+_user_profile_cache: Dict[int, Tuple[dict, float]] = {}  # user_id -> (profile, fetched_at)
+
+
+def update_user_profile_cache(user_id: int, profile: dict) -> None:
+    """Write-through the profile cache after the userfacts profile pipeline runs,
+    so the responder sees the freshly merged profile immediately."""
+    _user_profile_cache[user_id] = (profile, time.monotonic())
+
+
+async def _get_user_profiles_cached(user_ids: List[int]) -> Dict[int, dict]:
+    """Return {user_id: profile_dict} for the given users, serving fresh cache
+    hits and batching only the stale/missing ones into a single DB call."""
+    now = time.monotonic()
+    result: Dict[int, dict] = {}
+    stale: List[int] = []
+    for uid in user_ids:
+        cached = _user_profile_cache.get(uid)
+        if cached is not None and (now - cached[1]) < USER_FACTS_CACHE_TTL:
+            result[uid] = cached[0]
+        else:
+            stale.append(uid)
+
+    if stale:
+        fetched = await get_user_profiles_batch(stale)
+        for uid in stale:
+            # Cache {} for users with no profile too, so we don't re-query them.
+            profile = fetched.get(uid, {})
+            _user_profile_cache[uid] = (profile, now)
+            result[uid] = profile
+    return result
+
+
+def _render_profile(profile: dict, show_unknown: bool = False) -> str:
+    """Render a stored profile dict as labelled lines, in schema order.
+
+    With show_unknown=True, every slot is emitted — empty ones as "NIL" — so the
+    responder can see which attributes are still gaps and subtly probe for them.
+    With show_unknown=False, empty slots are skipped. Returns "" if nothing to show.
+    """
+    lines = []
+    for key, label, _guide in USER_PROFILE_FIELDS:
+        value = str(profile.get(key, "")).strip()
+        if value:
+            lines.append(f"- {label}: {value}")
+        elif show_unknown:
+            lines.append(f"- {label}: NIL")
+    return "\n".join(lines)
+
 # Mood labels are defined by CONVERSATION_STYLE's keys, not a static
 # Literal — Field(json_schema_extra={"enum": ...}) lets the structured-output
 # schema track that dict dynamically.
@@ -140,7 +193,7 @@ class GraphState(TypedDict):
     history: List[Dict[str, Any]]
     current_summary: str | None
     mood: str
-    sender_user_ids: List[int]
+    senders: Dict[int, str]  # sender_user_id -> display name
     response_text: str
     response_reason: str
 
@@ -213,18 +266,41 @@ async def responder_node(state: GraphState) -> Dict:
         pprint(world_view)
 
 
-        # Pull stored facts/preferences for all participants (cached per user).
-        sender_user_ids = state.get("sender_user_ids") or []
-        print(f"All users is {sender_user_ids}")
-        facts_by_user = await _get_user_facts_cached(sender_user_ids)
+        # Pull stored facts/preferences AND structured profile for all
+        # participants (each cached per user, fetched in parallel).
+        senders = state.get("senders") or {}
+        sender_user_ids = list(senders)
+        print(f"All users is {senders}")
+        facts_by_user, profiles_by_user = await asyncio.gather(
+            _get_user_facts_cached(sender_user_ids),
+            _get_user_profiles_cached(sender_user_ids),
+        )
+
+        def _label(uid: int) -> str:
+            """Human-readable header for a participant: name + id when known."""
+            name = (senders.get(uid) or "").strip()
+            return f"{name} (id {uid})" if name else f"User {uid}"
+
+        # Free-form facts → {user_facts}
         facts_blocks = [
-            f"User {uid}:\n{facts.strip()}"
+            f"{_label(uid)}:\n{facts.strip()}"
             for uid in sender_user_ids
             if (facts := facts_by_user.get(uid, "").strip())
         ]
         user_facts = "\n\n".join(facts_blocks) or "Nothing learned yet."
-        print(f"[responder] user facts fetched for {len(sender_user_ids)} sender(s) (tokens={_count_tokens(user_facts)})")
+        # Structured profiles → {user_profiles}; show every slot (NIL for empties)
+        # so the responder knows which attributes are still gaps to subtly probe.
+        profile_blocks = [
+            f"{_label(uid)}:\n{_render_profile(profiles_by_user.get(uid, {}), show_unknown=True)}"
+            for uid in sender_user_ids
+        ]
+        user_profiles = "\n\n".join(profile_blocks) or "No one identified yet."
+        print(
+            f"[responder] facts+profile fetched for {len(sender_user_ids)} sender(s) "
+            f"(facts_tokens={_count_tokens(user_facts)}, profile_tokens={_count_tokens(user_profiles)})"
+        )
         pprint(user_facts)
+        pprint(user_profiles)
 
         now = datetime.now()
         formatted_datetime = (
@@ -275,6 +351,8 @@ async def responder_node(state: GraphState) -> Dict:
             day_summary=day_summary,
             world_view=world_view,
             user_facts=user_facts,
+            user_profiles=user_profiles,
+            profile_attributes=USER_PROFILE_ATTRIBUTE_GUIDE,
         )
         msgs = [*system_msgs, *history_msgs]
         msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
@@ -324,7 +402,7 @@ async def get_response(
     history: List[Dict[str, str]],
     current_summary: str | None = None,
     chat_id: int | None = None,
-    sender_user_ids: List[int] | None = None,
+    senders: Dict[int, str] | None = None,
 ) -> Tuple[str, str, str | None, float]:
     """Run the LangGraph pipeline and return ``(response_text, reason, new_summary, elapsed_seconds)``.
 
@@ -341,7 +419,7 @@ async def get_response(
         "history": history,
         "current_summary": current_summary,
         "mood": current_mood,
-        "sender_user_ids": sender_user_ids or [],
+        "senders": senders or {},
         "response_text": "",
         "response_reason": "",
     }

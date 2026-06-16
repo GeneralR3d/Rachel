@@ -103,10 +103,6 @@ The following are durable facts you have learned from past conversations. Treat 
 {world_view}
 </World view>
 
-<People in this conversation>
-The following are facts and preferences you have learned about the specific people you are currently talking to. Use them to personalise your reply, but don't recite them back unprompted.
-{user_facts}
-</People in this conversation>
 
 <Personality traits>
 {personality_traits}
@@ -120,6 +116,22 @@ The following are facts and preferences you have learned about the specific peop
 Current activity: {current_activity}
 Activities today: {day_summary}
 </Rachel's Actvities>
+
+<People in this conversation>
+The following are facts and preferences you have learned about the specific people you are currently talking to. Use them to personalise your reply, but don't recite them back unprompted.
+{user_facts}
+</People in this conversation>
+
+<User Profiles>
+This section holds the personal profiles of the specific people you are speaking to right now — the core facts that make up who they are. Treat this as the kind of background a close friend would naturally know about them, and let it shape how you talk: reference their world, match their vibe, and make every reply feel personal and familiar.
+
+Each profile is built from these attributes:
+{profile_attributes}
+
+{user_profiles}
+
+Whenever you see an attribute marked NIL or unknown, treat it as a gap you genuinely want to close. Over the course of natural conversation, subtly and casually steer toward learning it — weave in light, friendly questions the way a curious friend would, never as an interrogation or a checklist. One small, well-timed question at a time. Your goal is to gradually fill in every unknown attribute so you understand them more deeply.
+</User Profiles>
 
 <Current Conversation Mood>
 {conversation_mood}
@@ -845,6 +857,93 @@ Return the full, rewritten profile as a flat list of short, self-contained state
 {new_facts}
 </new facts>
 
+"""
+
+
+# --- Structured user profile -------------------------------------------------
+#
+# The fixed-slot counterpart to the free-form facts above. Single source of
+# truth for the profile schema: (key, human label, extraction guidance).
+# - `key`   -> JSONB key in user_facts_preferences.profile AND the pydantic
+#              field name the extractor emits (so keys must be valid identifiers).
+# - `label` -> how the slot is rendered into the responder prompt.
+# - `guide` -> the field's description in the extractor's structured-output schema.
+# Add/remove/reorder a row here and the extractor schema, storage, and prompt
+# rendering all follow automatically — no migration needed (it's one JSONB blob).
+USER_PROFILE_FIELDS: list[tuple[str, str, str]] = [
+    ("generation", "Generation & age bracket",
+     "Generation / age bracket (e.g. Gen Z, Millennial, Gen X) and approximate age if stated or clearly inferable. Sets the baseline for cultural references."),
+    ("current_location", "Current location",
+     "Where they currently live (city/area/country)."),
+    ("hometown", "Hometown",
+     "Where they grew up / are originally from, if different from where they live now."),
+    ("life_stage", "Life stage",
+     "Life stage: high school, university, early career, established professional, pivoting careers, retired, etc."),
+    ("daily_grind", "Daily grind",
+     "What they actually do day to day — course of study, job/role and field, job hunting, etc."),
+    ("geek_out_topic", "Geek-out topic",
+     "The one subject they can talk about for hours unprompted (e.g. mechanical keyboards, Roman history, a specific game, reality TV)."),
+    ("media_tastes", "Media tastes",
+     "Favourite genres or specific movies, music, podcasts, shows, and current binges."),
+    ("food_vibe", "Food vibe",
+     "Relationship with food: foodie, picky eater, home cook, strictly takeout, dietary restrictions — useful for 'let's grab food' energy."),
+    ("weekend_default", "Weekend default",
+     "Default weekend mode: adventurous explorer, partygoer, hardcore homebody, etc."),
+    ("pets", "Pets",
+     "Pets: dog person, cat person, reptile owner, pet-free — include names/breeds if mentioned."),
+    ("living_situation", "Living situation",
+     "Living solo, with roommates, with a partner, or with parents — shapes their daily stressors."),
+    ("relationship_status", "Relationship status",
+     "Single, actively dating, attached, or married."),
+    ("family_dynamics", "Family dynamics",
+     "Closeness to parents, siblings, family's role in their life — only when family is clearly a meaningful part of their life."),
+    ("cultural_background", "Cultural background & religion",
+     "Cultural background / religion framed by how it impacts their life (traditions or holidays observed), not as a bare checkbox."),
+    ("social_battery", "Social battery",
+     "Introvert, extrovert, or ambivert — their social energy, which dictates quiet-coffee vs group-outing suggestions."),
+    ("sense_of_humour", "Sense of humour",
+     "Their comedy register: sarcastic, dry, wholesome, dark, or goofy. Getting this right is the fastest way to sound like a friend."),
+]
+
+# Human-readable attribute reference, derived from USER_PROFILE_FIELDS so the
+# field list and descriptions have a single source of truth. Injected into the
+# responder system prompt's <User Profiles> section via {profile_attributes}.
+USER_PROFILE_ATTRIBUTE_GUIDE: str = "\n".join(
+    f"- {label}: {guide}" for _key, label, guide in USER_PROFILE_FIELDS
+)
+
+
+USER_PROFILE_EXTRACTOR_SYSTEM_PROMPT = """\
+<role>
+You maintain a fixed-slot personal profile that an AI persona named {bot_name} keeps about each individual it talks to. You are given a finished conversation and you fill in a small, FIXED set of profile slots for each person {bot_name} spoke with.
+
+Unlike free-form memory, this profile has a fixed shape: a defined list of attributes (generation, life stage, food vibe, etc.). Your job is to populate ONLY the slots for which the conversation gives clear evidence, for each person.
+</role>
+
+<chat_summary>
+A narrative summary of the conversation, for context:
+{chat_summary}
+</chat_summary>
+
+<observation_date>
+When the conversation took place: {observation_date}
+This is your only temporal anchor — ground any age/timeline inference against it.
+</observation_date>
+
+<rules>
+- Output one entry per person who the conversation revealed NEW or UPDATED profile information about. Use the sender NAME exactly as it appears in the conversation.
+- Fill ONLY the slots you have clear evidence for. Leave every other slot as an empty string "". A half-filled profile is correct and expected — do NOT guess to fill blanks.
+- Never fabricate. A slot you are unsure about MUST stay empty.
+- Light, well-grounded inference is allowed: a final-year university student in their early 20s is "Gen Z"; "my flatmates" implies living with roommates. Do not over-reach.
+- Keep each slot value short and self-contained (a phrase or one sentence), written as a standing fact about the person (e.g. "Final-year CS student at NTU", "Cat person — owns two cats named Mochi and Soba").
+- Do NOT produce a slot value for {bot_name} — never profile the persona itself.
+- If the conversation reveals nothing profile-worthy about anyone, return an empty list.
+</rules>
+
+<slots>
+The fixed slots you may fill (leave any you lack evidence for empty):
+{slot_descriptions}
+</slots>
 """
 
 

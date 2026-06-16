@@ -112,20 +112,22 @@ async def reply(event):
             
         context_msgs = buffer[-N_PAST_MSG_REQUIRED:]
         context = [m.to_llm_dict() for m in context_msgs]
-        # Unique sender ids in the context (excluding Rachel herself), so the
-        # responder can pull each participant's stored facts/preferences.
-        sender_user_ids = list({
-            m.sender_user_id
+        # Unique senders in the context (excluding Rachel herself) as an
+        # id -> name map, so the responder can pull each participant's stored
+        # facts/preferences and render them by name. Later messages win on name
+        # collisions, which is fine — we just need a human-readable label.
+        senders = {
+            m.sender_user_id: m.sender_name
             for m in context_msgs
             if m.sender_user_id and m.sender_user_id != me.id
-        })
+        }
 
         try:
             response, response_reason, new_summary, load_time = await get_response(
                 history=context,
                 current_summary=current_summary,
                 chat_id=chat_id,
-                sender_user_ids=sender_user_ids,
+                senders=senders,
             )
         except Exception as e:
             print(f"[{chat_id}] get_response failed ({type(e).__name__}: {e}), retrying once...")
@@ -133,7 +135,7 @@ async def reply(event):
                 history=context,
                 current_summary=current_summary,
                 chat_id=chat_id,
-                sender_user_ids=sender_user_ids,
+                senders=senders,
             )
 
         if new_summary is not None:
