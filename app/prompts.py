@@ -915,35 +915,51 @@ USER_PROFILE_ATTRIBUTE_GUIDE: str = "\n".join(
 
 USER_PROFILE_EXTRACTOR_SYSTEM_PROMPT = """\
 <role>
-You maintain a fixed-slot personal profile that an AI persona named {bot_name} keeps about each individual it talks to. You are given a finished conversation and you fill in a small, FIXED set of profile slots for each person {bot_name} spoke with.
+You maintain a fixed-slot personal profile that an AI persona named {bot_name} keeps about each individual it talks to. 
+The goal is for the personal profile to be as complete and comphrehensive as possible so that the AI persona can converse to each user just like a best friend.
+All fields are deemed critical in getting to know a user.
+You are given conversation history and you fill in a small, FIXED set of profile slots for each person {bot_name} spoke with.
 
-Unlike free-form memory, this profile has a fixed shape: a defined list of attributes (generation, life stage, food vibe, etc.). Your job is to populate ONLY the slots for which the conversation gives clear evidence, for each person.
+Your job is to populate ONLY the slots for which the conversation gives clear evidence, for each person.
 </role>
+
+<slots>
+The fixed slots you may fill (leave any you lack evidence for empty):
+{slot_descriptions}
+</slots>
 
 <chat_summary>
 A narrative summary of the conversation, for context:
 {chat_summary}
 </chat_summary>
 
-<observation_date>
-When the conversation took place: {observation_date}
-This is your only temporal anchor — ground any age/timeline inference against it.
-</observation_date>
+<existing_profiles>
+Each participant's CURRENT stored profile is shown below — their already-filled slots and the slots still empty. Use this to decide what is actually NEW:
+{existing_profiles}
+</existing_profiles>
+
+<guidelines>
+- The conversation history could originate from a 1-1 chat, where there is only 1 person and 1 profile, or from a group chat where there are many people all at once
+- You are to pay very close attention to every single person. Each one of them has a seperate profile that you need to fill up.
+- Use the existing profiles above as your baseline. A slot that is already filled and unchanged by this conversation should be left EMPTY in your output — only output a slot when the conversation fills a currently-empty slot or genuinely UPDATES an existing one.
+- For the empty slots, pay more attention to them, as the AI persona has been tasked to subtlely ask the user questions to find out those details. Pay attention to questions asked by the AI.
+- For the non-empty slots, ONLY extract and output entries if the conversation CLEARLY revealed NEW or UPDATED profile information.
+- Remember: ONE set of slots for EVERY person.
+- Do NOT produce a slot value for {bot_name} — never profile the persona itself.
+</guidelines>
+
+
 
 <rules>
-- Output one entry per person who the conversation revealed NEW or UPDATED profile information about. Use the sender NAME exactly as it appears in the conversation.
+- Output one entry per person. Use the sender NAME exactly as it appears in the conversation.
 - Fill ONLY the slots you have clear evidence for. Leave every other slot as an empty string "". A half-filled profile is correct and expected — do NOT guess to fill blanks.
 - Never fabricate. A slot you are unsure about MUST stay empty.
 - Light, well-grounded inference is allowed: a final-year university student in their early 20s is "Gen Z"; "my flatmates" implies living with roommates. Do not over-reach.
 - Keep each slot value short and self-contained (a phrase or one sentence), written as a standing fact about the person (e.g. "Final-year CS student at NTU", "Cat person — owns two cats named Mochi and Soba").
-- Do NOT produce a slot value for {bot_name} — never profile the persona itself.
 - If the conversation reveals nothing profile-worthy about anyone, return an empty list.
 </rules>
 
-<slots>
-The fixed slots you may fill (leave any you lack evidence for empty):
-{slot_descriptions}
-</slots>
+
 """
 
 

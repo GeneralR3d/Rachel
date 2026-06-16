@@ -144,6 +144,14 @@ async def _get_user_profiles_cached(user_ids: List[int]) -> Dict[int, dict]:
     return result
 
 
+async def get_user_profiles_cached(user_ids: List[int]) -> Dict[int, dict]:
+    """Public accessor for the responder's profile cache: returns
+    {user_id: profile_dict}, serving fresh cache hits and batching only the
+    stale/missing users into a single DB call (populating the cache as it goes).
+    Used by the userfacts profile pipeline for its context read."""
+    return await _get_user_profiles_cached(user_ids)
+
+
 def _render_profile(profile: dict, show_unknown: bool = False) -> str:
     """Render a stored profile dict as labelled lines, in schema order.
 
