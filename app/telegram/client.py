@@ -155,17 +155,31 @@ async def reply(event):
         if bot_message_id is None:
             bot_message_id = sent.id
 
-    if bot_message_id is not None and chat_id in current_messages_buffer:
-        current_messages_buffer[chat_id].append(
-            BufferedMessage(
-                telegram_message_id=bot_message_id,
-                sender_user_id=me.id,
-                sender_name=BOT_NAME,
-                content=response,
-                is_persisted=False,
-                reason=response_reason,
+    if bot_message_id is not None:
+        if chat_id in current_messages_buffer:
+            current_messages_buffer[chat_id].append(
+                BufferedMessage(
+                    telegram_message_id=bot_message_id,
+                    sender_user_id=me.id,
+                    sender_name=BOT_NAME,
+                    content=response,
+                    is_persisted=False,
+                    reason=response_reason,
+                )
             )
-        )
+        else:
+            # The buffer was flushed + popped (e.g. MAX_BUFFER_LEN or the blackout
+            # timer) while this shielded reply was still sending. Persist the reply
+            # directly so it isn't lost — it'll re-enter context on the next
+            # message's DB re-seed.
+            await add_history_batch(
+                chat_ids=[chat_id],
+                sender_user_ids=[me.id],
+                contents=[response],
+                telegram_message_ids=[bot_message_id],
+                reasons=[response_reason],
+            )
+            print(f"[{chat_id}] Buffer flushed mid-reply; persisted reply directly to DB")
 
 
 async def wait_before_reply(event, delay: int):
@@ -361,16 +375,14 @@ async def new_message(event):
 
     last_message_time[chat_id] = time.time()
 
-    # In group chats, only reply when Rachel is tagged: an @-mention of her, or
-    # a reply to one of her messages. Private (1-on-1) chats always reply since
-    # people don't tag in DMs. Non-tagged group messages are still buffered
-    # above (so a later tagged message has context) and still flushed below, but
-    # don't trigger a reply.
-    if event.is_private or event.mentioned:
-        # Always reset the reply timer: respond REPLY_DELAY s after the last message
-        if chat_id in wait_tasks and not wait_tasks[chat_id].done():
-            wait_tasks[chat_id].cancel()
-        wait_tasks[chat_id] = asyncio.create_task(wait_before_reply(event, REPLY_DELAY))
+    # Rachel considers replying to every message — private or group, tagged or
+    # not. Whether a reply is actually warranted is decided downstream by the
+    # router node in the LLM pipeline (it can short-circuit to no reply), so we
+    # no longer gate on event.mentioned here.
+    # Always reset the reply timer: respond REPLY_DELAY s after the last message
+    if chat_id in wait_tasks and not wait_tasks[chat_id].done():
+        wait_tasks[chat_id].cancel()
+    wait_tasks[chat_id] = asyncio.create_task(wait_before_reply(event, REPLY_DELAY))
 
     # Always reset the flush timer: persist buffer 60 s after the last message
     if chat_id in flush_tasks and not flush_tasks[chat_id].done():
