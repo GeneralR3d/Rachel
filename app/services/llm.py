@@ -1,12 +1,21 @@
 """LLM integration via LangGraph + LangChain OpenRouter.
 
-Both nodes fan out from START and run in parallel:
+The nodes run sequentially, gated by a checker + router up front:
 
-  START → summarizer_node  ↘
-        → responder_node   → END
+  START → checker_node → (must_reply?) → summarizer_node → responder_node → END
+                ↓ no                          ↑
+              router_node → (reply needed?) ──┘
+                ↓ no
+               END
 
+checker_node:    cheap, no-LLM gate. If MUST_REPLY is set (1-on-1 chat or Rachel
+                 was tagged), skip the router entirely and go straight to the
+                 summarizer/responder. Otherwise defer to the router.
+router_node:     decides whether a reply is even warranted. If not, the graph
+                 short-circuits straight to END (no summary, no response).
 summarizer_node: detects conversation mood; result is stored in _chat_mood
-                 and used by the NEXT call's responder_node.
+                 and used by the NEXT call's responder_node. Runs before the
+                 responder so its summary update is visible to the responder.
 responder_node:  generates Rachel's reply using the mood detected in the
                  previous call (defaults to "default" on first contact).
 """
@@ -36,7 +45,12 @@ from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
 from app.config import get_settings
-from app.prompts import CONVERSATION_STYLE, USER_PROFILE_ATTRIBUTE_GUIDE, USER_PROFILE_FIELDS
+from app.prompts import (
+    CONVERSATION_STYLE,
+    ROUTER_SYSTEM_PROMPT,
+    USER_PROFILE_ATTRIBUTE_GUIDE,
+    USER_PROFILE_FIELDS,
+)
 from app.services.worldview import read_worldview
 from app.repository import (
     get_active_trait_prompts,
@@ -174,6 +188,17 @@ def _render_profile(profile: dict, show_unknown: bool = False) -> str:
 MOOD_LABELS = list(CONVERSATION_STYLE)
 
 
+class RouterOutput(BaseModel):
+    reason: str = Field(
+        ...,
+        description="A single short sentence explaining the reply/no-reply decision.",
+    )
+    should_reply: bool = Field(
+        ...,
+        description="True if Rachel should send a reply to the latest messages, False if she should stay silent.",
+    )
+
+
 class SummarizerOutput(BaseModel):
     summary: str = Field(
         ...,
@@ -187,13 +212,13 @@ class SummarizerOutput(BaseModel):
 
 
 class ResponseOutput(BaseModel):
-    content: str = Field(
-        ...,
-        description="Rachel's reply as plain text in her natural Singlish voice. Use \\n\\n to separate message bursts. Do NOT include her name or any prefix.",
-    )
     reason: str = Field(
         ...,
         description="A single sentence explaining why this reply was given, naming which part of the personality traits or system prompt instructions drove it. For traceability and debugging.",
+    )
+    content: str = Field(
+        ...,
+        description="Rachel's reply as plain text in her natural Singlish voice. Use \\n\\n to separate message bursts. Do NOT include her name or any prefix.",
     )
 
 
@@ -202,9 +227,17 @@ class GraphState(TypedDict):
     current_summary: str | None
     mood: str
     senders: Dict[int, str]  # sender_user_id -> display name
+    must_reply: bool  # set by caller: 1-on-1 chat or Rachel was tagged
+    should_reply: bool
     response_text: str
     response_reason: str
 
+
+_router_llm = ChatOpenRouter(
+    model=settings.openrouter_model,
+    api_key=settings.openrouter_api_key,
+    temperature=0.0,
+).with_structured_output(RouterOutput)
 
 _summarizer_llm = ChatOpenRouter(
     model=settings.openrouter_model,
@@ -218,6 +251,51 @@ _responder_llm = ChatOpenRouter(
     api_key=settings.openrouter_api_key,
     temperature=0.2,
 ).with_structured_output(ResponseOutput)
+
+
+def checker_node(state: GraphState) -> Dict:
+    """Cheap, no-LLM gate in front of the router. Does nothing on its own; the
+    routing decision lives in _route_after_checker, which reads must_reply."""
+    return {}
+
+
+def _route_after_checker(state: GraphState) -> str:
+    """Conditional edge: if the caller forced a reply (1-on-1 chat or Rachel was
+    tagged), skip the router and go straight to the summarizer. Otherwise let the
+    router decide whether a reply is warranted."""
+    return "summarizer_node" if state.get("must_reply", False) else "router_node"
+
+
+async def router_node(state: GraphState) -> Dict:
+    """Decide whether Rachel should reply at all. On failure, default to replying
+    (fail-open) so a flaky router never silences her."""
+    history_msgs = [
+        AIMessage(content=f"{entry['sender']}: {entry['content']}")
+        if entry["sender"] == BOT_NAME
+        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
+        for entry in state["history"]
+    ]
+
+    system_msgs = ChatPromptTemplate.from_messages(
+        [("system", ROUTER_SYSTEM_PROMPT)]
+    ).format_messages(current_summary=state.get("current_summary") or "")
+    msgs = [*system_msgs, *history_msgs]
+
+    msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
+    print(f"[router] context: {len(msgs)} messages, {msgs_tokens} tokens")
+
+    try:
+        result: RouterOutput = await _router_llm.ainvoke(msgs)
+    except Exception as e:
+        print(f"[router] LLM error (defaulting to reply): {type(e).__name__}: {e}")
+        return {"should_reply": True}
+    print(f"[router] should_reply={result.should_reply} | reason={result.reason}")
+    return {"should_reply": result.should_reply}
+
+
+def _route_after_router(state: GraphState) -> str:
+    """Conditional edge: run the summarizer/responder only if a reply is wanted."""
+    return "summarizer_node" if state.get("should_reply", True) else END
 
 
 async def summarizer_node(state: GraphState) -> Dict:
@@ -394,11 +472,27 @@ async def responder_node(state: GraphState) -> Dict:
 
 def _build_graph():
     graph: StateGraph = StateGraph(GraphState)
+    graph.add_node("checker_node", checker_node)
+    graph.add_node("router_node", router_node)
     graph.add_node("summarizer_node", summarizer_node)
     graph.add_node("responder_node", responder_node)
-    graph.add_edge(START, "summarizer_node")
-    graph.add_edge(START, "responder_node")
-    graph.add_edge("summarizer_node", END)
+    graph.add_edge(START, "checker_node")
+    # Checker gates the router: a forced reply (must_reply) skips straight to the
+    # summarizer; otherwise the router decides whether a reply is warranted.
+    graph.add_conditional_edges(
+        "checker_node",
+        _route_after_checker,
+        {"summarizer_node": "summarizer_node", "router_node": "router_node"},
+    )
+    # Router gates everything: if no reply is warranted, jump straight to END.
+    graph.add_conditional_edges(
+        "router_node",
+        _route_after_router,
+        {"summarizer_node": "summarizer_node", END: END},
+    )
+    # Summarizer runs before the responder (sequential) so its mood/summary
+    # update is visible to the responder in the same call.
+    graph.add_edge("summarizer_node", "responder_node")
     graph.add_edge("responder_node", END)
     return graph.compile()
 
@@ -411,10 +505,15 @@ async def get_response(
     current_summary: str | None = None,
     chat_id: int | None = None,
     senders: Dict[int, str] | None = None,
+    must_reply: bool = False,
 ) -> Tuple[str, str, str | None, float]:
     """Run the LangGraph pipeline and return ``(response_text, reason, new_summary, elapsed_seconds)``.
 
-    summarizer_node and responder_node run in parallel.  The mood detected this
+    When ``must_reply`` is True (1-on-1 chat or Rachel was tagged) the checker
+    skips the router and a reply is always produced. Otherwise the router decides
+    whether a reply is warranted; if not, the graph short-circuits and
+    ``response_text`` comes back empty (no message is sent). When a reply is
+    produced, summarizer_node runs before responder_node. The mood detected this
     call is stored in _chat_mood and injected on the *next* call.
     """
     start = time.time()
@@ -428,6 +527,8 @@ async def get_response(
         "current_summary": current_summary,
         "mood": current_mood,
         "senders": senders or {},
+        "must_reply": must_reply,
+        "should_reply": True,
         "response_text": "",
         "response_reason": "",
     }

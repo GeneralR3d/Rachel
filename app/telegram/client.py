@@ -122,12 +122,17 @@ async def reply(event):
             if m.sender_user_id and m.sender_user_id != me.id
         }
 
+        # Force a reply (skip the router's reply/no-reply decision) whenever this
+        # is a 1-on-1 chat or Rachel was directly tagged/replied-to.
+        must_reply = bool(event.is_private or event.mentioned)
+
         try:
             response, response_reason, new_summary, load_time = await get_response(
                 history=context,
                 current_summary=current_summary,
                 chat_id=chat_id,
                 senders=senders,
+                must_reply=must_reply,
             )
         except Exception as e:
             print(f"[{chat_id}] get_response failed ({type(e).__name__}: {e}), retrying once...")
@@ -136,6 +141,7 @@ async def reply(event):
                 current_summary=current_summary,
                 chat_id=chat_id,
                 senders=senders,
+                must_reply=must_reply,
             )
 
         if new_summary is not None:
