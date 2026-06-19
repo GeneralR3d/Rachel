@@ -65,6 +65,10 @@ from app.repository import (
 settings = get_settings()
 BOT_NAME = settings.bot_name
 
+# The router only needs the tail of the conversation to decide whether a reply
+# is warranted, so cap how many of the most recent buffer messages it sees.
+ROUTER_CONTEXT_MSGS = 15
+
 _chat_mood: Dict[int, str] = {}
 DEFAULT_MOOD = "default"
 
@@ -269,11 +273,14 @@ def _route_after_checker(state: GraphState) -> str:
 async def router_node(state: GraphState) -> Dict:
     """Decide whether Rachel should reply at all. On failure, default to replying
     (fail-open) so a flaky router never silences her."""
+    # Only show the router the most recent messages — it just needs the latest
+    # context to judge whether a reply is warranted, not the whole buffer.
+    recent_history = state["history"][-ROUTER_CONTEXT_MSGS:]
     history_msgs = [
         AIMessage(content=f"{entry['sender']}: {entry['content']}")
         if entry["sender"] == BOT_NAME
         else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
-        for entry in state["history"]
+        for entry in recent_history
     ]
 
     system_msgs = ChatPromptTemplate.from_messages(
