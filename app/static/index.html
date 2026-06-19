@@ -127,6 +127,28 @@
   .traitcard .name { font-weight: 500; margin-bottom: 2px; }
   .traitcard .pr { color: var(--muted); font-size: 12px; margin-top: 6px; }
   .muted { color: var(--muted); }
+
+  /* personality tab: trait list on the left, prompt selectors on the right */
+  .traitrow { padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .traitrow:last-child { border-bottom: none; }
+  .traitrow:hover { background: var(--panel-2); }
+  .traitrow.selected { background: var(--panel-2); }
+  .traitrow .tname { font-size: 13px; }
+  .traitrow .tval { font-size: 11px; color: var(--muted); margin-top: 2px; text-transform: capitalize; }
+  .promptopt {
+    border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;
+    margin-bottom: 12px; cursor: pointer; background: var(--panel-2);
+    transition: border-color .12s, background .12s;
+  }
+  .promptopt:hover { border-color: var(--accent-2); }
+  .promptopt.active { border-color: var(--accent); background: rgba(124,156,255,.08); box-shadow: 0 0 0 1px var(--accent); }
+  .promptopt .lvl {
+    display: flex; align-items: center; gap: 8px; font-size: 12px;
+    text-transform: uppercase; letter-spacing: .4px; color: var(--muted); margin-bottom: 6px;
+  }
+  .promptopt.active .lvl { color: var(--accent); }
+  .promptopt .lvl .badge { font-size: 10px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); }
+  .promptopt .ptext { font-size: 13px; color: var(--text); white-space: pre-wrap; }
   .spacer { height: 6px; }
   .inline-note { font-size: 11px; color: var(--muted); margin-top: 6px; }
 
@@ -149,6 +171,12 @@
   table.kvtable td.empty input { border-style: dashed; }
   .xbtn { background: transparent; border: none; color: var(--muted); cursor: pointer; padding: 2px 6px; font-size: 15px; }
   .xbtn:hover { color: var(--danger); background: transparent; }
+
+  /* architecture tab: rendered pipeline graphs */
+  .graphcard { border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 16px; background: var(--panel-2); }
+  .graphcard .gtitle { font-size: 13px; font-weight: 500; margin-bottom: 10px; }
+  .graphcard .gtitle .mono { color: var(--muted); font-weight: 400; }
+  .graphcard img { max-width: 100%; height: auto; display: block; background: #fff; border-radius: 6px; padding: 8px; }
   @media (max-width: 760px) {
     main.wide { max-width: 100%; }
     .userlayout { flex-direction: column; }
@@ -168,43 +196,67 @@
 </header>
 
 <nav id="tabs">
-  <button data-tab="prompts">System Prompts</button>
+  <button data-tab="prompts">Prompts</button>
   <button data-tab="personality">Personality</button>
   <button data-tab="chats">Chats</button>
   <button data-tab="users">Users</button>
+  <button data-tab="architecture">Architecture</button>
 </nav>
 
 <main>
-    <!-- SYSTEM PROMPTS -->
+    <!-- PROMPTS (editable system prompts + read-only workflow prompts) -->
     <section id="prompts">
-      <h2>System Prompts</h2>
-      <div class="desc">Responder &amp; summarizer prompts. Loaded on open; Save writes via PUT.</div>
-
-      <label>Responder system prompt</label>
-      <textarea id="responderPrompt" style="min-height:200px"></textarea>
-      <div class="btns">
-        <button onclick="loadResponderPrompt()" class="ghost">Reload</button>
-        <button onclick="saveResponderPrompt()">Save responder prompt</button>
-      </div>
-
-      <div class="spacer"></div>
-      <label>Summarizer system prompt</label>
-      <textarea id="summarizerPrompt" style="min-height:200px"></textarea>
-      <div class="btns">
-        <button onclick="loadSummarizerPrompt()" class="ghost">Reload</button>
-        <button onclick="saveSummarizerPrompt()">Save summarizer prompt</button>
+      <h2>Prompts</h2>
+      <div class="desc">Pick a prompt on the left. The responder &amp; summarizer prompts are stored in the database and editable. The rest are workflow-node prompts hard-coded in <span class="mono">app/prompts.py</span>, shown read-only.</div>
+      <div class="userlayout">
+        <div class="userlist">
+          <div class="btns"><button onclick="loadPrompts()" class="ghost">Reload</button></div>
+          <div id="promptList"></div>
+        </div>
+        <div class="userdetail" id="promptDetail">
+          <div class="muted" id="promptDetailEmpty">Select a prompt to view it.</div>
+          <div id="promptDetailBody" style="display:none">
+            <div class="detailhead">
+              <div>
+                <div class="detailname" id="promptDetailName"></div>
+                <div class="muted" id="promptDetailKind"></div>
+              </div>
+            </div>
+            <div class="spacer"></div>
+            <textarea id="promptText" style="min-height:60vh"></textarea>
+            <div class="btns" id="promptBtns"></div>
+          </div>
+        </div>
       </div>
     </section>
 
     <!-- PERSONALITY -->
     <section id="personality">
       <h2>Personality Traits</h2>
-      <div class="desc">Set each trait to low / medium / high. Changes apply immediately (PATCH).</div>
-      <div class="btns">
-        <button onclick="loadTraits()" class="ghost">Reload traits</button>
-        <button onclick="resetTraits()" class="danger">Reset all to defaults</button>
+      <div class="desc">Pick a trait on the left, then click a prompt below to set it to low / medium / high. Changes apply immediately (PATCH).</div>
+      <div class="userlayout">
+        <div class="userlist">
+          <div class="btns">
+            <button onclick="loadTraits()" class="ghost">Reload</button>
+            <button onclick="resetTraits()" class="danger">Reset all</button>
+          </div>
+          <div id="traitList"></div>
+        </div>
+        <div class="userdetail" id="traitDetail">
+          <div class="muted" id="traitDetailEmpty">Select a trait to see its prompts.</div>
+          <div id="traitDetailBody" style="display:none">
+            <div class="detailhead">
+              <div>
+                <div class="detailname" id="traitDetailName"></div>
+                <div class="muted mono" id="traitDetailId"></div>
+              </div>
+            </div>
+            <div class="muted inline-note">Click a prompt to make it the active level for this trait.</div>
+            <div class="spacer"></div>
+            <div id="traitPrompts"></div>
+          </div>
+        </div>
       </div>
-      <div id="traitList"></div>
     </section>
 
     <!-- CHATS (list + history + summary) -->
@@ -285,6 +337,14 @@
         </div>
       </div>
     </section>
+
+    <!-- ARCHITECTURE (LangGraph pipeline diagrams) -->
+    <section id="architecture">
+      <h2>Architecture</h2>
+      <div class="desc">LangGraph pipeline diagrams, re-rendered on the server (<span class="mono">scripts/draw_graphs.py</span>) each time you reload.</div>
+      <div class="btns"><button onclick="loadArchitecture()" class="ghost">Reload</button></div>
+      <div id="architectureOut"></div>
+    </section>
   </main>
 
 <div class="toast" id="toast"></div>
@@ -338,66 +398,157 @@ async function checkHealth() {
   }
 }
 
-// --- system prompts -----------------------------------------------------
-async function loadResponderPrompt() {
+// --- prompts (editable DB prompts + read-only workflow prompts) ---------
+// Editable prompts stored in the DB, each with its own GET/PUT endpoint.
+const EDITABLE_PROMPTS = [
+  { id: "responder", label: "Responder", endpoint: "/responder-system-prompt" },
+  { id: "summarizer", label: "Summarizer", endpoint: "/summarizer-system-prompt" },
+];
+let PROMPTS = [];            // sidebar entries: {id, label, editable, endpoint?, text?}
+let selectedPrompt = null;   // currently selected prompt id
+
+async function loadPrompts() {
+  const box = document.getElementById("promptList");
+  box.innerHTML = '<div class="muted spacer">Loading…</div>';
   try {
-    const r = await api("/responder-system-prompt");
-    document.getElementById("responderPrompt").value = r.prompt;
-    toast("Responder prompt loaded", "ok");
-  } catch (e) { toast("Responder: " + e.message, "err"); }
+    const workflow = await api("/workflow-prompts");
+    PROMPTS = [
+      ...EDITABLE_PROMPTS.map(p => ({ ...p, editable: true })),
+      ...workflow.map(w => ({ id: "wf:" + w.key, label: w.label, editable: false, text: w.prompt })),
+    ];
+    box.innerHTML = "";
+    for (const p of PROMPTS) {
+      const row = document.createElement("div");
+      row.className = "traitrow";
+      row.dataset.pid = p.id;
+      row.onclick = () => selectPrompt(p.id);
+      row.innerHTML =
+        `<div class="tname">${esc(p.label)}</div>
+         <div class="tval">${p.editable ? "editable" : "read-only"}</div>`;
+      box.appendChild(row);
+    }
+    if (selectedPrompt && PROMPTS.some(p => p.id === selectedPrompt)) selectPrompt(selectedPrompt);
+    else {
+      selectedPrompt = null;
+      document.getElementById("promptDetailEmpty").style.display = "block";
+      document.getElementById("promptDetailBody").style.display = "none";
+    }
+  } catch (e) { box.innerHTML = ""; toast("Prompts: " + e.message, "err"); }
 }
-async function saveResponderPrompt() {
-  try {
-    await api("/responder-system-prompt", { method: "PUT", body: { prompt: document.getElementById("responderPrompt").value } });
-    toast("Responder prompt saved", "ok");
-  } catch (e) { toast("Save failed: " + e.message, "err"); }
+
+function highlightPromptRow(id) {
+  document.querySelectorAll("#promptList .traitrow").forEach(r =>
+    r.classList.toggle("selected", r.dataset.pid === String(id)));
 }
-async function loadSummarizerPrompt() {
-  try {
-    const r = await api("/summarizer-system-prompt");
-    document.getElementById("summarizerPrompt").value = r.prompt;
-    toast("Summarizer prompt loaded", "ok");
-  } catch (e) { toast("Summarizer: " + e.message, "err"); }
+
+async function selectPrompt(id) {
+  const p = PROMPTS.find(x => x.id === id);
+  if (!p) return;
+  selectedPrompt = id;
+  highlightPromptRow(id);
+  document.getElementById("promptDetailEmpty").style.display = "none";
+  document.getElementById("promptDetailBody").style.display = "block";
+  document.getElementById("promptDetailName").textContent = p.label;
+  document.getElementById("promptDetailKind").textContent =
+    p.editable ? "Stored in the database — editable." : "Hard-coded in app/prompts.py — read-only.";
+  const ta = document.getElementById("promptText");
+  const btns = document.getElementById("promptBtns");
+  btns.innerHTML = "";
+  if (p.editable) {
+    ta.readOnly = false;
+    ta.value = "Loading…";
+    try { ta.value = (await api(p.endpoint)).prompt; }
+    catch (e) { ta.value = ""; toast(p.label + ": " + e.message, "err"); }
+    const reload = document.createElement("button");
+    reload.className = "ghost"; reload.textContent = "Reload";
+    reload.onclick = () => selectPrompt(id);
+    const save = document.createElement("button");
+    save.textContent = "Save"; save.onclick = () => savePrompt(id);
+    btns.append(reload, save);
+  } else {
+    ta.readOnly = true;
+    ta.value = p.text;
+  }
 }
-async function saveSummarizerPrompt() {
+
+async function savePrompt(id) {
+  const p = PROMPTS.find(x => x.id === id);
+  if (!p || !p.editable) return;
   try {
-    await api("/summarizer-system-prompt", { method: "PUT", body: { prompt: document.getElementById("summarizerPrompt").value } });
-    toast("Summarizer prompt saved", "ok");
+    await api(p.endpoint, { method: "PUT", body: { prompt: document.getElementById("promptText").value } });
+    toast(p.label + " prompt saved", "ok");
   } catch (e) { toast("Save failed: " + e.message, "err"); }
 }
 
 // --- personality --------------------------------------------------------
+let TRAITS = [];           // last-loaded trait objects
+let selectedTrait = null;  // currently selected trait id
+
 async function loadTraits() {
   const box = document.getElementById("traitList");
   box.innerHTML = '<div class="muted spacer">Loading…</div>';
   try {
     const traits = await api("/personality");
     traits.sort((a, b) => a.sort_order - b.sort_order);
+    TRAITS = traits;
     box.innerHTML = "";
     for (const t of traits) {
-      const card = document.createElement("div");
-      card.className = "traitcard";
-      const levels = ["low", "medium", "high"];
-      const seg = levels.map(v =>
-        `<button class="${v === t.current_value ? "active" : ""}" onclick="setTrait(${t.id}, '${v}', this)">${v}</button>`
-      ).join("");
-      card.innerHTML =
-        `<div class="name">${esc(t.name)} <span class="muted mono">#${t.id}</span></div>
-         <div class="seg" data-trait="${t.id}">${seg}</div>
-         <div class="pr">${esc(t[t.current_value + "_prompt"])}</div>`;
-      box.appendChild(card);
+      const row = document.createElement("div");
+      row.className = "traitrow";
+      row.dataset.tid = t.id;
+      row.onclick = () => selectTrait(t.id);
+      row.innerHTML =
+        `<div class="tname">${esc(t.name)} <span class="muted mono">#${t.id}</span></div>
+         <div class="tval">${esc(t.current_value)}</div>`;
+      box.appendChild(row);
     }
+    // keep current selection (or its refreshed data) in view
+    if (selectedTrait && traits.some(t => t.id === selectedTrait)) renderTraitDetail(selectedTrait);
+    else { selectedTrait = null; document.getElementById("traitDetailEmpty").style.display = "block";
+           document.getElementById("traitDetailBody").style.display = "none"; }
   } catch (e) { box.innerHTML = ""; toast("Traits: " + e.message, "err"); }
 }
-async function setTrait(id, value, btn) {
+
+function highlightTraitRow(id) {
+  document.querySelectorAll("#traitList .traitrow").forEach(r =>
+    r.classList.toggle("selected", r.dataset.tid === String(id)));
+}
+
+function selectTrait(id) {
+  selectedTrait = id;
+  renderTraitDetail(id);
+}
+
+function renderTraitDetail(id) {
+  const t = TRAITS.find(x => x.id === id);
+  if (!t) return;
+  highlightTraitRow(id);
+  document.getElementById("traitDetailEmpty").style.display = "none";
+  document.getElementById("traitDetailBody").style.display = "block";
+  document.getElementById("traitDetailName").textContent = t.name;
+  document.getElementById("traitDetailId").textContent = "#" + t.id;
+  const wrap = document.getElementById("traitPrompts");
+  wrap.innerHTML = "";
+  for (const lvl of ["low", "medium", "high"]) {
+    const active = lvl === t.current_value;
+    const opt = document.createElement("div");
+    opt.className = "promptopt" + (active ? " active" : "");
+    opt.onclick = () => setTrait(t.id, lvl);
+    opt.innerHTML =
+      `<div class="lvl">${lvl}${active ? '<span class="badge">active</span>' : ""}</div>
+       <div class="ptext">${esc(t[lvl + "_prompt"])}</div>`;
+    wrap.appendChild(opt);
+  }
+}
+
+async function setTrait(id, value) {
   try {
     await api("/personality/" + id, { method: "PATCH", body: { value } });
-    const seg = btn.parentElement;
-    seg.querySelectorAll("button").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    const pr = seg.parentElement.querySelector(".pr");
-    // refresh prompt text from a reload-less local guess; reload to be exact
-    loadTraits();
+    const t = TRAITS.find(x => x.id === id);
+    if (t) t.current_value = value;
+    renderTraitDetail(id);
+    const row = document.querySelector(`#traitList .traitrow[data-tid="${id}"] .tval`);
+    if (row) row.textContent = value;
     toast("Trait updated", "ok");
   } catch (e) { toast("Trait: " + e.message, "err"); }
 }
@@ -623,15 +774,42 @@ async function deleteFacts() {
   } catch (e) { toast("Delete: " + e.message, "err"); }
 }
 
+// --- architecture (rendered LangGraph diagrams) -------------------------
+let architectureLoaded = false;
+
+async function loadArchitecture() {
+  const box = document.getElementById("architectureOut");
+  box.innerHTML = '<div class="muted spacer">Rendering graphs…</div>';
+  try {
+    const graphs = await api("/architecture");
+    if (!graphs.length) { box.innerHTML = '<div class="muted spacer">No graphs.</div>'; return; }
+    box.innerHTML = "";
+    for (const g of graphs) {
+      const card = document.createElement("div");
+      card.className = "graphcard";
+      card.innerHTML =
+        `<div class="gtitle">${esc(g.label)} <span class="mono">${esc(g.filename)}</span></div>
+         <img alt="${esc(g.label)}" src="data:image/png;base64,${g.png_base64}">`;
+      box.appendChild(card);
+    }
+    architectureLoaded = true;
+  } catch (e) {
+    box.innerHTML = '<div class="muted spacer">Failed to render — try Reload.</div>';
+    toast("Architecture: " + e.message, "err");
+  }
+}
+
 // --- tabs ---------------------------------------------------------------
 function showTab(name) {
   document.querySelectorAll("main > section").forEach(s =>
     s.classList.toggle("active", s.id === name));
-  document.querySelector("main").classList.toggle("wide", name === "chats" || name === "users");
+  document.querySelector("main").classList.toggle("wide", name === "prompts" || name === "chats" || name === "users" || name === "personality" || name === "architecture");
   document.querySelectorAll("#tabs button").forEach(b =>
     b.classList.toggle("active", b.dataset.tab === name));
   if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name);
   window.scrollTo(0, 0);
+  // graphs are slow to render (server-side network call) — load on first view
+  if (name === "architecture" && !architectureLoaded) loadArchitecture();
 }
 document.querySelectorAll("#tabs button").forEach(b =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
@@ -641,8 +819,7 @@ showTab(document.getElementById(_initTab) ? _initTab : "prompts");
 // --- init ---------------------------------------------------------------
 checkHealth();
 setInterval(checkHealth, 30000);
-loadResponderPrompt();
-loadSummarizerPrompt();
+loadPrompts();
 loadTraits();
 loadChats();
 loadProfileFields().then(loadUsers);

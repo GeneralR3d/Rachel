@@ -4,15 +4,34 @@ These endpoints reuse the same repository functions the Telethon handlers use,
 so the HTTP API and the in-Telegram admin bot stay in sync.
 """
 
+import asyncio
+import base64
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app import repository
+from app import prompts
 from app.prompts import USER_PROFILE_FIELDS
+from scripts.draw_graphs import GRAPHS, render_graphs
 
 router = APIRouter()
+
+
+# Workflow-node prompts that are NOT stored in the DB: they are imported
+# directly from app.prompts and surfaced read-only in the dashboard so the
+# whole pipeline's prompting is visible in one place. The responder &
+# summarizer prompts are intentionally excluded here — they live in the DB
+# and have their own editable endpoints above.
+WORKFLOW_PROMPTS: list[tuple[str, str, str]] = [
+    ("router", "Router / reply-gating", prompts.ROUTER_SYSTEM_PROMPT),
+    ("worldview_fact_extractor", "World-view: fact extractor", prompts.FACT_EXTRACTOR_SYSTEM_PROMPT),
+    ("worldview_consolidation", "World-view: consolidation", prompts.CONSOLIDATION_SYSTEM_PROMPT),
+    ("userfacts_fact_extractor", "User facts: fact extractor", prompts.USER_FACT_EXTRACTOR_SYSTEM_PROMPT),
+    ("userfacts_consolidation", "User facts: consolidation", prompts.USER_FACT_CONSOLIDATION_SYSTEM_PROMPT),
+    ("userprofile_extractor", "User profile: extractor", prompts.USER_PROFILE_EXTRACTOR_SYSTEM_PROMPT),
+]
 
 
 class SystemPromptIn(BaseModel):
@@ -103,6 +122,20 @@ async def read_summarizer_system_prompt() -> SummarizerSystemPromptOut:
 async def update_summarizer_system_prompt(body: SummarizerSystemPromptIn) -> SummarizerSystemPromptOut:
     await repository.set_summarizer_system_prompt(body.prompt)
     return SummarizerSystemPromptOut(prompt=body.prompt)
+
+class WorkflowPromptOut(BaseModel):
+    key: str
+    label: str
+    prompt: str
+
+
+@router.get("/workflow-prompts", response_model=list[WorkflowPromptOut])
+async def read_workflow_prompts() -> list[WorkflowPromptOut]:
+    """Read-only view of every workflow-node prompt that is hard-coded in
+    app.prompts (not stored in the DB). Surfaced so the dashboard can show the
+    full pipeline's prompting; there is no setter — these are unmodifiable."""
+    return [WorkflowPromptOut(key=k, label=label, prompt=text) for k, label, text in WORKFLOW_PROMPTS]
+
 
 @router.get("/users/names", response_model=list[UserNameOut])
 async def read_user_names() -> list[UserNameOut]:
@@ -215,3 +248,32 @@ async def update_trait(trait_id: int, body: TraitPatch) -> TraitOut:
 @router.post("/personality/reset", status_code=204)
 async def reset_traits() -> None:
     await repository.reset_traits()
+
+
+# --- architecture (LangGraph pipeline diagrams) --------------------------
+
+
+class ArchitectureGraph(BaseModel):
+    filename: str
+    label: str
+    png_base64: str
+
+
+@router.get("/architecture", response_model=list[ArchitectureGraph])
+async def read_architecture() -> list[ArchitectureGraph]:
+    """Re-render every LangGraph pipeline to a PNG on each request and return
+    them inline (base64) so the dashboard always shows the current graphs."""
+    try:
+        # draw_mermaid_png() does blocking network I/O — run off the event loop.
+        rendered = await asyncio.to_thread(render_graphs)
+    except Exception as e:  # noqa: BLE001 — surface the rendering failure to the client
+        raise HTTPException(status_code=502, detail=f"Failed to render graphs: {e}")
+    labels = {fn: label for fn, (label, _factory) in GRAPHS.items()}
+    return [
+        ArchitectureGraph(
+            filename=fn,
+            label=labels.get(fn, fn),
+            png_base64=base64.b64encode(png).decode("ascii"),
+        )
+        for fn, png in rendered.items()
+    ]
