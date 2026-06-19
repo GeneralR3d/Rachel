@@ -294,9 +294,42 @@ Both interfaces expose the same state. Over Telegram (only `ADMIN_ID` is honoure
 | `/get_history <chat_id>` · `/clear_history <chat_id>` | Inspect / clear a chat's stored messages (incl. `reason`) |
 | `/get_summary <chat_id>` · `/delete_summary <chat_id>` | Inspect / delete a chat's running summary |
 | `/list_traits` · `/set_trait <id> <low\|medium\|high>` · `/reset_traits` | Tune personality sliders |
-| `/get_user_facts <user_id>` · `/set_user_facts <user_id> <text>` · `/delete_user_facts <user_id>` | Manage per-user memory |
+| `/get_user_facts <user_id>` · `/set_user_facts <user_id> <text>` · `/delete_user_facts <user_id>` | Manage per-user free-form facts/preferences |
+| `/get_user_profile <user_id>` · `/delete_user_profile <user_id>` | Inspect / delete a user's structured profile slots |
 
 Over REST (`app/routers/admin.py`): `GET/PUT /system-prompt`, `GET /users/names`, `GET /list-chats`, `GET/DELETE /history/{chat_id}`, `GET/DELETE /summary/{chat_id}`, `GET /personality`, `PATCH /personality/{trait_id}`, `POST /personality/reset`, `GET/PUT/DELETE /user-facts/{user_id}`, `GET /health`.
+To set a per-chat scope, you need to use the Bot API directly instead of BotFather. Send a setMyCommands request with the scope field:
+
+```  
+  curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setMyCommands" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "commands": [
+        {"command": "get_responder_system_prompt", "description": "Get the current responder system prompt"},
+        {"command": "set_responder_system_prompt", "description": "Set a new responder system prompt"},
+        {"command": "get_summarizer_system_prompt", "description": "Get the current summarizer system prompt"},
+        {"command": "set_summarizer_system_prompt", "description": "Set a new summarizer system prompt"},
+        {"command": "list_chats", "description": "List all chats with message counts"},
+        {"command": "get_history", "description": "Get message history for a chat"},
+        {"command": "clear_history", "description": "Clear message history for a chat"},
+        {"command": "get_summary", "description": "Get the conversation summary for a chat"},
+        {"command": "delete_summary", "description": "Delete the conversation summary for a chat"},
+        {"command": "list_user_names", "description": "List all usernames and names and telegram_user_id"},
+        {"command": "get_user_facts", "description": "Get stored facts/preferences for a user: /get_user_facts <user_id>"},
+        {"command": "set_user_facts", "description": "Set facts/preferences for a user: /set_user_facts <user_id> <facts text>"},
+        {"command": "delete_user_facts", "description": "Delete stored facts/preferences for a user: /delete_user_facts <user_id>"},
+        {"command": "get_user_profile", "description": "Get the structured profile for a user: /get_user_profile <user_id>"},
+        {"command": "delete_user_profile", "description": "Delete the structured profile for a user: /delete_user_profile <user_id>"},
+        {"command": "list_traits", "description": "List all personality trait sliders and current values"},
+        {"command": "set_trait", "description": "Set a trait value: /set_trait <id> <low|medium|high>"},
+        {"command": "reset_traits", "description": "Reset all personality traits to medium"}
+      ],    
+      "scope": {
+        "type": "chat",
+        "chat_id": <YOUR_ADMIN_ID>
+      }
+    }'
+```
 
 ## Development
 
