@@ -22,7 +22,9 @@ responder_node:  generates Rachel's reply using the mood detected in the
 
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+SGT = timezone(timedelta(hours=8))
 from typing import Any, Dict, List, Tuple
 from pprint import pprint
 
@@ -395,7 +397,7 @@ async def responder_node(state: GraphState) -> Dict:
         pprint(user_facts)
         pprint(user_profiles)
 
-        now = datetime.now()
+        now = datetime.now(SGT)
         formatted_datetime = (
             f"The current date is {now.strftime('%d %B %Y')}, "
             f"the current month is {now.strftime('%B')}, "

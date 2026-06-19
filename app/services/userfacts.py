@@ -35,7 +35,9 @@ import asyncio
 import traceback
 from collections import defaultdict
 from typing import Any, Dict, List
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+SGT = timezone(timedelta(hours=8))
 from pprint import pprint
 
 import tiktoken
@@ -256,7 +258,7 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
         for entry in state["conversation"]
     ]
 
-    now = datetime.now()
+    now = datetime.now(SGT)
     formatted_date = (
         f"The current date is {now.strftime('%d %B %Y')}, "
         f"the current month is {now.strftime('%B')}, "
