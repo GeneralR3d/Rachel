@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app import repository
+from app.prompts import USER_PROFILE_FIELDS
 
 router = APIRouter()
 
@@ -147,6 +148,18 @@ async def update_user_facts(user_id: int, body: UserFactsIn) -> UserFactsOut:
 @router.delete("/user-facts/{user_id}", status_code=204)
 async def delete_user_facts(user_id: int) -> None:
     await repository.delete_user_facts(user_id)
+
+
+class ProfileFieldOut(BaseModel):
+    key: str
+    label: str
+
+
+@router.get("/user-profile-fields", response_model=list[ProfileFieldOut])
+async def list_profile_fields() -> list[ProfileFieldOut]:
+    """The fixed profile slot schema, so clients can render every attribute
+    (including empty ones) from a single source of truth."""
+    return [ProfileFieldOut(key=key, label=label) for key, label, _guide in USER_PROFILE_FIELDS]
 
 
 @router.get("/user-profile/{user_id}", response_model=UserProfileOut)

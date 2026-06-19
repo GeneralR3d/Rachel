@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rachel — Admin Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --border: #2a2f3a;
+    --text: #e6e9ef;
+    --muted: #8b93a3;
+    --accent: #7c9cff;
+    --accent-2: #5b78d6;
+    --danger: #ff6b6b;
+    --danger-2: #d64545;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 14px; line-height: 1.5;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(15,17,21,.92); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px; display: flex; align-items: center; gap: 14px;
+  }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: .3px; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  .health { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.bad { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+
+  nav {
+    position: sticky; top: 53px; z-index: 9;
+    background: rgba(15,17,21,.92); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    display: flex; gap: 4px; padding: 8px 24px 0;
+    overflow-x: auto; scrollbar-width: thin;
+  }
+  nav button {
+    background: transparent; border: none; border-bottom: 2px solid transparent;
+    color: var(--muted); padding: 9px 14px; font-size: 13px; cursor: pointer;
+    border-radius: 0; white-space: nowrap; font-family: var(--sans);
+  }
+  nav button:hover { color: var(--text); background: transparent; }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  main { max-width: 1000px; margin: 0 auto; padding: 22px 24px 80px; min-width: 0; }
+  main.wide { max-width: 2000px; }
+  section { display: none; }
+  section.active { display: block; }
+
+  section {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px 20px; margin-bottom: 22px;
+  }
+  section h2 { font-size: 15px; margin: 0 0 4px; }
+  section .desc { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input, textarea, select {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 8px; padding: 9px 11px; font-size: 13px;
+    font-family: var(--sans); resize: vertical;
+  }
+  textarea { font-family: var(--mono); font-size: 12.5px; line-height: 1.55; min-height: 120px; }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent-2); }
+
+  .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+  .row > * { flex: 1; min-width: 0; }
+  .row .fixed { flex: none; }
+
+  button {
+    background: var(--accent-2); color: #fff; border: none; border-radius: 8px;
+    padding: 9px 16px; font-size: 13px; font-weight: 500; cursor: pointer;
+    font-family: var(--sans); white-space: nowrap;
+  }
+  button:hover { background: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  button.ghost:hover { background: var(--panel-2); }
+  button.danger { background: transparent; border: 1px solid var(--danger-2); color: var(--danger); }
+  button.danger:hover { background: rgba(214,69,69,.12); }
+  .btns { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+
+  .out {
+    margin-top: 12px; background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 12px;
+    white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto;
+    color: var(--muted);
+  }
+  .out:empty { display: none; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.mono, .mono { font-family: var(--mono); font-size: 12px; }
+  tr.clickable:hover { background: var(--panel-2); cursor: pointer; }
+
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); }
+  .toast {
+    position: fixed; bottom: 22px; right: 22px; z-index: 50;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .toast .t {
+    background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    padding: 10px 14px; border-radius: 8px; font-size: 13px; max-width: 360px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.4); animation: slidein .2s ease;
+  }
+  .toast .t.ok { border-left-color: var(--ok); }
+  .toast .t.err { border-left-color: var(--danger); }
+  @keyframes slidein { from { transform: translateX(20px); opacity: 0; } }
+
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg button { background: transparent; color: var(--muted); border: none; border-radius: 0; padding: 6px 14px; }
+  .seg button.active { background: var(--accent-2); color: #fff; }
+  .traitcard { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+  .traitcard .name { font-weight: 500; margin-bottom: 2px; }
+  .traitcard .pr { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .muted { color: var(--muted); }
+  .spacer { height: 6px; }
+  .inline-note { font-size: 11px; color: var(--muted); margin-top: 6px; }
+
+  /* users tab: list on the left, detail on the right */
+  .userlayout { display: flex; gap: 18px; align-items: flex-start; }
+  .userlist { flex: none; width: 300px; position: sticky; top: 100px; align-self: flex-start; }
+  .userlist #userTable, .userlist #chatTable { max-height: 75vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .userlist table { margin: 0; }
+  .userlist th { position: sticky; top: 0; background: var(--panel); }
+  .userdetail { flex: 1; min-width: 0; border-left: 1px solid var(--border); padding-left: 18px; }
+  tr.selected { background: var(--panel-2); }
+  .detailhead { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .detailname { font-size: 15px; font-weight: 600; }
+  .subhead { font-size: 13px; margin: 20px 0 2px; color: var(--text); }
+  table.kvtable { table-layout: fixed; }
+  table.kvtable td.k { width: 38%; color: var(--muted); font-size: 12px; vertical-align: middle; }
+  table.kvtable td.v { width: 56%; }
+  table.kvtable td.x { width: 6%; text-align: right; vertical-align: middle; }
+  table.kvtable input { padding: 6px 9px; }
+  table.kvtable td.empty input { border-style: dashed; }
+  .xbtn { background: transparent; border: none; color: var(--muted); cursor: pointer; padding: 2px 6px; font-size: 15px; }
+  .xbtn:hover { color: var(--danger); background: transparent; }
+  @media (max-width: 760px) {
+    main.wide { max-width: 100%; }
+    .userlayout { flex-direction: column; }
+    .userlist { width: 100%; position: static; }
+    .userdetail { border-left: none; padding-left: 0; border-top: 1px solid var(--border); padding-top: 14px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Rachel</h1>
+  <span class="sub">Admin Dashboard</span>
+  <div class="health">
+    <span class="dot" id="healthDot"></span>
+    <span id="healthText">checking…</span>
+  </div>
+</header>
+
+<nav id="tabs">
+  <button data-tab="prompts">System Prompts</button>
+  <button data-tab="personality">Personality</button>
+  <button data-tab="chats">Chats</button>
+  <button data-tab="users">Users</button>
+</nav>
+
+<main>
+    <!-- SYSTEM PROMPTS -->
+    <section id="prompts">
+      <h2>System Prompts</h2>
+      <div class="desc">Responder &amp; summarizer prompts. Loaded on open; Save writes via PUT.</div>
+
+      <label>Responder system prompt</label>
+      <textarea id="responderPrompt" style="min-height:200px"></textarea>
+      <div class="btns">
+        <button onclick="loadResponderPrompt()" class="ghost">Reload</button>
+        <button onclick="saveResponderPrompt()">Save responder prompt</button>
+      </div>
+
+      <div class="spacer"></div>
+      <label>Summarizer system prompt</label>
+      <textarea id="summarizerPrompt" style="min-height:200px"></textarea>
+      <div class="btns">
+        <button onclick="loadSummarizerPrompt()" class="ghost">Reload</button>
+        <button onclick="saveSummarizerPrompt()">Save summarizer prompt</button>
+      </div>
+    </section>
+
+    <!-- PERSONALITY -->
+    <section id="personality">
+      <h2>Personality Traits</h2>
+      <div class="desc">Set each trait to low / medium / high. Changes apply immediately (PATCH).</div>
+      <div class="btns">
+        <button onclick="loadTraits()" class="ghost">Reload traits</button>
+        <button onclick="resetTraits()" class="danger">Reset all to defaults</button>
+      </div>
+      <div id="traitList"></div>
+    </section>
+
+    <!-- CHATS (list + history + summary) -->
+    <section id="chats">
+      <h2>Chats</h2>
+      <div class="desc">Pick a chat on the left to view its rolling summary and full message history.</div>
+      <div class="userlayout">
+        <div class="userlist">
+          <div class="btns"><button onclick="loadChats()" class="ghost">Reload</button></div>
+          <div id="chatTable"></div>
+        </div>
+        <div class="userdetail" id="chatDetail">
+          <div class="muted" id="chatDetailEmpty">Select a chat to see its details.</div>
+
+          <div id="chatDetailBody" style="display:none">
+            <div class="detailhead">
+              <div>
+                <div class="detailname">Chat</div>
+                <div class="muted mono" id="chatDetailId"></div>
+              </div>
+            </div>
+
+            <h3 class="subhead">Summary</h3>
+            <div class="out" id="summaryOut"></div>
+            <div class="btns">
+              <button onclick="loadSummary()" class="ghost">Reload</button>
+              <button onclick="deleteSummary()" class="danger">Delete summary</button>
+            </div>
+
+            <h3 class="subhead">History</h3>
+            <div class="btns">
+              <button onclick="loadHistory()" class="ghost">Reload</button>
+              <button onclick="clearHistory()" class="danger">Clear history</button>
+            </div>
+            <div id="historyOut"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- USERS (list + profile + facts) -->
+    <section id="users">
+      <h2>Users</h2>
+      <div class="desc">Pick a user on the left to view and edit their profile (all slots, including empty) and free-form facts.</div>
+      <div class="userlayout">
+        <div class="userlist">
+          <div class="btns"><button onclick="loadUsers()" class="ghost">Reload</button></div>
+          <div id="userTable"></div>
+        </div>
+        <div class="userdetail" id="userDetail">
+          <div class="muted" id="userDetailEmpty">Select a user to see their details.</div>
+
+          <div id="userDetailBody" style="display:none">
+            <div class="detailhead">
+              <div>
+                <div class="detailname" id="detailName"></div>
+                <div class="muted mono" id="detailId"></div>
+              </div>
+            </div>
+
+            <h3 class="subhead">Profile</h3>
+            <div class="muted inline-note">Every slot is shown; empty slots are filled in to populate them.</div>
+            <table class="kvtable"><tbody id="profileRows"></tbody></table>
+            <div class="btns">
+              <button onclick="saveProfile()">Save profile</button>
+              <button onclick="deleteProfile()" class="danger">Clear profile</button>
+            </div>
+
+            <h3 class="subhead">Facts</h3>
+            <div class="muted inline-note">Free-form notes, one per row. Add or remove rows; saved as a bullet list.</div>
+            <table class="kvtable"><tbody id="factsRows"></tbody></table>
+            <div class="btns">
+              <button onclick="addFactRow('')" class="ghost">+ Add fact</button>
+              <button onclick="saveFacts()">Save facts</button>
+              <button onclick="deleteFacts()" class="danger">Clear facts</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// Same-origin: all calls are relative, so nginx basic auth is inherited automatically.
+const API = "";
+
+function toast(msg, kind = "") {
+  const box = document.getElementById("toast");
+  const el = document.createElement("div");
+  el.className = "t " + kind;
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(() => el.remove(), 3800);
+}
+
+async function api(path, { method = "GET", body } = {}) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(API + path, opts);
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch {}
+    throw new Error(`${res.status} — ${detail}`);
+  }
+  if (res.status === 204) return null;
+  const ct = res.headers.get("content-type") || "";
+  return ct.includes("application/json") ? res.json() : res.text();
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// --- health -------------------------------------------------------------
+async function checkHealth() {
+  const dot = document.getElementById("healthDot");
+  const txt = document.getElementById("healthText");
+  try {
+    const r = await api("/health");
+    dot.className = "dot ok";
+    txt.textContent = r.status === "ok" ? "online" : JSON.stringify(r);
+  } catch (e) {
+    dot.className = "dot bad";
+    txt.textContent = "offline";
+  }
+}
+
+// --- system prompts -----------------------------------------------------
+async function loadResponderPrompt() {
+  try {
+    const r = await api("/responder-system-prompt");
+    document.getElementById("responderPrompt").value = r.prompt;
+    toast("Responder prompt loaded", "ok");
+  } catch (e) { toast("Responder: " + e.message, "err"); }
+}
+async function saveResponderPrompt() {
+  try {
+    await api("/responder-system-prompt", { method: "PUT", body: { prompt: document.getElementById("responderPrompt").value } });
+    toast("Responder prompt saved", "ok");
+  } catch (e) { toast("Save failed: " + e.message, "err"); }
+}
+async function loadSummarizerPrompt() {
+  try {
+    const r = await api("/summarizer-system-prompt");
+    document.getElementById("summarizerPrompt").value = r.prompt;
+    toast("Summarizer prompt loaded", "ok");
+  } catch (e) { toast("Summarizer: " + e.message, "err"); }
+}
+async function saveSummarizerPrompt() {
+  try {
+    await api("/summarizer-system-prompt", { method: "PUT", body: { prompt: document.getElementById("summarizerPrompt").value } });
+    toast("Summarizer prompt saved", "ok");
+  } catch (e) { toast("Save failed: " + e.message, "err"); }
+}
+
+// --- personality --------------------------------------------------------
+async function loadTraits() {
+  const box = document.getElementById("traitList");
+  box.innerHTML = '<div class="muted spacer">Loading…</div>';
+  try {
+    const traits = await api("/personality");
+    traits.sort((a, b) => a.sort_order - b.sort_order);
+    box.innerHTML = "";
+    for (const t of traits) {
+      const card = document.createElement("div");
+      card.className = "traitcard";
+      const levels = ["low", "medium", "high"];
+      const seg = levels.map(v =>
+        `<button class="${v === t.current_value ? "active" : ""}" onclick="setTrait(${t.id}, '${v}', this)">${v}</button>`
+      ).join("");
+      card.innerHTML =
+        `<div class="name">${esc(t.name)} <span class="muted mono">#${t.id}</span></div>
+         <div class="seg" data-trait="${t.id}">${seg}</div>
+         <div class="pr">${esc(t[t.current_value + "_prompt"])}</div>`;
+      box.appendChild(card);
+    }
+  } catch (e) { box.innerHTML = ""; toast("Traits: " + e.message, "err"); }
+}
+async function setTrait(id, value, btn) {
+  try {
+    await api("/personality/" + id, { method: "PATCH", body: { value } });
+    const seg = btn.parentElement;
+    seg.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    const pr = seg.parentElement.querySelector(".pr");
+    // refresh prompt text from a reload-less local guess; reload to be exact
+    loadTraits();
+    toast("Trait updated", "ok");
+  } catch (e) { toast("Trait: " + e.message, "err"); }
+}
+async function resetTraits() {
+  if (!confirm("Reset ALL personality traits to their defaults?")) return;
+  try {
+    await api("/personality/reset", { method: "POST" });
+    toast("Traits reset", "ok");
+    loadTraits();
+  } catch (e) { toast("Reset: " + e.message, "err"); }
+}
+
+// --- chats (list + summary + history) -----------------------------------
+let selectedChat = null;   // currently selected chat id (string)
+
+async function loadChats() {
+  const box = document.getElementById("chatTable");
+  box.innerHTML = '<div class="muted spacer">Loading…</div>';
+  try {
+    const chats = await api("/list-chats");
+    if (!chats.length) { box.innerHTML = '<div class="muted spacer">No chats.</div>'; return; }
+    let html = "<table><thead><tr><th>Chat ID</th><th>Msgs</th></tr></thead><tbody>";
+    for (const c of chats) {
+      html += `<tr class="clickable" data-cid="${c.chat_id}" onclick="selectChat('${c.chat_id}')">
+        <td class="mono">${c.chat_id}</td><td>${c.message_count}</td></tr>`;
+    }
+    html += "</tbody></table>";
+    box.innerHTML = html;
+    if (selectedChat) highlightChatRow(selectedChat);
+  } catch (e) { box.innerHTML = ""; toast("Chats: " + e.message, "err"); }
+}
+
+function highlightChatRow(id) {
+  document.querySelectorAll("#chatTable tr").forEach(r =>
+    r.classList.toggle("selected", r.dataset.cid === String(id)));
+}
+
+async function selectChat(id) {
+  selectedChat = String(id);
+  highlightChatRow(id);
+  document.getElementById("chatDetailEmpty").style.display = "none";
+  document.getElementById("chatDetailBody").style.display = "block";
+  document.getElementById("chatDetailId").textContent = "ID " + id;
+  await Promise.all([loadSummary(), loadHistory()]);
+}
+
+// history ----------------------------------------------------------------
+async function loadHistory() {
+  if (!selectedChat) return;
+  const box = document.getElementById("historyOut");
+  box.className = "out"; box.textContent = "Loading…";
+  try {
+    const items = await api("/history/" + selectedChat);
+    if (!items.length) { box.className = "out"; box.textContent = "(empty)"; return; }
+    box.className = "";
+    let html = "<table><thead><tr><th>Sender</th><th>Content</th><th>Reason</th></tr></thead><tbody>";
+    for (const it of items) {
+      html += `<tr><td>${esc(it.sender)}</td><td>${esc(it.content)}</td>
+        <td class="muted">${esc(it.reason || "")}</td></tr>`;
+    }
+    html += "</tbody></table>";
+    box.innerHTML = html;
+  } catch (e) { box.className = "out"; box.textContent = ""; toast("History: " + e.message, "err"); }
+}
+async function clearHistory() {
+  if (!selectedChat) return;
+  if (!confirm("Clear ALL history for chat " + selectedChat + "?")) return;
+  try {
+    await api("/history/" + selectedChat, { method: "DELETE" });
+    toast("History cleared", "ok");
+    loadHistory();
+  } catch (e) { toast("Clear: " + e.message, "err"); }
+}
+
+// summary ----------------------------------------------------------------
+async function loadSummary() {
+  if (!selectedChat) return;
+  const box = document.getElementById("summaryOut");
+  box.textContent = "Loading…";
+  try {
+    const r = await api("/summary/" + selectedChat);
+    box.textContent = r.summary || "(no summary)";
+  } catch (e) { box.textContent = ""; toast("Summary: " + e.message, "err"); }
+}
+async function deleteSummary() {
+  if (!selectedChat) return;
+  if (!confirm("Delete summary for chat " + selectedChat + "?")) return;
+  try {
+    await api("/summary/" + selectedChat, { method: "DELETE" });
+    toast("Summary deleted", "ok");
+    loadSummary();
+  } catch (e) { toast("Delete: " + e.message, "err"); }
+}
+
+// --- users (list + profile + facts) -------------------------------------
+let PROFILE_FIELDS = [];   // [{key, label}] — fixed slot schema
+let selectedUser = null;   // currently selected user id (string)
+
+async function loadProfileFields() {
+  try { PROFILE_FIELDS = await api("/user-profile-fields"); }
+  catch (e) { toast("Profile schema: " + e.message, "err"); }
+}
+
+async function loadUsers() {
+  const box = document.getElementById("userTable");
+  box.innerHTML = '<div class="muted spacer">Loading…</div>';
+  try {
+    const users = await api("/users/names");
+    if (!users.length) { box.innerHTML = '<div class="muted spacer">No users.</div>'; return; }
+    let html = "<table><thead><tr><th>User ID</th><th>Name</th></tr></thead><tbody>";
+    for (const u of users) {
+      const name = u.username ? "@" + esc(u.username)
+        : (esc([u.first_name, u.last_name].filter(Boolean).join(" ")) || '<span class="muted">—</span>');
+      html += `<tr class="clickable" data-uid="${u.telegram_user_id}"
+        onclick='selectUser("${u.telegram_user_id}", ${JSON.stringify(name)})'>
+        <td class="mono">${u.telegram_user_id}</td><td>${name}</td></tr>`;
+    }
+    html += "</tbody></table>";
+    box.innerHTML = html;
+    if (selectedUser) highlightUserRow(selectedUser);
+  } catch (e) { box.innerHTML = ""; toast("Users: " + e.message, "err"); }
+}
+
+function highlightUserRow(id) {
+  document.querySelectorAll("#userTable tr").forEach(r =>
+    r.classList.toggle("selected", r.dataset.uid === String(id)));
+}
+
+async function selectUser(id, nameHtml) {
+  selectedUser = String(id);
+  highlightUserRow(id);
+  document.getElementById("userDetailEmpty").style.display = "none";
+  document.getElementById("userDetailBody").style.display = "block";
+  document.getElementById("detailName").innerHTML = nameHtml || "User";
+  document.getElementById("detailId").textContent = "ID " + id;
+  await Promise.all([loadProfile(), loadFacts()]);
+}
+
+// profile ----------------------------------------------------------------
+async function loadProfile() {
+  const tbody = document.getElementById("profileRows");
+  tbody.innerHTML = "";
+  let profile = {};
+  try { profile = (await api("/user-profile/" + selectedUser)).profile || {}; }
+  catch (e) { toast("Profile: " + e.message, "err"); }
+  // every fixed slot, in schema order, even when empty
+  for (const f of PROFILE_FIELDS) addKvRow(tbody, f.key, f.label, profile[f.key] ?? "");
+  // any stored keys not in the current schema (legacy) — still show them
+  for (const k of Object.keys(profile)) {
+    if (!PROFILE_FIELDS.some(f => f.key === k)) addKvRow(tbody, k, k + " (legacy)", profile[k]);
+  }
+}
+function addKvRow(tbody, key, label, value) {
+  const tr = document.createElement("tr");
+  const empty = !String(value ?? "").trim();
+  tr.innerHTML =
+    `<td class="k">${esc(label)}</td>
+     <td class="v${empty ? " empty" : ""}"><input data-key="${esc(key)}" value="${esc(value ?? "")}"
+        placeholder="—"></td>
+     <td class="x"></td>`;
+  tbody.appendChild(tr);
+}
+async function saveProfile() {
+  if (!selectedUser) return;
+  const profile = {};
+  document.querySelectorAll("#profileRows input").forEach(i => {
+    const v = i.value.trim();
+    if (v) profile[i.dataset.key] = v;   // omit empty slots
+  });
+  try {
+    await api("/user-profile/" + selectedUser, { method: "PUT", body: { profile } });
+    toast("Profile saved", "ok");
+    loadProfile();
+  } catch (e) { toast("Save: " + e.message, "err"); }
+}
+async function deleteProfile() {
+  if (!selectedUser) return;
+  if (!confirm("Clear the entire profile for user " + selectedUser + "?")) return;
+  try {
+    await api("/user-profile/" + selectedUser, { method: "DELETE" });
+    toast("Profile cleared", "ok");
+    loadProfile();
+  } catch (e) { toast("Delete: " + e.message, "err"); }
+}
+
+// facts ------------------------------------------------------------------
+async function loadFacts() {
+  const tbody = document.getElementById("factsRows");
+  tbody.innerHTML = "";
+  let facts = "";
+  try { facts = (await api("/user-facts/" + selectedUser)).facts || ""; }
+  catch (e) { toast("Facts: " + e.message, "err"); }
+  const lines = facts.split("\n").map(l => l.replace(/^\s*[-*]\s*/, "").trim()).filter(Boolean);
+  if (!lines.length) addFactRow("");
+  else lines.forEach(addFactRow);
+}
+function addFactRow(value) {
+  const tbody = document.getElementById("factsRows");
+  const tr = document.createElement("tr");
+  tr.innerHTML =
+    `<td class="v" colspan="2"><input class="fact" value="${esc(value || "")}" placeholder="a fact about this user"></td>
+     <td class="x"><button class="xbtn" title="Remove" onclick="this.closest('tr').remove()">×</button></td>`;
+  tbody.appendChild(tr);
+}
+async function saveFacts() {
+  if (!selectedUser) return;
+  const lines = [...document.querySelectorAll("#factsRows input.fact")]
+    .map(i => i.value.trim()).filter(Boolean);
+  const text = lines.map(l => "- " + l).join("\n");
+  try {
+    await api("/user-facts/" + selectedUser, { method: "PUT", body: { facts: text } });
+    toast("Facts saved", "ok");
+    loadFacts();
+  } catch (e) { toast("Save: " + e.message, "err"); }
+}
+async function deleteFacts() {
+  if (!selectedUser) return;
+  if (!confirm("Clear all facts for user " + selectedUser + "?")) return;
+  try {
+    await api("/user-facts/" + selectedUser, { method: "DELETE" });
+    toast("Facts cleared", "ok");
+    loadFacts();
+  } catch (e) { toast("Delete: " + e.message, "err"); }
+}
+
+// --- tabs ---------------------------------------------------------------
+function showTab(name) {
+  document.querySelectorAll("main > section").forEach(s =>
+    s.classList.toggle("active", s.id === name));
+  document.querySelector("main").classList.toggle("wide", name === "chats" || name === "users");
+  document.querySelectorAll("#tabs button").forEach(b =>
+    b.classList.toggle("active", b.dataset.tab === name));
+  if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name);
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll("#tabs button").forEach(b =>
+  b.addEventListener("click", () => showTab(b.dataset.tab)));
+const _initTab = location.hash.slice(1);
+showTab(document.getElementById(_initTab) ? _initTab : "prompts");
+
+// --- init ---------------------------------------------------------------
+checkHealth();
+setInterval(checkHealth, 30000);
+loadResponderPrompt();
+loadSummarizerPrompt();
+loadTraits();
+loadChats();
+loadProfileFields().then(loadUsers);
+</script>
+</body>
+</html>

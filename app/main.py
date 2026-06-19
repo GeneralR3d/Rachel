@@ -7,8 +7,10 @@ Telethon keeps a persistent connection to Telegram and processes pushed events.
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 
 from app.config import get_settings
 from app.database import dispose_engine
@@ -57,3 +59,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Rachel", lifespan=lifespan)
 app.include_router(admin.router)
+
+_DASHBOARD = Path(__file__).parent / "static" / "index.html"
+
+
+@app.get("/", include_in_schema=False)
+async def dashboard() -> FileResponse:
+    return FileResponse(_DASHBOARD)
