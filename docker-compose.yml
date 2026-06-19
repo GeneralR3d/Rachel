@@ -4,10 +4,13 @@ services:
     container_name: rachel-db
     environment:
       POSTGRES_USER: rachel
-      POSTGRES_PASSWORD: rachel
+      # Must match the password embedded in DATABASE_URL (.env). Falls back to
+      # "rachel" if DB_PASSWORD is unset, preserving the old dev default.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-rachel}
       POSTGRES_DB: rachel
     ports:
-      - "5433:5432"
+      # Bind to loopback only — the DB never needs to be reachable from off-host.
+      - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -25,7 +28,7 @@ services:
   #       condition: service_healthy
   #   env_file: .env
   #   environment:
-  #     DATABASE_URL: postgresql+asyncpg://rachel:rachel@db:5432/rachel
+  #     DATABASE_URL: postgresql+asyncpg://rachel:${DB_PASSWORD:-rachel}@db:5432/rachel
   #   ports:
   #     - "8000:8000"
   #   volumes:

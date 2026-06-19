@@ -130,11 +130,11 @@ Requires=docker.service
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/rachel
+WorkingDirectory=/opt/Rachel
 ExecStart=/root/.local/bin/uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5
-ExecStartPre=/usr/bin/docker compose -f /opt/rachel/docker-compose.yml up -d db
+ExecStartPre=/usr/bin/docker compose -f /opt/Rachel/docker-compose.yml up -d db
 
 [Install]
 WantedBy=multi-user.target
