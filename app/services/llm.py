@@ -195,13 +195,15 @@ MOOD_LABELS = list(CONVERSATION_STYLE)
 
 
 class RouterOutput(BaseModel):
-    reason: str = Field(
-        ...,
-        description="A single short sentence explaining the reply/no-reply decision.",
-    )
+    # should_reply is declared first so the model commits to the decision before
+    # writing the (cosmetic) justification — it sometimes drops trailing fields.
     should_reply: bool = Field(
         ...,
         description="True if Rachel should send a reply to the latest messages, False if she should stay silent.",
+    )
+    reason: str = Field(
+        ...,
+        description="A single short sentence explaining the reply/no-reply decision.",
     )
 
 
@@ -239,11 +241,13 @@ class GraphState(TypedDict):
     response_reason: str
 
 
+# include_raw lets router_node salvage should_reply from the raw tool-call args
+# when structured parsing fails (the model occasionally omits a required field).
 _router_llm = ChatOpenRouter(
     model=settings.openrouter_model,
     api_key=settings.openrouter_api_key,
     temperature=0.0,
-).with_structured_output(RouterOutput)
+).with_structured_output(RouterOutput, include_raw=True)
 
 _summarizer_llm = ChatOpenRouter(
     model=settings.openrouter_model,
@@ -294,12 +298,39 @@ async def router_node(state: GraphState) -> Dict:
     print(f"[router] context: {len(msgs)} messages, {msgs_tokens} tokens")
 
     try:
-        result: RouterOutput = await _router_llm.ainvoke(msgs)
+        result = await _router_llm.ainvoke(msgs)
     except Exception as e:
         print(f"[router] LLM error (defaulting to reply): {type(e).__name__}: {e}")
         return {"should_reply": True}
-    print(f"[router] should_reply={result.should_reply} | reason={result.reason}")
-    return {"should_reply": result.should_reply}
+
+    parsed: RouterOutput | None = result.get("parsed")
+    if parsed is not None:
+        print(f"[router] should_reply={parsed.should_reply} | reason={parsed.reason}")
+        return {"should_reply": parsed.should_reply}
+
+    # Structured parsing failed (model omitted a required field). Try to salvage
+    # the actual decision from the raw tool-call args before falling open — a
+    # dropped `reason` shouldn't force a reply when should_reply was given.
+    should_reply = _salvage_should_reply(result.get("raw"))
+    print(
+        f"[router] structured parse failed ({result.get('parsing_error')}); "
+        f"salvaged should_reply={should_reply}"
+    )
+    return {"should_reply": should_reply}
+
+
+def _salvage_should_reply(raw: Any) -> bool:
+    """Pull should_reply out of a raw model response whose structured parse failed.
+    Falls open to True (reply) when the field is absent or unreadable."""
+    try:
+        tool_calls = getattr(raw, "tool_calls", None) or []
+        if tool_calls:
+            value = tool_calls[0].get("args", {}).get("should_reply")
+            if isinstance(value, bool):
+                return value
+    except Exception:
+        pass
+    return True
 
 
 def _route_after_router(state: GraphState) -> str:
@@ -358,7 +389,6 @@ async def responder_node(state: GraphState) -> Dict:
 
         world_view = read_worldview() or "Nothing learned yet."
         print(f"[responder] world view fetched (tokens={_count_tokens(communication_style)})")
-        pprint(world_view)
 
 
         # Pull stored facts/preferences AND structured profile for all
@@ -394,8 +424,6 @@ async def responder_node(state: GraphState) -> Dict:
             f"[responder] facts+profile fetched for {len(sender_user_ids)} sender(s) "
             f"(facts_tokens={_count_tokens(user_facts)}, profile_tokens={_count_tokens(user_profiles)})"
         )
-        pprint(user_facts)
-        pprint(user_profiles)
 
         now = datetime.now(SGT)
         formatted_datetime = (
@@ -433,6 +461,7 @@ async def responder_node(state: GraphState) -> Dict:
         ]
         history_tokens = sum(_count_tokens(f"{m.type}: {m.content}") for m in history_msgs)
         print(f"[responder] history fetched (count={len(history_msgs)}, tokens={history_tokens})")
+        pprint(history_msgs)
 
         system_tmpl = ChatPromptTemplate.from_messages([("system", system_prompt_str)])
 
@@ -451,7 +480,7 @@ async def responder_node(state: GraphState) -> Dict:
         )
         msgs = [*system_msgs, *history_msgs]
         msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
-        print(f"[responder] context: {len(msgs)} messages, {msgs_tokens} tokens")
+        print(f"[responder] TOTAL context: {len(msgs)} messages, {msgs_tokens} tokens")
 
         try:
             result: ResponseOutput = await _responder_llm.ainvoke(msgs)
