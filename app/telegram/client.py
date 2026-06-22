@@ -78,12 +78,30 @@ pending_summaries: Dict[int, str] = {}
 wait_tasks: Dict[int, asyncio.Task] = {}
 flush_tasks: Dict[int, asyncio.Task] = {}
 last_message_time: Dict[int, float] = {}
+# Per-chat lock serialising reply() calls: a reply that comes due while a
+# previous one for the same chat is still sending waits for it to finish sending
+# *and* append its bot message to the buffer before reading context. This
+# prevents two replies from interleaving their sends and from reading stale
+# context (Rachel not "seeing" what she just said). Created lazily per chat_id.
+reply_locks: Dict[int, asyncio.Lock] = {}
 
 
 # helper functions
 
 
 async def reply(event):
+    """Serialise replies per chat (see ``reply_locks``), then run ``_reply``.
+
+    Acquiring the lock here — rather than inside ``_reply`` — means a queued reply
+    waits for any in-flight reply for the same chat to finish sending and append
+    its bot message to the buffer before it reads context.
+    """
+    lock = reply_locks.setdefault(event.chat_id, asyncio.Lock())
+    async with lock:
+        await _reply(event)
+
+
+async def _reply(event):
     """
     Feed the most recent N_PAST_MSG_REQUIRED messages from the buffer as context,
     call the LLM, send the reply, and append the bot response back into the buffer.
