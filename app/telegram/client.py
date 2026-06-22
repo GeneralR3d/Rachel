@@ -122,9 +122,12 @@ async def reply(event):
             if m.sender_user_id and m.sender_user_id != me.id
         }
 
-        # Force a reply (skip the router's reply/no-reply decision) whenever this
-        # is a 1-on-1 chat or Rachel was directly tagged/replied-to.
-        must_reply = bool(event.is_private or event.mentioned)
+        # Force a reply (skip the router entirely) only when Rachel was directly
+        # tagged/replied-to in a group. In a 1-on-1 DM (not is_group) she still
+        # runs the router, but with the PM-specific gate that only suppresses
+        # low-information acknowledgements and already-answered messages.
+        is_private = bool(event.is_private)
+        must_reply = bool(event.mentioned) 
 
         try:
             response, response_reason, new_summary, load_time = await get_response(
@@ -133,6 +136,7 @@ async def reply(event):
                 chat_id=chat_id,
                 senders=senders,
                 must_reply=must_reply,
+                is_private=is_private,
             )
         except Exception as e:
             print(f"[{chat_id}] get_response failed ({type(e).__name__}: {e}), retrying once...")
@@ -142,6 +146,7 @@ async def reply(event):
                 chat_id=chat_id,
                 senders=senders,
                 must_reply=must_reply,
+                is_private=is_private,
             )
 
         if new_summary is not None:

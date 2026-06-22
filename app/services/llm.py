@@ -49,6 +49,7 @@ from typing_extensions import TypedDict
 from app.config import get_settings
 from app.prompts import (
     CONVERSATION_STYLE,
+    ROUTER_PM_SYSTEM_PROMPT,
     ROUTER_SYSTEM_PROMPT,
     USER_PROFILE_ATTRIBUTE_GUIDE,
     USER_PROFILE_FIELDS,
@@ -235,7 +236,8 @@ class GraphState(TypedDict):
     current_summary: str | None
     mood: str
     senders: Dict[int, str]  # sender_user_id -> display name
-    must_reply: bool  # set by caller: 1-on-1 chat or Rachel was tagged
+    must_reply: bool  # set by caller: Rachel was tagged/replied-to in a group
+    is_private: bool  # set by caller: 1-on-1 DM (selects the PM router prompt)
     should_reply: bool
     response_text: str
     response_reason: str
@@ -289,8 +291,12 @@ async def router_node(state: GraphState) -> Dict:
         for entry in recent_history
     ]
 
+    # In a 1-on-1 DM use the PM-specific gate (filters out low-information
+    # acknowledgements and already-answered messages); in groups use the default
+    # gate (filters out chatter that doesn't concern Rachel).
+    router_prompt = ROUTER_PM_SYSTEM_PROMPT if state.get("is_private") else ROUTER_SYSTEM_PROMPT
     system_msgs = ChatPromptTemplate.from_messages(
-        [("system", ROUTER_SYSTEM_PROMPT)]
+        [("system", router_prompt)]
     ).format_messages(current_summary=state.get("current_summary") or "")
     msgs = [*system_msgs, *history_msgs]
 
@@ -544,12 +550,15 @@ async def get_response(
     chat_id: int | None = None,
     senders: Dict[int, str] | None = None,
     must_reply: bool = False,
+    is_private: bool = False,
 ) -> Tuple[str, str, str | None, float]:
     """Run the LangGraph pipeline and return ``(response_text, reason, new_summary, elapsed_seconds)``.
 
-    When ``must_reply`` is True (1-on-1 chat or Rachel was tagged) the checker
-    skips the router and a reply is always produced. Otherwise the router decides
-    whether a reply is warranted; if not, the graph short-circuits and
+    When ``must_reply`` is True (Rachel was tagged/replied-to in a group) the
+    checker skips the router and a reply is always produced. Otherwise the router
+    decides whether a reply is warranted — using the PM-specific gate when
+    ``is_private`` is True (1-on-1 DM) or the default group gate otherwise. If no
+    reply is warranted, the graph short-circuits and
     ``response_text`` comes back empty (no message is sent). When a reply is
     produced, summarizer_node runs before responder_node. The mood detected this
     call is stored in _chat_mood and injected on the *next* call.
@@ -566,6 +575,7 @@ async def get_response(
         "mood": current_mood,
         "senders": senders or {},
         "must_reply": must_reply,
+        "is_private": is_private,
         "should_reply": True,
         "response_text": "",
         "response_reason": "",
