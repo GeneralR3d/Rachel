@@ -8,6 +8,7 @@ Ported from Reference/app/client.py. Behaviour is unchanged; the only edits are:
 """
 
 import asyncio
+import bisect
 import time
 from pprint import pprint
 from typing import Any, Dict, List, Optional
@@ -87,6 +88,55 @@ reply_locks: Dict[int, asyncio.Lock] = {}
 
 
 # helper functions
+
+
+def _insert_by_message_id(buffer: List[BufferedMessage], msg: BufferedMessage) -> None:
+    """Insert ``msg`` into ``buffer`` keeping it ordered by telegram_message_id.
+
+    Rachel's reply is appended only after its (slow, multi-burst) send finishes,
+    by which time messages from others that arrived during the send already sit at
+    the tail of the buffer with *higher* ids. A plain append would leave her reply
+    behind them, even though by send order (its first-burst id) it belongs earlier.
+    Incoming messages are already buffered in id order, so inserting the reply at
+    its id's position keeps the whole buffer in true send order — matching what
+    every participant saw on screen, and matching the DB re-seed (get_history,
+    which sorts by telegram_message_id).
+    """
+    ids = [m.telegram_message_id for m in buffer]
+    buffer.insert(bisect.bisect_left(ids, msg.telegram_message_id), msg)
+
+
+def _message_content(event) -> str:
+    """Text to buffer/feed the LLM for an incoming message.
+
+    Returns the message text when present. When a message has no text (sticker,
+    photo, gif, …) it falls back to a short placeholder so non-text turns aren't
+    fed to the LLM as empty ``name:`` noise (and don't waste a context slot). For
+    stickers we surface the emoji "alt" (``DocumentAttributeSticker.alt``, exposed
+    by Telethon as ``event.file.emoji``) as the closest available description.
+    Returns "" only when there's genuinely nothing to show.
+    """
+    text = (event.raw_text or "").strip()
+    if text:
+        return text
+    if event.sticker is not None:
+        emoji = getattr(event.file, "emoji", None)
+        return f"[sticker: {emoji}]" if emoji else "[sticker]"
+    if event.gif is not None:
+        return "[gif]"
+    if event.video_note is not None:
+        return "[video note]"
+    if event.video is not None:
+        return "[video]"
+    if event.voice is not None:
+        return "[voice message]"
+    if event.audio is not None:
+        return "[audio]"
+    if event.photo is not None:
+        return "[photo]"
+    if event.document is not None:
+        return "[file]"
+    return ""
 
 
 async def reply(event):
@@ -172,6 +222,14 @@ async def _reply(event):
             print(f"[{chat_id}] Summary buffered (pending flush): {new_summary}")
         print(f"[{chat_id}] Current summary: {current_summary}")
 
+    # TODO: A multi-paragraph reply is sent as N separate Telegram messages
+    # (each with its own id) but persisted as ONE row keyed to the FIRST
+    # paragraph's id. If a user interleaves a message during the typing delay
+    # between paragraphs, the DB re-seed (get_history, ordered strictly by
+    # telegram_message_id) sorts the whole reply ABOVE that user message —
+    # disagreeing with the live buffer's true append order. Low-impact (only
+    # after a flush + re-seed). Proper fix: persist each paragraph as its own
+    # row with its own sent.id.
     bot_message_id = None
     for i, raw_text in enumerate(response.split("\n\n")):
         if raw_text == "":
@@ -186,7 +244,11 @@ async def _reply(event):
 
     if bot_message_id is not None:
         if chat_id in current_messages_buffer:
-            current_messages_buffer[chat_id].append(
+            # Insert at the reply's send-order position, not the tail: messages
+            # that arrived during the slow send are already buffered with higher
+            # ids, and the reply belongs ahead of them (see _insert_by_message_id).
+            _insert_by_message_id(
+                current_messages_buffer[chat_id],
                 BufferedMessage(
                     telegram_message_id=bot_message_id,
                     sender_user_id=me.id,
@@ -194,7 +256,7 @@ async def _reply(event):
                     content=response,
                     is_persisted=False,
                     reason=response_reason,
-                )
+                ),
             )
         else:
             # The buffer was flushed + popped (e.g. MAX_BUFFER_LEN or the blackout
@@ -391,12 +453,21 @@ async def new_message(event):
             username=getattr(sender, "username", None),
         )
 
+    # Skip messages with no usable content (e.g. an empty service message): don't
+    # buffer them, persist them, or schedule a reply on them — they'd only show up
+    # as empty `name:` turns and waste a context slot. Non-text media still gets a
+    # placeholder via _message_content, so this only drops genuinely empty ones.
+    content = _message_content(event)
+    if not content:
+        print(f"[{chat_id}] empty message skipped")
+        return
+
     current_messages_buffer[chat_id].append(
         BufferedMessage(
             telegram_message_id=event.message.id,
             sender_user_id=sender.id if sender else 0,
             sender_name=event_name,
-            content=event.raw_text,
+            content=content,
             is_persisted=False,
         )
     )
