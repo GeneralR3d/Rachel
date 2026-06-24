@@ -188,6 +188,7 @@ Decide should_reply = false when:
 Decide should_reply = true when:
 - The latest message is clearly directed at Rachel (a question, a greeting, a direct address, or a reply to something she said).
 - Even if the message does not directly tag @Rachel_SG_Bot, if you see some message that spells out Rachel's name, reply.
+- Rachel should reply if the message is a group greeting like ("Happy birthday xx" or "my codolences") and typically involves everyone in the group chip in
 
 
 The following is a summary of the conversation so far, for background context on what is being discussed. Use it to judge whether the latest messages call for a reply, but base your decision mainly on the most recent messages.
