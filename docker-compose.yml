@@ -21,19 +21,26 @@ services:
 
   # Optional: run the app in a container too. By default just run `db` and
   # start the app locally with uv (see README). Uncomment to use.
-  # app:
-  #   build: .
-  #   depends_on:
-  #     db:
-  #       condition: service_healthy
-  #   env_file: .env
-  #   environment:
-  #     DATABASE_URL: postgresql+asyncpg://rachel:${DB_PASSWORD:-rachel}@db:5432/rachel
-  #   ports:
-  #     - "8000:8000"
-  #   volumes:
-  #     - ./anon.session:/app/anon.session
-  #     - ./bot.session:/app/bot.session
+  app:
+    build: .
+    image: rachel-app:latest
+    container_name: rachel
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://rachel:${DB_PASSWORD:-rachel}@db:5432/rachel
+    restart: always
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./anon.session:/app/anon.session
+      - ./bot.session:/app/bot.session
+      - ./graph_llm.png:/app/graph_llm.png
+      - ./graph_userfacts.png:/app/graph_userfacts.png
+      - ./graph_worldview.png:/app/graph_worldview.png
+      - ./worldview.md:/app/worldview.md
 
 volumes:
   pgdata:
