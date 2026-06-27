@@ -8,9 +8,9 @@
 ![LangGraph](https://img.shields.io/badge/LangGraph-stateful%20agents-orange)
 ![OpenRouter](https://img.shields.io/badge/LLM-OpenRouter-black)
 
-## What is Rachel?
+## Who is Rachel?
 
-Most chatbots are obvious. They reply instantly, paragraph by paragraph, forget who you are between conversations, and answer every single message whether or not it was meant for them. Drop one into a group chat and it becomes a nuisance within minutes.
+Most chatbots forget who you are between conversations, and answer every single message whether or not it was meant for them. Drop one into a group chat and it becomes a nuisance within minutes.
 
 Rachel is the opposite. She's a conversational persona — "Rachel," a 22-year-old marketing student at NTU in Singapore, with a backstory, insecurities, a church youth group, a bubble-tea order, and a weekly timetable. She buffers incoming messages and waits a beat before replying, types at a human speed, splits longer thoughts across several messages, and only chimes in when she's actually being addressed. Over time she builds up a memory of the world and of each person she talks to, and her tone shifts with the emotional read of the conversation.
 
