@@ -19,11 +19,12 @@ router_node:         decides whether a reply is even warranted. If not, the
 summarizer_node:     detects conversation mood; result is stored in _chat_mood
                      and used by the NEXT call's responder_node. Runs in parallel
                      with context_fetcher_node.
-context_fetcher_node: a tool-calling agent whose sole job is to decide which
-                     tools to call to gather extra context for the responder
-                     (currently the calendar tools — Rachel's schedule on
-                     arbitrary days). Its gathered context is written to
-                     state["fetched_context"] and injected into the responder.
+context_fetcher_node: a single-pass tool-calling step whose sole job is to
+                     decide which tools to call to gather extra context for the
+                     responder (currently the calendar tools — Rachel's schedule
+                     on arbitrary days). One LLM call picks the tools, they run
+                     once, and the gathered context is written to
+                     state["schedule_context"] and injected into the responder.
 responder_node:      generates Rachel's reply using the mood detected in the
                      previous call (defaults to "default" on first contact) plus
                      whatever context_fetcher_node gathered this call.
@@ -48,7 +49,7 @@ def _count_tokens(text: str) -> int:
     return len(_tokenizer.encode(text))
 
 from langchain_core.exceptions import OutputParserException
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openrouter import ChatOpenRouter
 from langgraph.graph import END, START, StateGraph
@@ -66,8 +67,7 @@ from app.prompts import (
 )
 from app.calander import (
     CALENDAR_TOOLS,
-    get_current_activity,
-    get_day_summary,
+    format_calendar_tools,
 )
 from app.services.worldview import read_worldview
 from app.repository import (
@@ -97,12 +97,6 @@ def get_chat_mood(chat_id: int) -> str:
 def set_chat_mood(chat_id: int, mood: str) -> None:
     """Seed the in-memory mood for a chat (e.g. restoring from DB on first load)."""
     _chat_mood[chat_id] = mood
-
-# Schedule lookups only change once per hour (current_activity) / once per day
-# (day_summary), so cache the last result keyed on what it depends on instead
-# of hitting the DB on every message.
-_current_activity_cache: Tuple[int, int, Any] | None = None  # (day_of_week, hour, activity)
-_day_summary_cache: Tuple[int, List[Dict[str, Any]]] | None = None  # (day_of_week, summary)
 
 # Per-user facts change only when the userfacts pipeline runs (once per finished
 # conversation), so cache them per user_id with a short TTL instead of hitting
@@ -252,7 +246,7 @@ class GraphState(TypedDict):
     must_reply: bool  # set by caller: Rachel was tagged/replied-to in a group
     is_private: bool  # set by caller: 1-on-1 DM (selects the PM router prompt)
     should_reply: bool
-    fetched_context: str  # extra context gathered by context_fetcher_node
+    schedule_context: str  # extra context gathered by context_fetcher_node
     response_text: str
     response_reason: str
 
@@ -289,9 +283,9 @@ _context_fetcher_llm = ChatOpenRouter(
     temperature=0.0,
 ).bind_tools(CALENDAR_TOOLS)
 
-# Caps on the tool-calling loop so a chatty/looping model can't run forever.
-CONTEXT_FETCHER_MAX_ITERS = 4
-CONTEXT_FETCHER_TIMEOUT = 30  # seconds, wall-clock for the whole loop
+# The context_fetcher is a single pass (one LLM call → run whatever tools it
+# asked for → done), so the only guard needed is a wall-clock timeout.
+CONTEXT_FETCHER_TIMEOUT = 30  # seconds
 
 
 def checker_node(state: GraphState) -> Dict:
@@ -413,8 +407,10 @@ async def summarizer_node(state: GraphState) -> Dict:
 
 
 async def _run_context_fetcher(state: GraphState) -> str:
-    """The tool-calling loop for context_fetcher_node, factored out so the node
-    can wrap it in a single asyncio timeout. Returns the gathered context text."""
+    """Single pass for context_fetcher_node: one LLM call decides which tools to
+    call, then those tools are run once. Factored out so the node can wrap it in
+    a single asyncio timeout. Returns the gathered context text (empty if the
+    model asked for no tools)."""
     history_msgs = [
         AIMessage(content=f"{entry['sender']}: {entry['content']}")
         if entry["sender"] == BOT_NAME
@@ -422,7 +418,7 @@ async def _run_context_fetcher(state: GraphState) -> str:
         for entry in state["history"]
     ]
 
-    now = datetime.now()
+    now = datetime.now(SGT)
     formatted_datetime = (
         f"The current date is {now.strftime('%d %B %Y')}, "
         f"the current day of week is {now.strftime('%A')}, "
@@ -430,28 +426,26 @@ async def _run_context_fetcher(state: GraphState) -> str:
     )
     system_msgs = ChatPromptTemplate.from_messages(
         [("system", CONTEXT_FETCHER_SYSTEM_PROMPT)]
-    ).format_messages(datetime=formatted_datetime)
+    ).format_messages(datetime=formatted_datetime, tools=format_calendar_tools())
     msgs = [*system_msgs, *history_msgs]
 
+    ai: AIMessage = await _context_fetcher_llm.ainvoke(msgs)
+    tool_calls = getattr(ai, "tool_calls", None) or []
+    if not tool_calls:
+        return ""
+
     collected: List[str] = []
-    for _ in range(CONTEXT_FETCHER_MAX_ITERS):
-        ai: AIMessage = await _context_fetcher_llm.ainvoke(msgs)
-        msgs.append(ai)
-        tool_calls = getattr(ai, "tool_calls", None) or []
-        if not tool_calls:
-            break
-        for tc in tool_calls:
-            tool = _context_tools_by_name.get(tc["name"])
-            if tool is None:
-                result = f"Unknown tool '{tc['name']}'."
-            else:
-                try:
-                    result = await tool.ainvoke(tc["args"])
-                except Exception as e:
-                    result = f"tool error: {type(e).__name__}: {e}"
-            print(f"[context_fetcher] {tc['name']}({tc['args']}) -> {str(result)[:120]!r}")
-            collected.append(str(result))
-            msgs.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+    for tc in tool_calls:
+        tool = _context_tools_by_name.get(tc["name"])
+        if tool is None:
+            result = f"Unknown tool '{tc['name']}'."
+        else:
+            try:
+                result = await tool.ainvoke(tc["args"])
+            except Exception as e:
+                result = f"tool error: {type(e).__name__}: {e}"
+        print(f"[context_fetcher] {tc['name']}({tc['args']}) -> {str(result)[:120]!r}")
+        collected.append(str(result))
 
     return "\n\n".join(collected)
 
@@ -468,13 +462,13 @@ async def context_fetcher_node(state: GraphState) -> Dict:
         )
     except asyncio.TimeoutError:
         print(f"[context_fetcher] timed out after {CONTEXT_FETCHER_TIMEOUT}s (no extra context)")
-        return {"fetched_context": ""}
+        return {"schedule_context": ""}
     except Exception as e:
         print(f"[context_fetcher] error (no extra context): {type(e).__name__}: {e}")
-        return {"fetched_context": ""}
+        return {"schedule_context": ""}
 
     print(f"[context_fetcher] gathered {_count_tokens(fetched)} tokens of context")
-    return {"fetched_context": fetched}
+    return {"schedule_context": fetched}
 
 
 async def responder_node(state: GraphState) -> Dict:
@@ -548,23 +542,9 @@ async def responder_node(state: GraphState) -> Dict:
             f"the current day of week is {now.strftime('%A')}, "
             f"the current time is {now.strftime('%H:%M')}"
         )
-        day_of_week = now.weekday()
-
-        global _current_activity_cache, _day_summary_cache
-
-        if _current_activity_cache is not None and _current_activity_cache[:2] == (day_of_week, now.hour):
-            current_activity = _current_activity_cache[2]
-        else:
-            current_activity = await get_current_activity(day_of_week, now.hour)
-            _current_activity_cache = (day_of_week, now.hour, current_activity)
-
-        if _day_summary_cache is not None and _day_summary_cache[0] == day_of_week:
-            day_summary = _day_summary_cache[1]
-        else:
-            day_summary = await get_day_summary(day_of_week)
-            _day_summary_cache = (day_of_week, day_summary)
-
-        print(f"[responder] schedule fetched (current_activity={current_activity}, current datetime = {formatted_datetime}")
+        # Rachel's schedule (right now / today / other days) is no longer
+        # injected here — context_fetcher_node fetches it via tools and it
+        # arrives through {schedule_context}.
 
         # History is built as concrete Message objects (not templated tuples) so
         # any literal '{' or '}' in user content is passed through verbatim rather
@@ -587,9 +567,7 @@ async def responder_node(state: GraphState) -> Dict:
             personality_traits=personality_traits,
             conversation_mood=mood,
             datetime=formatted_datetime,
-            current_activity=current_activity or "Nothing scheduled right now",
-            day_summary=day_summary,
-            fetched_context=state.get("fetched_context") or "No extra context was needed.",
+            schedule_context=state.get("schedule_context") or "No schedule context was fetched.",
             world_view=world_view,
             user_facts=user_facts,
             user_profiles=user_profiles,
@@ -698,7 +676,7 @@ async def get_response(
         "must_reply": must_reply,
         "is_private": is_private,
         "should_reply": True,
-        "fetched_context": "",
+        "schedule_context": "",
         "response_text": "",
         "response_reason": "",
     }
