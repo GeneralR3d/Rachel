@@ -8,10 +8,10 @@ from telethon import TelegramClient, events
 
 from app.config import get_settings
 from app.prompts import USER_PROFILE_FIELDS
+from app.services.userfacts import add_user_facts, get_user_facts
 from app.repository import (
     clear_history,
     delete_summary,
-    delete_user_facts,
     delete_user_profile,
     get_all_chats,
     get_all_users,
@@ -20,13 +20,11 @@ from app.repository import (
     get_summary,
     get_responder_system_prompt,
     get_traits,
-    get_user_facts,
     get_user_profile,
     reset_traits,
     set_summarizer_system_prompt,
     set_responder_system_prompt,
     set_trait_value,
-    set_user_facts,
     set_user_profile,
 )
 
@@ -172,6 +170,13 @@ async def on_delete_summary(event):
     await event.reply(f"Summary deleted for chat {chat_id}.")
 
 
+# Free-form user facts live in the Graphiti knowledge graph (one Neo4j group_id
+# per user), so the only fact commands are /get_user_facts (dump every episode
+# in the user's partition) and /add_user_facts (ingest a new fact episode, the
+# same path as the pipeline's ingest_node). No edit/delete: Graphiti's own
+# dedup/temporal conflict resolution supersedes old facts on ingest.
+
+
 @bot.on(
     events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/get_user_facts(\s+(-?\d+))?$")
 )
@@ -180,11 +185,45 @@ async def on_get_user_facts(event):
         await event.reply("Usage: /get_user_facts <user_id>")
         return
     user_id = int(event.pattern_match.group(2))
-    facts = await get_user_facts(user_id)
-    if not facts:
-        await event.reply(f"No facts for user {user_id}.")
+    try:
+        facts = await get_user_facts(user_id)
+    except Exception as e:
+        await event.reply(f"Failed to read facts for user {user_id}: {e}")
         return
-    await event.reply(f"Facts for user {user_id}:\n{facts}")
+    if not facts:
+        await event.reply(f"No facts stored for user {user_id}.")
+        return
+    text = f"Facts for user {user_id}:\n" + "\n".join(f"- {f}" for f in facts)
+    # Telegram message limit is 4096 chars
+    if len(text) > 4000:
+        text = f"(truncated to last 4000 chars)\n{text[-4000:]}"
+    await event.reply(text)
+
+
+@bot.on(
+    events.NewMessage(
+        incoming=True, from_users=[ADMIN], pattern=r"\/add_user_facts\s+(-?\d+)\s+([\s\S]+)$"
+    )
+)
+async def on_add_user_facts(event):
+    user_id = int(event.pattern_match.group(1))
+    fact = event.pattern_match.group(2).strip()
+    # Ingestion is several LLM round-trips per fact, so acknowledge first.
+    await event.reply(f"Ingesting fact for user {user_id}… (this takes a while)")
+    try:
+        await add_user_facts(user_id, [fact])
+    except Exception as e:
+        await event.reply(f"Failed to ingest fact for user {user_id}: {e}")
+        raise events.StopPropagation
+    await event.reply(f"Fact ingested for user {user_id}.")
+    raise events.StopPropagation
+
+
+@bot.on(
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/add_user_facts(\s+.*)?$")
+)
+async def on_add_user_facts_usage(event):
+    await event.reply("Usage: /add_user_facts <user_id> <fact text>")
 
 
 @bot.on(
@@ -205,38 +244,6 @@ async def on_get_user_profile(event):
         await event.reply(f"No profile for user {user_id}.")
         return
     await event.reply(f"Profile for user {user_id}:\n{profile_text}")
-
-
-@bot.on(
-    events.NewMessage(
-        incoming=True, from_users=[ADMIN], pattern=r"\/set_user_facts\s+(-?\d+)\s+([\s\S]+)$"
-    )
-)
-async def on_set_user_facts(event):
-    user_id = int(event.pattern_match.group(1))
-    facts = event.pattern_match.group(2)
-    await set_user_facts(user_id, facts)
-    await event.reply(f"Facts/preferences set for user {user_id}.")
-    raise events.StopPropagation
-
-
-@bot.on(
-    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/set_user_facts(\s+.*)?$")
-)
-async def on_set_user_facts_usage(event):
-    await event.reply("Usage: /set_user_facts <user_id> <facts text>")
-
-
-@bot.on(
-    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/delete_user_facts(\s+(-?\d+))?$")
-)
-async def on_delete_user_facts(event):
-    if event.pattern_match.group(2) is None:
-        await event.reply("Usage: /delete_user_facts <user_id>")
-        return
-    user_id = int(event.pattern_match.group(2))
-    await delete_user_facts(user_id)
-    await event.reply(f"Facts/preferences deleted for user {user_id}.")
 
 
 @bot.on(

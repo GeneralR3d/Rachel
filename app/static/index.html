@@ -297,10 +297,10 @@
       </div>
     </section>
 
-    <!-- USERS (list + profile + facts) -->
+    <!-- USERS (list + profile) -->
     <section id="users">
       <h2>Users</h2>
-      <div class="desc">Pick a user on the left to view and edit their profile (all slots, including empty) and free-form facts.</div>
+      <div class="desc">Pick a user on the left to view and edit their profile (all slots, including empty). Free-form facts now live in the Graphiti knowledge graph (Neo4j) and are not editable here.</div>
       <div class="userlayout">
         <div class="userlist">
           <div class="btns"><button onclick="loadUsers()" class="ghost">Reload</button></div>
@@ -323,15 +323,6 @@
             <div class="btns">
               <button onclick="saveProfile()">Save profile</button>
               <button onclick="deleteProfile()" class="danger">Clear profile</button>
-            </div>
-
-            <h3 class="subhead">Facts</h3>
-            <div class="muted inline-note">Free-form notes, one per row. Add or remove rows; saved as a bullet list.</div>
-            <table class="kvtable"><tbody id="factsRows"></tbody></table>
-            <div class="btns">
-              <button onclick="addFactRow('')" class="ghost">+ Add fact</button>
-              <button onclick="saveFacts()">Save facts</button>
-              <button onclick="deleteFacts()" class="danger">Clear facts</button>
             </div>
           </div>
         </div>
@@ -643,7 +634,7 @@ async function deleteSummary() {
   } catch (e) { toast("Delete: " + e.message, "err"); }
 }
 
-// --- users (list + profile + facts) -------------------------------------
+// --- users (list + profile) ----------------------------------------------
 let PROFILE_FIELDS = [];   // [{key, label}] — fixed slot schema
 let selectedUser = null;   // currently selected user id (string)
 
@@ -684,7 +675,7 @@ async function selectUser(id, nameHtml) {
   document.getElementById("userDetailBody").style.display = "block";
   document.getElementById("detailName").innerHTML = nameHtml || "User";
   document.getElementById("detailId").textContent = "ID " + id;
-  await Promise.all([loadProfile(), loadFacts()]);
+  await loadProfile();
 }
 
 // profile ----------------------------------------------------------------
@@ -731,46 +722,6 @@ async function deleteProfile() {
     await api("/user-profile/" + selectedUser, { method: "DELETE" });
     toast("Profile cleared", "ok");
     loadProfile();
-  } catch (e) { toast("Delete: " + e.message, "err"); }
-}
-
-// facts ------------------------------------------------------------------
-async function loadFacts() {
-  const tbody = document.getElementById("factsRows");
-  tbody.innerHTML = "";
-  let facts = "";
-  try { facts = (await api("/user-facts/" + selectedUser)).facts || ""; }
-  catch (e) { toast("Facts: " + e.message, "err"); }
-  const lines = facts.split("\n").map(l => l.replace(/^\s*[-*]\s*/, "").trim()).filter(Boolean);
-  if (!lines.length) addFactRow("");
-  else lines.forEach(addFactRow);
-}
-function addFactRow(value) {
-  const tbody = document.getElementById("factsRows");
-  const tr = document.createElement("tr");
-  tr.innerHTML =
-    `<td class="v" colspan="2"><input class="fact" value="${esc(value || "")}" placeholder="a fact about this user"></td>
-     <td class="x"><button class="xbtn" title="Remove" onclick="this.closest('tr').remove()">×</button></td>`;
-  tbody.appendChild(tr);
-}
-async function saveFacts() {
-  if (!selectedUser) return;
-  const lines = [...document.querySelectorAll("#factsRows input.fact")]
-    .map(i => i.value.trim()).filter(Boolean);
-  const text = lines.map(l => "- " + l).join("\n");
-  try {
-    await api("/user-facts/" + selectedUser, { method: "PUT", body: { facts: text } });
-    toast("Facts saved", "ok");
-    loadFacts();
-  } catch (e) { toast("Save: " + e.message, "err"); }
-}
-async function deleteFacts() {
-  if (!selectedUser) return;
-  if (!confirm("Clear all facts for user " + selectedUser + "?")) return;
-  try {
-    await api("/user-facts/" + selectedUser, { method: "DELETE" });
-    toast("Facts cleared", "ok");
-    loadFacts();
   } catch (e) { toast("Delete: " + e.message, "err"); }
 }
 

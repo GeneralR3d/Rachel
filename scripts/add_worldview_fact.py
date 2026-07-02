@@ -26,6 +26,7 @@ from pathlib import Path
 # on sys.path so `app` imports resolve regardless of invocation.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.services import graphiti as graphiti_service
 from app.services import worldview
 
 
@@ -36,7 +37,7 @@ async def ingest_one(fact: str) -> None:
 
 async def run_args(facts: list[str]) -> None:
     """One-shot mode: ingest each CLI-provided fact, then exit."""
-    await worldview._get_graphiti()
+    await graphiti_service.get_graphiti()
     for fact in facts:
         fact = fact.strip()
         if not fact:
@@ -50,7 +51,7 @@ async def run_args(facts: list[str]) -> None:
 
 async def run_interactive() -> None:
     """Prompt for one fact per line until blank/quit/EOF."""
-    await worldview._get_graphiti()
+    await graphiti_service.get_graphiti()
     print("Enter a world-view fact per line. Blank line, 'quit', or Ctrl-D to exit.\n")
     while True:
         try:
@@ -75,7 +76,7 @@ async def main() -> None:
         else:
             await run_interactive()
     finally:
-        g = await worldview._get_graphiti()
+        g = await graphiti_service.get_graphiti()
         await g.close()
         print("Done.")
 

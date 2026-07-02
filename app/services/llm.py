@@ -21,10 +21,12 @@ summarizer_node:     detects conversation mood; result is stored in _chat_mood
                      with context_fetcher_node.
 context_fetcher_node: a single-pass tool-calling step whose sole job is to
                      decide which tools to call to gather extra context for the
-                     responder (currently the calendar tools — Rachel's schedule
-                     on arbitrary days). One LLM call picks the tools, they run
-                     once, and the gathered context is written to
-                     state["schedule_context"] and injected into the responder.
+                     responder: the calendar tools (Rachel's schedule), the
+                     world-view search, and the per-user facts search (both
+                     Graphiti). One LLM call picks the tools, they run once, and
+                     the gathered context is written to state["schedule_context"]
+                     / state["world_view"] / state["user_facts"] and injected
+                     into the responder.
 responder_node:      generates Rachel's reply using the mood detected in the
                      previous call (defaults to "default" on first contact) plus
                      whatever context_fetcher_node gathered this call.
@@ -66,12 +68,12 @@ from app.prompts import (
     USER_PROFILE_FIELDS,
 )
 from app.calander import CALENDAR_TOOLS
+from app.services.userfacts import search_user_facts, search_user_facts_tool
 from app.services.worldview import search_world_view, search_worldview
 from app.repository import (
     get_active_trait_prompts,
     get_responder_system_prompt,
     get_summarizer_system_prompt,
-    get_user_facts_batch,
     get_user_profiles_batch,
 )
 
@@ -95,48 +97,12 @@ def set_chat_mood(chat_id: int, mood: str) -> None:
     """Seed the in-memory mood for a chat (e.g. restoring from DB on first load)."""
     _chat_mood[chat_id] = mood
 
-# Per-user facts change only when the userfacts pipeline runs (once per finished
-# conversation), so cache them per user_id with a short TTL instead of hitting
-# the DB on every message. Worst case staleness is USER_FACTS_CACHE_TTL seconds.
+# Structured profiles change only when the userfacts profile pipeline runs
+# (once per finished conversation), so cache them per user_id with a short TTL
+# instead of hitting the DB on every message. Worst case staleness is
+# USER_FACTS_CACHE_TTL seconds. (Free-form facts now live in Graphiti and are
+# fetched by the context_fetcher's search_user_facts tool — no cache here.)
 USER_FACTS_CACHE_TTL = 5 * 60    # 5 min
-_user_facts_cache: Dict[int, Tuple[str, float]] = {}  # user_id -> (facts, fetched_at)
-
-
-def update_user_facts_cache(user_id: int, facts: str) -> None:
-    """Write-through the cache after the userfacts pipeline persists a profile.
-
-    Called from userfacts.consolidation_node so the responder sees a freshly
-    consolidated profile immediately instead of waiting out USER_FACTS_CACHE_TTL
-    (or serving the stale pre-consolidation value).
-    """
-    _user_facts_cache[user_id] = (facts, time.monotonic())
-
-
-async def _get_user_facts_cached(user_ids: List[int]) -> Dict[int, str]:
-    """Return {user_id: facts} for the given users, serving fresh cache hits and
-    batching only the stale/missing ones into a single DB call."""
-    now = time.monotonic()
-    result: Dict[int, str] = {}
-    stale: List[int] = []
-    for uid in user_ids:
-        cached = _user_facts_cache.get(uid)
-        if cached is not None and (now - cached[1]) < USER_FACTS_CACHE_TTL:
-            result[uid] = cached[0]
-        else:
-            stale.append(uid)
-
-    if stale:
-        fetched = await get_user_facts_batch(stale)
-        for uid in stale:
-            # Cache "" for users with no facts too, so we don't re-query them.
-            facts = fetched.get(uid, "")
-            _user_facts_cache[uid] = (facts, now)
-            result[uid] = facts
-    return result
-
-
-# Structured profiles are kept in their own cache (parallel to the facts cache
-# above) so the two write-throughs never have to preserve each other's value.
 _user_profile_cache: Dict[int, Tuple[dict, float]] = {}  # user_id -> (profile, fetched_at)
 
 
@@ -245,6 +211,7 @@ class GraphState(TypedDict):
     should_reply: bool
     schedule_context: str  # extra schedule context gathered by context_fetcher_node
     world_view: str  # world-view facts gathered by context_fetcher_node
+    user_facts: str  # per-user facts gathered by context_fetcher_node (Graphiti)
     response_text: str
     response_reason: str
 
@@ -277,7 +244,7 @@ _responder_llm = ChatOpenRouter(
 # single source of truth: it drives both the bound tools and the prompt's {tools}
 # listing (via format_tools). It combines the calendar tools with the world-view
 # search tool (Rachel's general learned facts).
-CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view]
+CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_facts_tool]
 
 
 def format_tools(tools) -> str:
@@ -425,15 +392,17 @@ async def summarizer_node(state: GraphState) -> Dict:
     return {"mood": result.mood, "current_summary": result.summary}
 
 
-async def _run_context_fetcher(state: GraphState) -> Tuple[str, str]:
+async def _run_context_fetcher(state: GraphState) -> Tuple[str, str, str]:
     """Single pass for context_fetcher_node: one LLM call decides which tools to
     call, then those tools are run once. Factored out so the node can wrap it in
-    a single asyncio timeout. Returns ``(schedule_context, world_view)`` — both
-    empty if the model asked for no tools.
+    a single asyncio timeout. Returns ``(schedule_context, world_view,
+    user_facts)`` — all empty if the model asked for no tools.
 
-    The world-view tool's output is routed to its own return slot (so it lands in
-    the responder's ``{world_view}`` section, not ``{schedule_context}``); all
-    other (calendar) tools are concatenated into the schedule context."""
+    The world-view and per-user facts tools' outputs are routed to their own
+    return slots (so they land in the responder's ``{world_view}`` /
+    ``{user_facts}`` sections, not ``{schedule_context}``); all other (calendar)
+    tools are concatenated into the schedule context."""
+    senders = state.get("senders") or {}
     history_msgs = [
         AIMessage(content=f"{entry['sender']}: {entry['content']}")
         if entry["sender"] == BOT_NAME
@@ -447,9 +416,17 @@ async def _run_context_fetcher(state: GraphState) -> Tuple[str, str]:
         f"the current day of week is {now.strftime('%A')}, "
         f"the current time is {now.strftime('%H:%M')}"
     )
+    participants = (
+        ", ".join(f"{name} (user_id {uid})" for uid, name in senders.items())
+        or "(unknown)"
+    )
     system_msgs = ChatPromptTemplate.from_messages(
         [("system", CONTEXT_FETCHER_SYSTEM_PROMPT)]
-    ).format_messages(datetime=formatted_datetime, tools=format_tools(CONTEXT_TOOLS))
+    ).format_messages(
+        datetime=formatted_datetime,
+        tools=format_tools(CONTEXT_TOOLS),
+        participants=participants,
+    )
     msgs = [*system_msgs, *history_msgs]
 
     ai: AIMessage = await _context_fetcher_llm.ainvoke(msgs)
@@ -458,10 +435,11 @@ async def _run_context_fetcher(state: GraphState) -> Tuple[str, str]:
     for tc in tool_calls:
         print(f"[context_fetcher]   -> {tc['name']}({tc['args']})")
     if not tool_calls:
-        return "", ""
+        return "", "", ""
 
     collected: List[str] = []
     world_view_parts: List[str] = []
+    user_facts_parts: List[str] = []
     for tc in tool_calls:
         if tc["name"] == search_world_view.name:
             # World-view output goes to its own slot (the responder's {world_view}
@@ -477,6 +455,27 @@ async def _run_context_fetcher(state: GraphState) -> Tuple[str, str]:
                 world_view_parts.append(result)
             continue
 
+        if tc["name"] == search_user_facts_tool.name:
+            # Per-user facts go to their own slot (the responder's {user_facts}
+            # section), labelled per participant. Fails open, never crashes.
+            try:
+                user_id = int(tc["args"].get("user_id"))
+            except (TypeError, ValueError):
+                print(f"[context_fetcher] user-facts search skipped (bad user_id: {tc['args']})")
+                continue
+            query = tc["args"].get("query", "")
+            try:
+                result = await search_user_facts(user_id, query)
+            except Exception as e:
+                print(f"[context_fetcher] user-facts search error: {type(e).__name__}: {e}")
+                result = ""
+            print(f"[context_fetcher] {tc['name']}({tc['args']}) result:\n{result}")
+            if result:
+                name = (senders.get(user_id) or "").strip()
+                label = f"{name} (id {user_id})" if name else f"User {user_id}"
+                user_facts_parts.append(f"{label}:\n{result}")
+            continue
+
         tool = _context_tools_by_name.get(tc["name"])
         if tool is None:
             result = f"Unknown tool '{tc['name']}'."
@@ -490,9 +489,11 @@ async def _run_context_fetcher(state: GraphState) -> Tuple[str, str]:
 
     schedule_context = "\n\n".join(collected)
     world_view = "\n".join(world_view_parts)
+    user_facts = "\n\n".join(user_facts_parts)
     print(f"[context_fetcher] ===== fetched schedule context =====\n{schedule_context or '(none)'}")
     print(f"[context_fetcher] ===== fetched world-view facts =====\n{world_view or '(none)'}")
-    return schedule_context, world_view
+    print(f"[context_fetcher] ===== fetched user facts =====\n{user_facts or '(none)'}")
+    return schedule_context, world_view, user_facts
 
 
 async def context_fetcher_node(state: GraphState) -> Dict:
@@ -502,21 +503,22 @@ async def context_fetcher_node(state: GraphState) -> Dict:
     pipeline: on any error or timeout it falls open to empty context (the
     responder still has the mood/summary and can reply without extras)."""
     try:
-        schedule_context, world_view = await asyncio.wait_for(
+        schedule_context, world_view, user_facts = await asyncio.wait_for(
             _run_context_fetcher(state), timeout=CONTEXT_FETCHER_TIMEOUT
         )
     except asyncio.TimeoutError:
         print(f"[context_fetcher] timed out after {CONTEXT_FETCHER_TIMEOUT}s (no extra context)")
-        return {"schedule_context": "", "world_view": ""}
+        return {"schedule_context": "", "world_view": "", "user_facts": ""}
     except Exception as e:
         print(f"[context_fetcher] error (no extra context): {type(e).__name__}: {e}")
-        return {"schedule_context": "", "world_view": ""}
+        return {"schedule_context": "", "world_view": "", "user_facts": ""}
 
     print(
         f"[context_fetcher] gathered {_count_tokens(schedule_context)} tokens of "
-        f"schedule context + {_count_tokens(world_view)} tokens of world-view facts"
+        f"schedule context + {_count_tokens(world_view)} tokens of world-view facts "
+        f"+ {_count_tokens(user_facts)} tokens of user facts"
     )
-    return {"schedule_context": schedule_context, "world_view": world_view}
+    return {"schedule_context": schedule_context, "world_view": world_view, "user_facts": user_facts}
 
 
 async def responder_node(state: GraphState) -> Dict:
@@ -540,28 +542,21 @@ async def responder_node(state: GraphState) -> Dict:
         print(f"[responder] world view from state (tokens={_count_tokens(world_view)})")
 
 
-        # Pull stored facts/preferences AND structured profile for all
-        # participants (each cached per user, fetched in parallel).
+        # Pull the structured profile for all participants (cached per user).
+        # Free-form facts are fetched by context_fetcher_node via the
+        # search_user_facts Graphiti tool and arrive in state.
         senders = state.get("senders") or {}
         sender_user_ids = list(senders)
         print(f"All users is {senders}")
-        facts_by_user, profiles_by_user = await asyncio.gather(
-            _get_user_facts_cached(sender_user_ids),
-            _get_user_profiles_cached(sender_user_ids),
-        )
+        profiles_by_user = await _get_user_profiles_cached(sender_user_ids)
 
         def _label(uid: int) -> str:
             """Human-readable header for a participant: name + id when known."""
             name = (senders.get(uid) or "").strip()
             return f"{name} (id {uid})" if name else f"User {uid}"
 
-        # Free-form facts → {user_facts}
-        facts_blocks = [
-            f"{_label(uid)}:\n{facts.strip()}"
-            for uid in sender_user_ids
-            if (facts := facts_by_user.get(uid, "").strip())
-        ]
-        user_facts = "\n\n".join(facts_blocks) or "Nothing learned yet."
+        # Free-form facts → {user_facts} (from the context_fetcher's search)
+        user_facts = state.get("user_facts") or "Nothing learned yet."
         # Structured profiles → {user_profiles}; show every slot (NIL for empties)
         # so the responder knows which attributes are still gaps to subtly probe.
         profile_blocks = [
@@ -570,7 +565,7 @@ async def responder_node(state: GraphState) -> Dict:
         ]
         user_profiles = "\n\n".join(profile_blocks) or "No one identified yet."
         print(
-            f"[responder] facts+profile fetched for {len(sender_user_ids)} sender(s) "
+            f"[responder] profiles fetched for {len(sender_user_ids)} sender(s) "
             f"(facts_tokens={_count_tokens(user_facts)}, profile_tokens={_count_tokens(user_profiles)})"
         )
 
@@ -717,6 +712,7 @@ async def get_response(
         "should_reply": True,
         "schedule_context": "",
         "world_view": "",
+        "user_facts": "",
         "response_text": "",
         "response_reason": "",
     }

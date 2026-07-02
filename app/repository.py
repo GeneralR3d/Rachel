@@ -472,51 +472,9 @@ async def delete_summary(chat_id: int) -> None:
         await session.execute(delete(SummaryMood).where(SummaryMood.chat_id == chat_id))
 
 
-# --- user facts / preferences ---------------------------------------------
-
-
-async def get_user_facts(user_id: int) -> str:
-    """Return the raw facts/preferences text for a user, or "" if none stored yet."""
-    async with session_scope() as session:
-        facts = await session.scalar(
-            select(UserFactsPreferences.facts).where(UserFactsPreferences.user_id == user_id)
-        )
-    return facts or ""
-
-
-async def get_user_facts_batch(user_ids: list[int]) -> dict[int, str]:
-    """Return facts/preferences text for many users in a single query.
-
-    Keyed by user_id; users with no stored facts are simply absent from the dict.
-    """
-    if not user_ids:
-        return {}
-    async with session_scope() as session:
-        rows = (
-            await session.execute(
-                select(UserFactsPreferences.user_id, UserFactsPreferences.facts)
-                .where(UserFactsPreferences.user_id.in_(user_ids))
-            )
-        ).all()
-    return {r.user_id: r.facts for r in rows if r.facts}
-
-
-async def set_user_facts(user_id: int, facts: str) -> None:
-    """Upsert the full facts/preferences text for a user."""
-    async with session_scope() as session:
-        stmt = pg_insert(UserFactsPreferences).values(user_id=user_id, facts=facts)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[UserFactsPreferences.user_id],
-            set_={"facts": facts, "updated_at": func.now()},
-        )
-        await session.execute(stmt)
-
-
-async def delete_user_facts(user_id: int) -> None:
-    async with session_scope() as session:
-        await session.execute(
-            delete(UserFactsPreferences).where(UserFactsPreferences.user_id == user_id)
-        )
+# --- user profiles ----------------------------------------------------------
+# Free-form user facts now live in Graphiti/Neo4j (see app/services/worldview.py
+# and app/services/userfacts.py); only the fixed-slot profile stays in Postgres.
 
 
 async def delete_user_profile(user_id: int) -> None:
@@ -555,11 +513,7 @@ async def get_user_profiles_batch(user_ids: list[int]) -> dict[int, dict]:
 
 
 async def set_user_profile(user_id: int, profile: dict) -> None:
-    """Upsert the structured profile blob for a user.
-
-    Touches only the `profile` column so it never clobbers the free-form `facts`
-    written by the parallel facts pipeline (and vice versa).
-    """
+    """Upsert the structured profile blob for a user."""
     async with session_scope() as session:
         stmt = pg_insert(UserFactsPreferences).values(user_id=user_id, profile=profile)
         stmt = stmt.on_conflict_do_update(

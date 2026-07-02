@@ -21,6 +21,7 @@ from pathlib import Path
 # sys.path so `app` imports resolve regardless of invocation.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.services import graphiti as graphiti_service
 from app.services import worldview
 
 MD_PATH = Path("worldview.md")
@@ -48,7 +49,7 @@ async def main() -> None:
     # these are already curated facts), one add_episode per fact, sequential.
     state = {"conversation": [], "extracted_facts": facts, "chat_id": None}
     await worldview.ingest_node(state)
-    g = await worldview._get_graphiti()
+    g = await graphiti_service.get_graphiti()
     await g.close()
     print("Done.")
 

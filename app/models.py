@@ -86,10 +86,11 @@ class UserFactsPreferences(Base):
     __tablename__ = "user_facts_preferences"
 
     # References users.telegram_user_id — no FK constraint to avoid cascade issues.
+    # Free-form facts used to live here too (a `facts` text column); they are now
+    # stored in Graphiti/Neo4j under a per-user group_id (see
+    # app/services/worldview.py::user_facts_group_id), so only the fixed-slot
+    # profile remains in Postgres.
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    # Open-ended, free-form facts maintained by the userfacts extract→consolidate
-    # pipeline (one fact per `- ` bullet line).
-    facts: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     # Fixed-slot structured profile (generation, life stage, food vibe, …). A
     # single JSONB blob rather than one column per attribute: the field set is
     # defined in code (app.prompts.USER_PROFILE_FIELDS) and only ever rendered

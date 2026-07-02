@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from app import repository
 from app import prompts
 from app.prompts import USER_PROFILE_FIELDS
+from app.services import userfacts
 from scripts.draw_graphs import GRAPHS, render_graphs
 
 router = APIRouter()
@@ -29,7 +30,6 @@ WORKFLOW_PROMPTS: list[tuple[str, str, str]] = [
     ("worldview_fact_extractor", "World-view: fact extractor", prompts.FACT_EXTRACTOR_SYSTEM_PROMPT),
     ("worldview_consolidation", "World-view: consolidation", prompts.CONSOLIDATION_SYSTEM_PROMPT),
     ("userfacts_fact_extractor", "User facts: fact extractor", prompts.USER_FACT_EXTRACTOR_SYSTEM_PROMPT),
-    ("userfacts_consolidation", "User facts: consolidation", prompts.USER_FACT_CONSOLIDATION_SYSTEM_PROMPT),
     ("userprofile_extractor", "User profile: extractor", prompts.USER_PROFILE_EXTRACTOR_SYSTEM_PROMPT),
 ]
 
@@ -73,18 +73,9 @@ class SummaryOut(BaseModel):
     summary: str | None
 
 
-class UserFactsOut(BaseModel):
-    user_id: int
-    facts: str
-
-
 class UserProfileOut(BaseModel):
     user_id: int
     profile: dict = {}
-
-
-class UserFactsIn(BaseModel):
-    facts: str
 
 
 class UserProfileIn(BaseModel):
@@ -167,20 +158,43 @@ async def delete_chat_summary(chat_id: int) -> None:
     await repository.delete_summary(chat_id)
 
 
+# Free-form user facts live in the Graphiti knowledge graph (one Neo4j
+# group_id per user), so the only admin operations are ADD (ingest new fact
+# episodes — same path as the pipeline's ingest_node) and GET (dump every
+# episode in the user's partition). There is no edit/delete: Graphiti's own
+# dedup/temporal conflict resolution supersedes old facts on ingest.
+
+
+class UserFactsOut(BaseModel):
+    user_id: int
+    facts: list[str]
+
+
+class UserFactsIn(BaseModel):
+    facts: list[str]
+
+
 @router.get("/user-facts/{user_id}", response_model=UserFactsOut)
 async def read_user_facts(user_id: int) -> UserFactsOut:
-    return UserFactsOut(user_id=user_id, facts=await repository.get_user_facts(user_id))
+    """Every fact episode stored for this user, oldest first."""
+    try:
+        facts = await userfacts.get_user_facts(user_id)
+    except Exception as e:  # noqa: BLE001 — surface graph errors to the client
+        raise HTTPException(status_code=502, detail=f"Failed to read user facts: {e}")
+    return UserFactsOut(user_id=user_id, facts=facts)
 
 
-@router.put("/user-facts/{user_id}", response_model=UserFactsOut)
-async def update_user_facts(user_id: int, body: UserFactsIn) -> UserFactsOut:
-    await repository.set_user_facts(user_id, body.facts)
-    return UserFactsOut(user_id=user_id, facts=body.facts)
-
-
-@router.delete("/user-facts/{user_id}", status_code=204)
-async def delete_user_facts(user_id: int) -> None:
-    await repository.delete_user_facts(user_id)
+@router.post("/user-facts/{user_id}", response_model=UserFactsOut)
+async def add_user_facts(user_id: int, body: UserFactsIn) -> UserFactsOut:
+    """Ingest new facts for this user. Slow: each fact is several LLM round-trips."""
+    facts = [f.strip() for f in body.facts if f.strip()]
+    if not facts:
+        raise HTTPException(status_code=422, detail="No non-empty facts provided")
+    try:
+        await userfacts.add_user_facts(user_id, facts)
+    except Exception as e:  # noqa: BLE001 — surface graph errors to the client
+        raise HTTPException(status_code=502, detail=f"Failed to ingest user facts: {e}")
+    return UserFactsOut(user_id=user_id, facts=facts)
 
 
 class ProfileFieldOut(BaseModel):

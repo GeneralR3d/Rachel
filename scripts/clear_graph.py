@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
 
 from app.config import get_settings
+from app.services import graphiti as graphiti_service
 from app.services import worldview
 
 _CONFIRM_PHRASE = "delete everything"
@@ -33,7 +34,7 @@ _CONFIRM_PHRASE = "delete everything"
 
 async def wipe() -> None:
     settings = get_settings()
-    graphiti = await worldview._get_graphiti()
+    graphiti = await graphiti_service.get_graphiti()
     print(
         f"Wiping ALL data from Neo4j at {settings.neo4j_uri} "
         f"(database 'neo4j') — every group_id, not just 'worldview'."
