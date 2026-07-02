@@ -29,7 +29,6 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
-from pprint import pprint
 
 import tiktoken
 
@@ -301,9 +300,7 @@ async def search_worldview(query: str | None = None) -> str:
 
     print(f"[worldview] search for {query.strip()!r}:")
     print(f"[worldview]   edges ({len(edge_facts)}):")
-    pprint(edge_facts)
     print(f"[worldview]   episodes ({len(episode_facts)}):")
-    pprint(episode_facts)
 
     # De-duplicate while preserving order (edge facts first), then bullet.
     facts = list(dict.fromkeys([*edge_facts, *episode_facts]))

@@ -340,6 +340,11 @@ async def consolidation_node(payload: Dict) -> Dict:
         msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
         print(f"{tag} consolidation context (user {user_id}): {len(msgs)} messages, {msgs_tokens} tokens")
         result: ConsolidationOutput = await _consolidation_llm.ainvoke(msgs)
+        if result is None:
+            # LLM parse failure (e.g. truncated/invalid JSON) -> leave the stored
+            # facts untouched rather than crashing the graph.
+            print(f"{tag} consolidation returned None (LLM parse failure); user {user_id} unchanged")
+            return {}
         facts = [f.strip() for f in result.facts if f.strip()]
 
         facts_text = _format_facts(facts)
@@ -397,6 +402,10 @@ async def profile_extraction_update_node(state: UserFactsState) -> Dict:
     msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
     print(f"{tag} profile extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
     result: ProfileExtractorOutput = await _profile_extractor_llm.ainvoke(msgs)
+
+    if result is None:
+        print(f"{tag} profile extractor returned None (LLM parse failure); skipping")
+        return {}
 
     returned = [
         (e.sender, len([k for k in _PROFILE_KEYS if getattr(e.profile, k, "").strip()]))
