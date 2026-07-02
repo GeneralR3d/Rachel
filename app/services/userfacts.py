@@ -275,6 +275,10 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
     print(f"{tag} extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
     result: ExtractorOutput = await _extractor_llm.ainvoke(msgs)
 
+    if result is None:
+        print(f"{tag} extractor returned None (LLM parse failure); skipping")
+        return {"extracted_facts": {}}
+
     name_to_id = state["name_to_id"]
     # Log exactly what the model returned vs. what names we can resolve, so the
     # three "nothing happened" cases (model returned []; names didn't resolve;

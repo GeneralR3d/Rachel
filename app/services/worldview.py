@@ -286,22 +286,16 @@ async def read_worldview(query: str | None = None) -> str:
         traceback.print_exc()
         return ""
 
-    # Relationship facts (edges): the pre-phrased "fact" sentence Graphiti stored.
     edge_facts = [
         fact
         for edge in results.edges
         if (fact := (getattr(edge, "fact", "") or "").strip())
     ]
-    # Verbatim episode bodies: we ingest one fact per episode (episode_body = the
-    # fact), so an EpisodicNode's content is the exact sentence we stored. Note the
-    # episode layer is BM25-only, so these surface on keyword overlap, not semantics.
     episode_facts = [
         content
         for episode in results.episodes
         if (content := (getattr(episode, "content", "") or "").strip())
     ]
-    # results.nodes is intentionally ignored — node summaries are a lossy,
-    # truncated re-statement of the edge facts above (see docstring).
 
     print(f"[worldview] search for {query.strip()!r}:")
     print(f"[worldview]   edges ({len(edge_facts)}):")
@@ -309,20 +303,10 @@ async def read_worldview(query: str | None = None) -> str:
     print(f"[worldview]   episodes ({len(episode_facts)}):")
     pprint(episode_facts)
 
-    # De-dup preserving order (edges first for the clean atomic phrasing). This only
-    # collapses EXACT-string repeats; semantic near-duplicates that differ in wording
-    # (an episode's full sentence vs the edges decomposed from it) still both survive.
-    seen: set[str] = set()
-    deduped = [
-        f
-        for f in (*edge_facts, *episode_facts)
-        if not (f in seen or seen.add(f))
-    ]
-    print(f"[worldview]   -> {len(deduped)} fact(s) after dedup")
-    pprint(deduped)
-    if not deduped:
+    facts = [*edge_facts, *episode_facts]
+    if not facts:
         return ""
-    return "\n".join(f"- {fact}" for fact in deduped)
+    return "\n".join(f"- {fact}" for fact in facts)
 
 
 # --- Nodes -------------------------------------------------------------------
