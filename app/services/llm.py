@@ -393,8 +393,19 @@ async def responder_node(state: GraphState) -> Dict:
         communication_style = CONVERSATION_STYLE.get(mood, CONVERSATION_STYLE["default"])
         print(f"[responder] communication style fetched (tokens={_count_tokens(communication_style)})")
 
-        world_view = read_worldview() or "Nothing learned yet."
-        print(f"[responder] world view fetched (tokens={_count_tokens(communication_style)})")
+        # Query Graphiti with the latest human message in the buffer as the
+        # search text (falls back to the whole buffer's last entry if none is
+        # from a user).
+        worldview_query = next(
+            (
+                entry["content"]
+                for entry in reversed(state["history"])
+                if entry["sender"] != BOT_NAME
+            ),
+            "",
+        )
+        world_view = await read_worldview(worldview_query) or "Nothing learned yet."
+        print(f"[responder] world view fetched (tokens={_count_tokens(world_view)})")
 
 
         # Pull stored facts/preferences AND structured profile for all

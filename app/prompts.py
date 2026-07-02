@@ -217,6 +217,7 @@ Decide should_reply = false ONLY when:
 - The person's most recent message(s) have ALREADY been replied to by Rachel — i.e. look at the AI messages sent by Rachel and nothing new requiring a response has come in after it. Do not reply again to something already addressed.
 
 Decide should_reply = true when:
+- Rachel's name is mentioned
 - The latest message asks a question, shares new information, brings up a new topic, or otherwise clearly invites a response.
 - There is genuine new content from the person that Rachel has not yet responded to.
 - When in doubt, reply (true).

@@ -19,11 +19,18 @@ uv run alembic upgrade head          # apply all
 uv run alembic downgrade -1          # roll back one
 uv run alembic revision -m "msg"     # generate new migration
 
-# Start Postgres only
-docker compose up -d db
+# Start backing services only (Postgres + Neo4j)
+docker compose up -d db neo4j
+
+# World-view / Graphiti helper scripts (Neo4j must be up)
+uv run python -m scripts.add_worldview_fact "Chagee is a bubble tea brand"  # ingest one fact
+uv run python -m scripts.ingest_worldview_md path/to/facts.md               # bulk-ingest a markdown file
+uv run python -m scripts.clear_graph                                        # WIPE the entire Neo4j graph (typed confirmation)
 ```
 
 Copy `template.env` to `.env` and fill in the required values before running. Rachel's own Telegram account credentials are entered interactively during `scripts.login` and saved to `anon.session` — they are never in `.env`.
+
+Runtime dependencies: **Postgres** (chat history, summaries, user facts/profiles, prompts, traits, schedule) **and Neo4j** (Graphiti world-view knowledge graph). Both are defined in `docker-compose.yml`. `DATABASE_URL`/`NEO4J_URI` point at loopback-mapped ports locally and at the compose service hosts (`db`, `neo4j`) inside Docker.
 
 There is no test suite or lint config in this repo.
 
@@ -43,17 +50,22 @@ Rachel is a FastAPI app that runs two Telethon clients on the same asyncio event
 
 **LLM service** (`app/services/llm.py`): uses OpenRouter (OpenAI-compatible) via `langchain-openrouter`. A LangGraph graph is compiled once at module import into `_graph` and reused for every call.
 
-The graph has two nodes that fan out from START and run **in parallel**:
+The graph is a **gated sequential** pipeline: a cheap no-LLM checker decides whether to consult the router; the router decides whether a reply is warranted at all; only then do the summarizer and responder run (sequentially, so the summarizer's summary update is visible to the responder in the same call):
 
 ```
-START → summarizer_node ↘
-      → responder_node  → END
+START → checker_node → (must_reply?) → summarizer_node → responder_node → END
+              ↓ no                          ↑
+            router_node → (reply needed?) ──┘
+              ↓ no
+             END
 ```
 
-- **`summarizer_node`**: reads `SUMMARIZER_SYSTEM_PROMPT` from DB, injects `{old_summary}` and `{mood_list}` via `ChatPromptTemplate`, passes history as `human`/`assistant` turns, returns `SummarizerOutput` (mood + summary). If summary is `"NIL"`, only `mood` is written back to state (leaving `current_summary` unchanged). Otherwise both are written. LLM errors here are swallowed (keeps current mood/summary) rather than retried.
-- **`responder_node`**: reads `RESPONDER_SYSTEM_PROMPT` from DB and injects, via `ChatPromptTemplate`: `{communication_style}` (tone examples for the *previous* call's detected mood, from `CONVERSATION_STYLE`), `{current_summary}`, `{personality_traits}`, `{conversation_mood}`, `{datetime}` (formatted current date/time), `{current_activity}` and `{day_summary}` (from the weekly schedule), `{world_view}` (from `read_worldview()`), and `{user_facts}` (per-user facts for every distinct `sender_user_id` in the slice, fetched via `_get_user_facts_cached`). History is passed as `human`/`assistant` turns. Returns `ResponseOutput` (`content` + `reason`, the latter a one-sentence justification persisted to `History.reason` for traceability/debugging). Uses `json_mode` instead of tool-calling because tool-calling hangs on the configured model.
+- **`checker_node`** / `_route_after_checker`: if the caller set `must_reply` (1-on-1 DM or Rachel was tagged/replied-to), skip the router entirely and go straight to the summarizer. Otherwise defer to the router.
+- **`router_node`**: LLM gate that decides whether a reply is warranted (uses `ROUTER_PM_SYSTEM_PROMPT` in DMs, `ROUTER_SYSTEM_PROMPT` in groups; only sees the last `ROUTER_CONTEXT_MSGS = 15` messages). Returns `RouterOutput` (`should_reply` + `reason`). Fails **open** (defaults to replying) on LLM error, and salvages `should_reply` from the raw tool-call args when structured parsing drops the `reason` field. If `should_reply` is false the graph short-circuits to END — no summary, no response.
+- **`summarizer_node`**: reads `SUMMARIZER_SYSTEM_PROMPT` from DB, injects `{old_summary}` and `{mood_list}`, returns `SummarizerOutput` (mood + summary). If summary is `"NIL"`, only `mood` is written back (leaving `current_summary` unchanged). LLM errors here are swallowed (keeps current mood/summary).
+- **`responder_node`**: reads `RESPONDER_SYSTEM_PROMPT` from DB and injects, via `ChatPromptTemplate`: `{communication_style}` (tone examples for the *previous* call's detected mood, from `CONVERSATION_STYLE`), `{current_summary}`, `{personality_traits}`, `{conversation_mood}`, `{datetime}`, `{current_activity}` + `{day_summary}` (weekly schedule), `{world_view}` (from `await read_worldview(query)` — Graphiti search keyed on the latest human message in the buffer), `{user_facts}` (free-form notes) and `{user_profiles}` (fixed-slot profiles, every slot shown with NIL for gaps) for each distinct `sender_user_id`, and `{profile_attributes}`. Returns `ResponseOutput` (`content` + `reason`, persisted to `History.reason`). Uses `json_mode` instead of tool-calling because tool-calling hangs on the configured model; on a json-parse failure it salvages the raw prose as the reply rather than crashing.
 
-Mood detected by `summarizer_node` is stored in the module-level `_chat_mood: Dict[int, str]` dict and injected into `responder_node` on the **next** call (defaults to `"default"` on first contact). This one-call lag is intentional — both nodes run in parallel so the summarizer's mood can't influence the current responder.
+Mood detected by `summarizer_node` is stored in the module-level `_chat_mood: Dict[int, str]` dict and injected into `responder_node` on the **next** call (defaults to `"default"` on first contact) — a deliberate one-call lag.
 
 `get_response()` returns `(response_text, response_reason, new_summary | None, elapsed_seconds)`. `new_summary` is `None` when the summarizer returned NIL (no DB write needed).
 
@@ -61,17 +73,23 @@ Schedule lookups (`current_activity`, `day_summary`) are cached in module global
 
 **Mood / tone system** (`app/prompts.py`): `CONVERSATION_STYLE` is a dict keyed by mood name (e.g. `"default"`, `"excited"`, `"sad"`, `"flirt"`). Each value is formatted into `{communication_style}` to steer Rachel's tone. `MOOD_LABELS = list(CONVERSATION_STYLE)` is the single source of truth for valid mood values — the summarizer's structured-output schema is built from it dynamically.
 
-**World view / persistent memory** (`app/services/worldview.py`): a separate, self-contained LangGraph pipeline that runs once per finished conversation (triggered from `finalize_conversation` in `client.py`). Two nodes run **sequentially**:
+**World view / persistent memory** (`app/services/worldview.py`): a self-contained LangGraph pipeline that runs once per finished conversation (triggered from `finalize_conversation` in `client.py`). Backed by **Graphiti** (a temporal knowledge graph on **Neo4j**) rather than a file — Graphiti does its own entity/edge extraction, de-duplication, and temporal conflict resolution on ingest, so there is no hand-rolled consolidation step. Two nodes run **sequentially**:
 
 ```
-START → fact_extractor_node → (any new facts?) → consolidation_node → END
+START → fact_extractor_node → (any new facts?) → ingest_node → END
                                      └── no ──→ END
 ```
 
-- **`fact_extractor_node`**: reads the just-finished dialogue with `FACT_EXTRACTOR_SYSTEM_PROMPT`, pulls out new durable, general (non-user-specific) facts about the world. Returns nothing if it learned nothing new — short-circuits straight to `END`, no file write.
-- **`consolidation_node`**: reads existing facts plus newly extracted ones via `CONSOLIDATION_SYSTEM_PROMPT`, de-duplicates and resolves conflicts (newer info wins), returns the full rewritten fact set.
+- **`fact_extractor_node`**: reads the just-finished dialogue with `FACT_EXTRACTOR_SYSTEM_PROMPT`, pulls out new durable, general (non-user-specific) facts. Short-circuits to `END` if nothing new.
+- **`ingest_node`**: writes each fact into Graphiti as one episode (`add_episode`), sequentially under `_graphiti_lock` (the shared graph races otherwise). Each `add_episode` is several LLM round-trips (node extraction → node resolution/dedup → edge extraction/resolution/invalidation → attribute hydration), which is why ingestion is slow and must stay awaited.
 
-Storage is a flat markdown file (one fact per `- ` bullet) at `WORLDVIEW_PATH` (default `worldview.md`), read/rewritten as a whole each time — no search/retrieval. Reads/writes are serialized via a module-level `asyncio.Lock` (`_file_lock`) so concurrent conversation finalizations can't clobber each other. `read_worldview()` is consumed by `responder_node` (`{world_view}`); `update_worldview()` is the entry point called by `client.py` and never raises (errors are caught and logged so memory upkeep can't crash the caller).
+The process-wide Graphiti client is lazily built in `_get_graphiti()` (double-checked under `_graphiti_lock`); its LLM, embedder, and reranker all point at OpenRouter (`graphiti_api_key`, `openrouter_model`/`openrouter_small_model`/`openrouter_embedding_model`). Two Graphiti-specific workarounds live here and are load-bearing:
+- The LLM client is `structured_output_mode="json_object"` (not the default `json_schema`) — OpenRouter downgrades `json_schema` to a plain object for models without native constrained decoding, so schema field names aren't enforced and Graphiti's `NodeResolutions`/`ExtractedEdges` fail to validate; json_object mode embeds the schema (field names included) into the prompt instead.
+- `_RetryingOpenAIGenericClient` subclasses `OpenAIGenericClient` and re-rolls (with a corrective note) when the model returns valid JSON whose *shape* doesn't match the requested `response_model` — Graphiti validates the dict *after* the call returns, so its built-in tenacity retry (transport errors only) never sees these shape mismatches.
+
+All world-view episodes are written under **`group_id = "worldview"`** (`_WORLDVIEW_GROUP_ID`) and searches are scoped to it, so future per-user memory graphs can use their own group_ids without clashing — all within the single `neo4j` database (an explicit group_id is a no-op for the DB name on the Neo4j driver, which doesn't override `clone`).
+
+`read_worldview(query)` (async, consumed by `responder_node` as `{world_view}`) runs `graphiti.search_(query, config=COMBINED_HYBRID_SEARCH_RRF, group_ids=["worldview"])` and harvests **only edges (relationship facts) and episodes (verbatim ingested sentences)** — node summaries are deliberately dropped because they're a lossy, `MAX_SUMMARY_CHARS=1000`-truncated re-statement of the same edge facts. `update_worldview()` is the entry point called by `client.py` and never raises (errors are caught/logged so memory upkeep can't crash the caller). `settings.worldview_path` is legacy/unused now that storage is Graphiti.
 
 **Per-user facts / preferences** (`app/services/userfacts.py`): the user-specific counterpart to the world-view pipeline, also run once per finished conversation from `finalize_conversation` (it takes the same snapshotted conversation plus its summary). Where world-view keeps *general* facts, this keeps *personal* memory about each individual user, stored per-user in the `user_facts_preferences` table (not a file). That row has **two independent kinds of memory**: the free-form `facts` text column (open-ended bullet list) and a fixed-slot `profile` JSONB column (generation, life stage, food vibe, …). Two **independent branches fan out from START in parallel** — one for facts, one for the profile — reading the same dialogue but writing to different columns, then joining at END. The facts branch splits extraction from a per-user LLM consolidation fan-out; the profile branch does extraction **and** the write in a single node (its merge is deterministic, so no consolidation pass or fan-out is needed):
 
@@ -95,7 +113,7 @@ START → fact_extractor_node → (any new facts?) → consolidation_node (×N, 
 
 **Weekly schedule** (`app/models.py::ScheduleActivity`, `app/schedule_data.py`): one row per activity *instance*, keyed by `(day_of_week 0=Mon..6=Sun, start_hour 0-23)` with a unique constraint — `duration_hours` lets a single row span multiple hour-chunks (e.g. `start_hour=23, duration_hours=8` covers 23:00-06:59) rather than duplicating rows per hour. `DEFAULT_SCHEDULE` in `app/schedule_data.py` is the seed data, loaded by `ensure_schedule_seeded()` (insert-if-empty, called from the lifespan alongside the other seeders). Repository queries: `get_current_activity(day_of_week, hour)` (also checks the *previous* day for activities that run past midnight), `get_day_summary(day_of_week)` (name/duration_hours/location only, via `_activity_to_dict(a, partial=True)`).
 
-**Config** (`app/config.py`): pydantic-settings with `@lru_cache`. `DATABASE_URL` must use `localhost:5433` locally (Docker port-mapped) and `db:5432` inside Docker. `WORLDVIEW_PATH` controls where the world-view markdown file lives (default `worldview.md`).
+**Config** (`app/config.py`): pydantic-settings with `@lru_cache`. `DATABASE_URL` must match the environment (loopback-mapped port locally vs `db` service host in Docker); same for `NEO4J_URI` (`bolt://localhost:7687` locally vs the `neo4j` service host). OpenRouter drives everything: `openrouter_api_key` for Rachel's own router/summarizer/responder, and a **separate** `openrouter_graphiti_api_key` (exposed via the `graphiti_api_key` property, falling back to the main key when unset) billed for all Graphiti/world-view LLM+embedder+reranker calls. `WORLDVIEW_PATH` is a legacy setting — world-view storage is now Graphiti/Neo4j, not a markdown file.
 
 The original Telethon/SQLite implementation is preserved under `Reference/` — `app/repository.py` is a deliberate port of `Reference/app/db.py` with matching function names/signatures, so consult it when porting further pieces.
 
