@@ -65,11 +65,8 @@ from app.prompts import (
     USER_PROFILE_ATTRIBUTE_GUIDE,
     USER_PROFILE_FIELDS,
 )
-from app.calander import (
-    CALENDAR_TOOLS,
-    format_calendar_tools,
-)
-from app.services.worldview import read_worldview
+from app.calander import CALENDAR_TOOLS
+from app.services.worldview import search_world_view, search_worldview
 from app.repository import (
     get_active_trait_prompts,
     get_responder_system_prompt,
@@ -246,7 +243,8 @@ class GraphState(TypedDict):
     must_reply: bool  # set by caller: Rachel was tagged/replied-to in a group
     is_private: bool  # set by caller: 1-on-1 DM (selects the PM router prompt)
     should_reply: bool
-    schedule_context: str  # extra context gathered by context_fetcher_node
+    schedule_context: str  # extra schedule context gathered by context_fetcher_node
+    world_view: str  # world-view facts gathered by context_fetcher_node
     response_text: str
     response_reason: str
 
@@ -272,16 +270,37 @@ _responder_llm = ChatOpenRouter(
     temperature=0.2,
 ).with_structured_output(ResponseOutput)
 
-# The context_fetcher is the one node that *does* use tool-calling: it has the
-# calendar tools bound and decides which to call. (CLAUDE.md notes tool-calling
-# can hang on some models — the node is wrapped in a hard timeout below and
-# fails open to empty context, so a hang/error can never stall the pipeline.)
-_context_tools_by_name = {t.name: t for t in CALENDAR_TOOLS}
+# The context_fetcher is the one node that *does* use tool-calling: it has these
+# tools bound and decides which to call. (CLAUDE.md notes tool-calling can hang on
+# some models — the node is wrapped in a hard timeout below and fails open to empty
+# context, so a hang/error can never stall the pipeline.) CONTEXT_TOOLS is the
+# single source of truth: it drives both the bound tools and the prompt's {tools}
+# listing (via format_tools). It combines the calendar tools with the world-view
+# search tool (Rachel's general learned facts).
+CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view]
+
+
+def format_tools(tools) -> str:
+    """Render any list of LangChain tools as a bullet list for a prompt.
+
+    Derived entirely from each tool's name, argument names and FULL docstring, so
+    the prompt never hard-codes tool descriptions — the tools stay the one source
+    of truth. Each entry is ``- name(args):`` followed by the complete docstring.
+    """
+    lines = []
+    for t in tools:
+        args = ", ".join(t.args.keys())
+        doc = (t.description or "").strip()
+        lines.append(f"- {t.name}({args}):\n{doc}")
+    return "\n\n".join(lines)
+
+
+_context_tools_by_name = {t.name: t for t in CONTEXT_TOOLS}
 _context_fetcher_llm = ChatOpenRouter(
     model=settings.openrouter_model,
     api_key=settings.openrouter_api_key,
     temperature=0.0,
-).bind_tools(CALENDAR_TOOLS)
+).bind_tools(CONTEXT_TOOLS)
 
 # The context_fetcher is a single pass (one LLM call → run whatever tools it
 # asked for → done), so the only guard needed is a wall-clock timeout.
@@ -406,11 +425,15 @@ async def summarizer_node(state: GraphState) -> Dict:
     return {"mood": result.mood, "current_summary": result.summary}
 
 
-async def _run_context_fetcher(state: GraphState) -> str:
+async def _run_context_fetcher(state: GraphState) -> Tuple[str, str]:
     """Single pass for context_fetcher_node: one LLM call decides which tools to
     call, then those tools are run once. Factored out so the node can wrap it in
-    a single asyncio timeout. Returns the gathered context text (empty if the
-    model asked for no tools)."""
+    a single asyncio timeout. Returns ``(schedule_context, world_view)`` — both
+    empty if the model asked for no tools.
+
+    The world-view tool's output is routed to its own return slot (so it lands in
+    the responder's ``{world_view}`` section, not ``{schedule_context}``); all
+    other (calendar) tools are concatenated into the schedule context."""
     history_msgs = [
         AIMessage(content=f"{entry['sender']}: {entry['content']}")
         if entry["sender"] == BOT_NAME
@@ -426,16 +449,34 @@ async def _run_context_fetcher(state: GraphState) -> str:
     )
     system_msgs = ChatPromptTemplate.from_messages(
         [("system", CONTEXT_FETCHER_SYSTEM_PROMPT)]
-    ).format_messages(datetime=formatted_datetime, tools=format_calendar_tools())
+    ).format_messages(datetime=formatted_datetime, tools=format_tools(CONTEXT_TOOLS))
     msgs = [*system_msgs, *history_msgs]
 
     ai: AIMessage = await _context_fetcher_llm.ainvoke(msgs)
     tool_calls = getattr(ai, "tool_calls", None) or []
+    print(f"[context_fetcher] LLM requested {len(tool_calls)} tool call(s):")
+    for tc in tool_calls:
+        print(f"[context_fetcher]   -> {tc['name']}({tc['args']})")
     if not tool_calls:
-        return ""
+        return "", ""
 
     collected: List[str] = []
+    world_view_parts: List[str] = []
     for tc in tool_calls:
+        if tc["name"] == search_world_view.name:
+            # World-view output goes to its own slot (the responder's {world_view}
+            # section). Fails open to no facts, never crashes the pass.
+            query = tc["args"].get("query", "")
+            try:
+                result = await search_worldview(query)
+            except Exception as e:
+                print(f"[context_fetcher] world-view search error: {type(e).__name__}: {e}")
+                result = ""
+            print(f"[context_fetcher] {tc['name']}({tc['args']}) result:\n{result}")
+            if result:
+                world_view_parts.append(result)
+            continue
+
         tool = _context_tools_by_name.get(tc["name"])
         if tool is None:
             result = f"Unknown tool '{tc['name']}'."
@@ -444,10 +485,14 @@ async def _run_context_fetcher(state: GraphState) -> str:
                 result = await tool.ainvoke(tc["args"])
             except Exception as e:
                 result = f"tool error: {type(e).__name__}: {e}"
-        print(f"[context_fetcher] {tc['name']}({tc['args']}) -> {str(result)[:120]!r}")
+        print(f"[context_fetcher] {tc['name']}({tc['args']}) result:\n{result}")
         collected.append(str(result))
 
-    return "\n\n".join(collected)
+    schedule_context = "\n\n".join(collected)
+    world_view = "\n".join(world_view_parts)
+    print(f"[context_fetcher] ===== fetched schedule context =====\n{schedule_context or '(none)'}")
+    print(f"[context_fetcher] ===== fetched world-view facts =====\n{world_view or '(none)'}")
+    return schedule_context, world_view
 
 
 async def context_fetcher_node(state: GraphState) -> Dict:
@@ -455,20 +500,23 @@ async def context_fetcher_node(state: GraphState) -> Dict:
 
     Runs in parallel with summarizer_node. Never raises and never stalls the
     pipeline: on any error or timeout it falls open to empty context (the
-    responder still has today's schedule injected directly)."""
+    responder still has the mood/summary and can reply without extras)."""
     try:
-        fetched = await asyncio.wait_for(
+        schedule_context, world_view = await asyncio.wait_for(
             _run_context_fetcher(state), timeout=CONTEXT_FETCHER_TIMEOUT
         )
     except asyncio.TimeoutError:
         print(f"[context_fetcher] timed out after {CONTEXT_FETCHER_TIMEOUT}s (no extra context)")
-        return {"schedule_context": ""}
+        return {"schedule_context": "", "world_view": ""}
     except Exception as e:
         print(f"[context_fetcher] error (no extra context): {type(e).__name__}: {e}")
-        return {"schedule_context": ""}
+        return {"schedule_context": "", "world_view": ""}
 
-    print(f"[context_fetcher] gathered {_count_tokens(fetched)} tokens of context")
-    return {"schedule_context": fetched}
+    print(
+        f"[context_fetcher] gathered {_count_tokens(schedule_context)} tokens of "
+        f"schedule context + {_count_tokens(world_view)} tokens of world-view facts"
+    )
+    return {"schedule_context": schedule_context, "world_view": world_view}
 
 
 async def responder_node(state: GraphState) -> Dict:
@@ -486,19 +534,10 @@ async def responder_node(state: GraphState) -> Dict:
         communication_style = CONVERSATION_STYLE.get(mood, CONVERSATION_STYLE["default"])
         print(f"[responder] communication style fetched (tokens={_count_tokens(communication_style)})")
 
-        # Query Graphiti with the latest human message in the buffer as the
-        # search text (falls back to the whole buffer's last entry if none is
-        # from a user).
-        worldview_query = next(
-            (
-                entry["content"]
-                for entry in reversed(state["history"])
-                if entry["sender"] != BOT_NAME
-            ),
-            "",
-        )
-        world_view = await read_worldview(worldview_query) or "Nothing learned yet."
-        print(f"[responder] world view fetched (tokens={_count_tokens(world_view)})")
+        # World-view facts are fetched by context_fetcher_node (which generates a
+        # conversation-aware query) and arrive as a bulleted string in state.
+        world_view = state.get("world_view") or "Nothing learned yet."
+        print(f"[responder] world view from state (tokens={_count_tokens(world_view)})")
 
 
         # Pull stored facts/preferences AND structured profile for all
@@ -677,6 +716,7 @@ async def get_response(
         "is_private": is_private,
         "should_reply": True,
         "schedule_context": "",
+        "world_view": "",
         "response_text": "",
         "response_reason": "",
     }

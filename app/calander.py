@@ -253,8 +253,9 @@ async def get_activity_at(day: str, hour: int) -> str:
 
 
 # All calendar tools exposed to the context_fetcher node. This list is the
-# single source of truth: it drives both the LLM's bound tools and the prompt's
-# tool listing (via format_calendar_tools), so adding a tool here is enough.
+# single source of truth for the calendar tools: it feeds the combined tool list
+# (CONTEXT_TOOLS in app/services/llm.py) that drives both the LLM's bound tools and
+# the prompt's tool listing (via format_tools), so adding a tool here is enough.
 CALENDAR_TOOLS = [
     get_activity_now,
     get_today_overview,
@@ -262,18 +263,3 @@ CALENDAR_TOOLS = [
     get_day_overview,
     get_activity_at,
 ]
-
-
-def format_calendar_tools() -> str:
-    """Render CALENDAR_TOOLS as a bullet list for the context_fetcher prompt.
-
-    Derived entirely from each tool's name, argument names and docstring so the
-    prompt never hard-codes tool descriptions — the tools stay the one source of
-    truth. Each line is ``- name(args): <first line of the docstring>``.
-    """
-    lines = []
-    for t in CALENDAR_TOOLS:
-        args = ", ".join(t.args.keys())
-        first_line = (t.description or "").strip().splitlines()[0].strip()
-        lines.append(f"- {t.name}({args}): {first_line}")
-    return "\n".join(lines)
