@@ -169,67 +169,8 @@ async def ensure_schedule_seeded() -> None:
 
 
 # --- weekly schedule ------------------------------------------------------
-
-
-def _activity_to_dict(a: ScheduleActivity, partial: bool = False) -> dict:
-    if partial:
-        return {
-            "name": a.name,
-            "duration_hours": a.duration_hours,
-            "location": a.location,
-        }
-    return {
-        "day_of_week": a.day_of_week,
-        "start_hour": a.start_hour,
-        "name": a.name,
-        "description": a.description,
-        "location": a.location,
-        "duration_hours": a.duration_hours,
-        "ends_at": f"{(a.start_hour + a.duration_hours) % 24:02d}:00",
-        "companions": a.companions,
-        "reason": a.reason,
-        "interesting_event": a.interesting_event,
-    }
-
-
-async def get_current_activity(day_of_week: int, hour: int) -> Optional[dict]:
-    """Return the activity covering the given hour of the given day, if any.
-
-    Also checks the previous day for activities that start late and run past
-    midnight (e.g. start_hour=23, duration_hours=8 covers 23:00-07:00).
-    """
-    previous_day = (day_of_week - 1) % 7
-    async with session_scope() as session:
-        activity = await session.scalar(
-            select(ScheduleActivity).where(
-                sa.or_(
-                    sa.and_(
-                        ScheduleActivity.day_of_week == day_of_week,
-                        ScheduleActivity.start_hour <= hour,
-                        ScheduleActivity.start_hour + ScheduleActivity.duration_hours > hour,
-                    ),
-                    sa.and_(
-                        ScheduleActivity.day_of_week == previous_day,
-                        ScheduleActivity.start_hour + ScheduleActivity.duration_hours > 24,
-                        ScheduleActivity.start_hour + ScheduleActivity.duration_hours - 24 > hour,
-                    ),
-                )
-            )
-        )
-    return _activity_to_dict(activity) if activity is not None else None
-
-
-async def get_day_summary(day_of_week: int) -> list[dict]:
-    """Return only name, duration_hours and location for the day's activities, ordered by start time."""
-    async with session_scope() as session:
-        rows = (
-            await session.execute(
-                select(ScheduleActivity)
-                .where(ScheduleActivity.day_of_week == day_of_week)
-                .order_by(ScheduleActivity.start_hour)
-            )
-        ).scalars().all()
-    return [_activity_to_dict(a, partial=True) for a in rows]
+# Schedule lookups (get_current_activity / get_day_summary / …) now live in
+# app/calander.py, alongside the LangChain tool wrappers built on top of them.
 
 
 async def ensure_system_prompts_seeded() -> None:

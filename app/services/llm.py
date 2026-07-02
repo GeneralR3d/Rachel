@@ -1,23 +1,32 @@
 """LLM integration via LangGraph + LangChain OpenRouter.
 
-The nodes run sequentially, gated by a checker + router up front:
+The nodes are gated by a checker + router up front, then summarizer_node and
+context_fetcher_node fan out in parallel before the responder joins them:
 
-  START → checker_node → (must_reply?) → summarizer_node → responder_node → END
-                ↓ no                          ↑
-              router_node → (reply needed?) ──┘
+  START → checker_node → (must_reply?) → summarizer_node ──↘
+                ↓ no                   → context_fetcher_node → responder_node → END
+              router_node → (reply needed?) ──↗
                 ↓ no
                END
 
-checker_node:    cheap, no-LLM gate. If MUST_REPLY is set (1-on-1 chat or Rachel
-                 was tagged), skip the router entirely and go straight to the
-                 summarizer/responder. Otherwise defer to the router.
-router_node:     decides whether a reply is even warranted. If not, the graph
-                 short-circuits straight to END (no summary, no response).
-summarizer_node: detects conversation mood; result is stored in _chat_mood
-                 and used by the NEXT call's responder_node. Runs before the
-                 responder so its summary update is visible to the responder.
-responder_node:  generates Rachel's reply using the mood detected in the
-                 previous call (defaults to "default" on first contact).
+checker_node:        cheap, no-LLM gate. If MUST_REPLY is set (1-on-1 chat or
+                     Rachel was tagged), skip the router entirely and go straight
+                     to the summarizer/context_fetcher. Otherwise defer to the
+                     router.
+router_node:         decides whether a reply is even warranted. If not, the
+                     graph short-circuits straight to END (no summary, no
+                     response, no context fetch).
+summarizer_node:     detects conversation mood; result is stored in _chat_mood
+                     and used by the NEXT call's responder_node. Runs in parallel
+                     with context_fetcher_node.
+context_fetcher_node: a tool-calling agent whose sole job is to decide which
+                     tools to call to gather extra context for the responder
+                     (currently the calendar tools — Rachel's schedule on
+                     arbitrary days). Its gathered context is written to
+                     state["fetched_context"] and injected into the responder.
+responder_node:      generates Rachel's reply using the mood detected in the
+                     previous call (defaults to "default" on first contact) plus
+                     whatever context_fetcher_node gathered this call.
 """
 
 import asyncio
@@ -39,7 +48,7 @@ def _count_tokens(text: str) -> int:
     return len(_tokenizer.encode(text))
 
 from langchain_core.exceptions import OutputParserException
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openrouter import ChatOpenRouter
 from langgraph.graph import END, START, StateGraph
@@ -48,17 +57,21 @@ from typing_extensions import TypedDict
 
 from app.config import get_settings
 from app.prompts import (
+    CONTEXT_FETCHER_SYSTEM_PROMPT,
     CONVERSATION_STYLE,
     ROUTER_PM_SYSTEM_PROMPT,
     ROUTER_SYSTEM_PROMPT,
     USER_PROFILE_ATTRIBUTE_GUIDE,
     USER_PROFILE_FIELDS,
 )
+from app.calander import (
+    CALENDAR_TOOLS,
+    get_current_activity,
+    get_day_summary,
+)
 from app.services.worldview import read_worldview
 from app.repository import (
     get_active_trait_prompts,
-    get_current_activity,
-    get_day_summary,
     get_responder_system_prompt,
     get_summarizer_system_prompt,
     get_user_facts_batch,
@@ -239,6 +252,7 @@ class GraphState(TypedDict):
     must_reply: bool  # set by caller: Rachel was tagged/replied-to in a group
     is_private: bool  # set by caller: 1-on-1 DM (selects the PM router prompt)
     should_reply: bool
+    fetched_context: str  # extra context gathered by context_fetcher_node
     response_text: str
     response_reason: str
 
@@ -264,6 +278,21 @@ _responder_llm = ChatOpenRouter(
     temperature=0.2,
 ).with_structured_output(ResponseOutput)
 
+# The context_fetcher is the one node that *does* use tool-calling: it has the
+# calendar tools bound and decides which to call. (CLAUDE.md notes tool-calling
+# can hang on some models — the node is wrapped in a hard timeout below and
+# fails open to empty context, so a hang/error can never stall the pipeline.)
+_context_tools_by_name = {t.name: t for t in CALENDAR_TOOLS}
+_context_fetcher_llm = ChatOpenRouter(
+    model=settings.openrouter_model,
+    api_key=settings.openrouter_api_key,
+    temperature=0.0,
+).bind_tools(CALENDAR_TOOLS)
+
+# Caps on the tool-calling loop so a chatty/looping model can't run forever.
+CONTEXT_FETCHER_MAX_ITERS = 4
+CONTEXT_FETCHER_TIMEOUT = 30  # seconds, wall-clock for the whole loop
+
 
 def checker_node(state: GraphState) -> Dict:
     """Cheap, no-LLM gate in front of the router. Does nothing on its own; the
@@ -271,11 +300,13 @@ def checker_node(state: GraphState) -> Dict:
     return {}
 
 
-def _route_after_checker(state: GraphState) -> str:
+def _route_after_checker(state: GraphState):
     """Conditional edge: if the caller forced a reply (1-on-1 chat or Rachel was
-    tagged), skip the router and go straight to the summarizer. Otherwise let the
-    router decide whether a reply is warranted."""
-    return "summarizer_node" if state.get("must_reply", False) else "router_node"
+    tagged), skip the router and fan out to the summarizer + context_fetcher.
+    Otherwise let the router decide whether a reply is warranted."""
+    if state.get("must_reply", False):
+        return ["summarizer_node", "context_fetcher_node"]
+    return "router_node"
 
 
 async def router_node(state: GraphState) -> Dict:
@@ -339,9 +370,12 @@ def _salvage_should_reply(raw: Any) -> bool:
     return True
 
 
-def _route_after_router(state: GraphState) -> str:
-    """Conditional edge: run the summarizer/responder only if a reply is wanted."""
-    return "summarizer_node" if state.get("should_reply", True) else END
+def _route_after_router(state: GraphState):
+    """Conditional edge: fan out to the summarizer + context_fetcher only if a
+    reply is wanted; otherwise short-circuit straight to END."""
+    if state.get("should_reply", True):
+        return ["summarizer_node", "context_fetcher_node"]
+    return END
 
 
 async def summarizer_node(state: GraphState) -> Dict:
@@ -376,6 +410,71 @@ async def summarizer_node(state: GraphState) -> Dict:
     if result.summary == "NIL":
         return {"mood": result.mood}
     return {"mood": result.mood, "current_summary": result.summary}
+
+
+async def _run_context_fetcher(state: GraphState) -> str:
+    """The tool-calling loop for context_fetcher_node, factored out so the node
+    can wrap it in a single asyncio timeout. Returns the gathered context text."""
+    history_msgs = [
+        AIMessage(content=f"{entry['sender']}: {entry['content']}")
+        if entry["sender"] == BOT_NAME
+        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
+        for entry in state["history"]
+    ]
+
+    now = datetime.now()
+    formatted_datetime = (
+        f"The current date is {now.strftime('%d %B %Y')}, "
+        f"the current day of week is {now.strftime('%A')}, "
+        f"the current time is {now.strftime('%H:%M')}"
+    )
+    system_msgs = ChatPromptTemplate.from_messages(
+        [("system", CONTEXT_FETCHER_SYSTEM_PROMPT)]
+    ).format_messages(datetime=formatted_datetime)
+    msgs = [*system_msgs, *history_msgs]
+
+    collected: List[str] = []
+    for _ in range(CONTEXT_FETCHER_MAX_ITERS):
+        ai: AIMessage = await _context_fetcher_llm.ainvoke(msgs)
+        msgs.append(ai)
+        tool_calls = getattr(ai, "tool_calls", None) or []
+        if not tool_calls:
+            break
+        for tc in tool_calls:
+            tool = _context_tools_by_name.get(tc["name"])
+            if tool is None:
+                result = f"Unknown tool '{tc['name']}'."
+            else:
+                try:
+                    result = await tool.ainvoke(tc["args"])
+                except Exception as e:
+                    result = f"tool error: {type(e).__name__}: {e}"
+            print(f"[context_fetcher] {tc['name']}({tc['args']}) -> {str(result)[:120]!r}")
+            collected.append(str(result))
+            msgs.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+
+    return "\n\n".join(collected)
+
+
+async def context_fetcher_node(state: GraphState) -> Dict:
+    """Gather extra context for the responder by calling the right tools.
+
+    Runs in parallel with summarizer_node. Never raises and never stalls the
+    pipeline: on any error or timeout it falls open to empty context (the
+    responder still has today's schedule injected directly)."""
+    try:
+        fetched = await asyncio.wait_for(
+            _run_context_fetcher(state), timeout=CONTEXT_FETCHER_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        print(f"[context_fetcher] timed out after {CONTEXT_FETCHER_TIMEOUT}s (no extra context)")
+        return {"fetched_context": ""}
+    except Exception as e:
+        print(f"[context_fetcher] error (no extra context): {type(e).__name__}: {e}")
+        return {"fetched_context": ""}
+
+    print(f"[context_fetcher] gathered {_count_tokens(fetched)} tokens of context")
+    return {"fetched_context": fetched}
 
 
 async def responder_node(state: GraphState) -> Dict:
@@ -490,6 +589,7 @@ async def responder_node(state: GraphState) -> Dict:
             datetime=formatted_datetime,
             current_activity=current_activity or "Nothing scheduled right now",
             day_summary=day_summary,
+            fetched_context=state.get("fetched_context") or "No extra context was needed.",
             world_view=world_view,
             user_facts=user_facts,
             user_profiles=user_profiles,
@@ -530,24 +630,34 @@ def _build_graph():
     graph.add_node("checker_node", checker_node)
     graph.add_node("router_node", router_node)
     graph.add_node("summarizer_node", summarizer_node)
+    graph.add_node("context_fetcher_node", context_fetcher_node)
     graph.add_node("responder_node", responder_node)
     graph.add_edge(START, "checker_node")
-    # Checker gates the router: a forced reply (must_reply) skips straight to the
-    # summarizer; otherwise the router decides whether a reply is warranted.
+    # Checker gates the router: a forced reply (must_reply) fans out straight to
+    # the summarizer + context_fetcher; otherwise the router decides first.
     graph.add_conditional_edges(
         "checker_node",
         _route_after_checker,
-        {"summarizer_node": "summarizer_node", "router_node": "router_node"},
+        {
+            "summarizer_node": "summarizer_node",
+            "context_fetcher_node": "context_fetcher_node",
+            "router_node": "router_node",
+        },
     )
     # Router gates everything: if no reply is warranted, jump straight to END.
     graph.add_conditional_edges(
         "router_node",
         _route_after_router,
-        {"summarizer_node": "summarizer_node", END: END},
+        {
+            "summarizer_node": "summarizer_node",
+            "context_fetcher_node": "context_fetcher_node",
+            END: END,
+        },
     )
-    # Summarizer runs before the responder (sequential) so its mood/summary
-    # update is visible to the responder in the same call.
+    # Summarizer + context_fetcher run in parallel; the responder joins them
+    # (LangGraph waits for both before running responder_node once).
     graph.add_edge("summarizer_node", "responder_node")
+    graph.add_edge("context_fetcher_node", "responder_node")
     graph.add_edge("responder_node", END)
     return graph.compile()
 
@@ -588,6 +698,7 @@ async def get_response(
         "must_reply": must_reply,
         "is_private": is_private,
         "should_reply": True,
+        "fetched_context": "",
         "response_text": "",
         "response_reason": "",
     }
