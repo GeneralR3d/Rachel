@@ -200,6 +200,7 @@
   <button data-tab="personality">Personality</button>
   <button data-tab="chats">Chats</button>
   <button data-tab="users">Users</button>
+  <button data-tab="worldview">World View</button>
   <button data-tab="architecture">Architecture</button>
 </nav>
 
@@ -338,6 +339,21 @@
             </div>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- WORLD VIEW (Graphiti general facts) -->
+    <section id="worldview">
+      <h2>World View</h2>
+      <div class="desc">Rachel's general (non-user-specific) facts stored in the Graphiti knowledge graph (Neo4j). Add one fact per line. No edit/delete — Graphiti supersedes old facts on re-ingest.</div>
+      <div id="worldviewOut" class="out" style="margin-top:10px"></div>
+      <div class="btns">
+        <button onclick="loadWorldviewFacts()" class="ghost">Reload</button>
+      </div>
+      <label style="margin-top:14px">Add facts (one per line)</label>
+      <textarea id="worldviewInput" placeholder="e.g. Chagee is a bubble tea brand&#10;NTU is a university in Singapore" style="min-height:80px"></textarea>
+      <div class="btns">
+        <button onclick="addWorldviewFacts()">Add Facts</button>
       </div>
     </section>
 
@@ -765,6 +781,34 @@ async function addUserFacts() {
   finally { if (btn) btn.disabled = false; }
 }
 
+// --- world view (Graphiti general facts) --------------------------------
+let worldviewLoaded = false;
+
+async function loadWorldviewFacts() {
+  const box = document.getElementById("worldviewOut");
+  box.textContent = "Loading…";
+  try {
+    const r = await api("/worldview-facts");
+    if (!r.facts.length) { box.textContent = "(no facts)"; worldviewLoaded = true; return; }
+    box.textContent = r.facts.map((f, i) => (i + 1) + ". " + f).join("\n");
+    worldviewLoaded = true;
+  } catch (e) { box.textContent = ""; toast("World view: " + e.message, "err"); }
+}
+async function addWorldviewFacts() {
+  const raw = document.getElementById("worldviewInput").value;
+  const facts = raw.split("\n").map(s => s.trim()).filter(Boolean);
+  if (!facts.length) { toast("Enter at least one fact", "err"); return; }
+  const btn = document.querySelector("#worldview button[onclick='addWorldviewFacts()']");
+  if (btn) btn.disabled = true;
+  try {
+    await api("/worldview-facts", { method: "POST", body: { facts } });
+    toast("Facts ingested (Graphiti may take a moment)", "ok");
+    document.getElementById("worldviewInput").value = "";
+    await loadWorldviewFacts();
+  } catch (e) { toast("Add facts: " + e.message, "err"); }
+  finally { if (btn) btn.disabled = false; }
+}
+
 // --- architecture (rendered LangGraph diagrams) -------------------------
 let architectureLoaded = false;
 
@@ -801,6 +845,8 @@ function showTab(name) {
   window.scrollTo(0, 0);
   // graphs are slow to render (server-side network call) — load on first view
   if (name === "architecture" && !architectureLoaded) loadArchitecture();
+  // dumping every worldview episode hits Neo4j — load on first view
+  if (name === "worldview" && !worldviewLoaded) loadWorldviewFacts();
 }
 document.querySelectorAll("#tabs button").forEach(b =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));

@@ -38,7 +38,7 @@ from typing_extensions import TypedDict
 
 from app.config import get_settings
 from app.prompts import FACT_EXTRACTOR_SYSTEM_PROMPT
-from app.services.graphiti import ingest_facts, search_graph
+from app.services.graphiti import ingest_facts, list_episodes, search_graph
 
 settings = get_settings()
 BOT_NAME = settings.bot_name
@@ -122,6 +122,38 @@ async def search_world_view(query: str) -> str:
     return await search_worldview(query) or "No relevant facts found."
 
 
+# --- Storage access (Graphiti) ------------------------------------------------
+
+
+async def add_worldview_facts(facts: List[str]) -> None:
+    """
+    Setter method.
+    Ingest new general facts into the world-view Graphiti partition.
+
+    One episode per fact; Graphiti's own dedup / temporal conflict resolution
+    merges them against what is already stored. Used by the pipeline's
+    ingest_node path and by the admin surfaces (HTTP API). Slow — each fact is
+    several LLM round-trips (see graphiti.ingest_facts).
+    """
+    await ingest_facts(
+        facts,
+        group_id=_WORLDVIEW_GROUP_ID,
+        source_description="Rachel worldview fact",
+        name_prefix="worldview",
+    )
+
+
+async def get_worldview_facts() -> List[str]:
+    """
+    Getter method.
+    Return every fact episode stored in the world view, oldest first.
+
+    Reads the raw ingested sentences straight off the worldview partition — the
+    full dump, not a search. Used by the admin surfaces (HTTP API).
+    """
+    return await list_episodes(_WORLDVIEW_GROUP_ID)
+
+
 # --- Nodes -------------------------------------------------------------------
 
 
@@ -151,12 +183,7 @@ async def ingest_node(state: WorldviewState) -> Dict:
     facts = state["extracted_facts"]
     # World-view facts are general knowledge, not chat-scoped, so the episode
     # name is deliberately chat-agnostic — only timestamped to stay unique.
-    await ingest_facts(
-        facts,
-        group_id=_WORLDVIEW_GROUP_ID,
-        source_description="Rachel worldview fact",
-        name_prefix="worldview",
-    )
+    await add_worldview_facts(facts)
     print(f"{tag} ingested {len(facts)} fact(s) into Graphiti")
     return {}
 

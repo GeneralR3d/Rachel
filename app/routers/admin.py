@@ -15,6 +15,7 @@ from app import repository
 from app import prompts
 from app.prompts import USER_PROFILE_FIELDS
 from app.services import userfacts
+from app.services import worldview
 from scripts.draw_graphs import GRAPHS, render_graphs
 
 router = APIRouter()
@@ -195,6 +196,44 @@ async def add_user_facts(user_id: int, body: UserFactsIn) -> UserFactsOut:
     except Exception as e:  # noqa: BLE001 — surface graph errors to the client
         raise HTTPException(status_code=502, detail=f"Failed to ingest user facts: {e}")
     return UserFactsOut(user_id=user_id, facts=facts)
+
+
+# World-view facts live in the Graphiti knowledge graph (single "worldview"
+# group_id), so — exactly like user facts — the only admin operations are ADD
+# (ingest new fact episodes, same path as the pipeline's ingest_node) and GET
+# (dump every episode in the partition). There is no edit/delete: Graphiti's
+# own dedup/temporal conflict resolution supersedes old facts on ingest.
+
+
+class WorldviewFactsOut(BaseModel):
+    facts: list[str]
+
+
+class WorldviewFactsIn(BaseModel):
+    facts: list[str]
+
+
+@router.get("/worldview-facts", response_model=WorldviewFactsOut)
+async def read_worldview_facts() -> WorldviewFactsOut:
+    """Every fact episode stored in the world view, oldest first."""
+    try:
+        facts = await worldview.get_worldview_facts()
+    except Exception as e:  # noqa: BLE001 — surface graph errors to the client
+        raise HTTPException(status_code=502, detail=f"Failed to read world-view facts: {e}")
+    return WorldviewFactsOut(facts=facts)
+
+
+@router.post("/worldview-facts", response_model=WorldviewFactsOut)
+async def add_worldview_facts(body: WorldviewFactsIn) -> WorldviewFactsOut:
+    """Ingest new world-view facts. Slow: each fact is several LLM round-trips."""
+    facts = [f.strip() for f in body.facts if f.strip()]
+    if not facts:
+        raise HTTPException(status_code=422, detail="No non-empty facts provided")
+    try:
+        await worldview.add_worldview_facts(facts)
+    except Exception as e:  # noqa: BLE001 — surface graph errors to the client
+        raise HTTPException(status_code=502, detail=f"Failed to ingest world-view facts: {e}")
+    return WorldviewFactsOut(facts=facts)
 
 
 class ProfileFieldOut(BaseModel):
