@@ -96,21 +96,43 @@ DEFAULT_MOOD = "default"
 # summarizer keeps seeing the whole conversation, undivided).
 ROUTER_NODE_DIVIDER = (
     "[EVERYTHING ABOVE IS EARLIER CONVERSATION, ALREADY HANDLED — CONTEXT ONLY. "
-    "BASE YOUR DECISION ONLY ON THE MESSAGE(S) BELOW.]"
+    "BASE YOUR DECISION ONLY ON THE MESSAGE(S) BELOW. IF THE MESSAGE(S) BELOW ARE "
+    "UNCLEAR OR YOU DON'T KNOW WHAT THEY ARE RESPONDING TO, REFER TO THE "
+    "CONVERSATION ABOVE FOR CONTEXT.]"
 )
 CONTEXT_NODE_DIVIDER = (
     "[EVERYTHING ABOVE IS EARLIER CONVERSATION, ALREADY HANDLED — CONTEXT ONLY. "
-    "GATHER BACKGROUND NEEDED TO RESPOND TO THE NEW MESSAGE(S) BELOW.]"
+    "GATHER BACKGROUND NEEDED TO RESPOND TO THE NEW MESSAGE(S) BELOW. IF THE "
+    "MESSAGE(S) BELOW ARE UNCLEAR OR YOU DON'T KNOW WHAT THEY ARE RESPONDING TO, "
+    "REFER TO THE CONVERSATION ABOVE FOR CONTEXT.]"
 )
 RESPONDER_NODE_DIVIDER = (
     "[EVERYTHING ABOVE IS EARLIER CONVERSATION YOU HAVE ALREADY RESPONDED TO — "
     "CONTEXT ONLY. REPLY ONLY TO THE NEW MESSAGE(S) BELOW; DO NOT RE-ANSWER "
-    "ANYTHING ABOVE.]"
+    "ANYTHING ABOVE. IF THE MESSAGE(S) BELOW ARE UNCLEAR OR YOU DON'T KNOW WHAT "
+    "THEY ARE RESPONDING TO, REFER TO THE CONVERSATION ABOVE FOR CONTEXT.]"
 )
 
 
-def _partition_index(history: List[Dict[str, Any]]) -> int:
-    """First 'new' index = one past Rachel's last message; 0 if she has none here."""
+def _partition_index(
+    history: List[Dict[str, Any]], watermark: Optional[int] = None
+) -> int:
+    """First 'new' (not-yet-responded-to) index in ``history``.
+
+    With a ``watermark`` (the highest telegram_message_id Rachel has already
+    responded to) the boundary is the first *non-bot* message whose id exceeds
+    it. This is more robust than keying off Rachel's last reply position: when a
+    message arrives while Rachel is still generating a reply, her eventual reply
+    gets a *higher* send-time id and so sorts to the buffer tail, hiding that
+    newer-arrived (lower-id) message behind it — "one past Rachel's last message"
+    would then wrongly treat the unanswered message as settled context.
+
+    Without a watermark it falls back to one past Rachel's last message; 0 if she
+    has none here. (The watermark path no longer uses a single index — see
+    ``_is_new_message`` / ``_build_history_messages`` — because a message that is
+    "new" by id but a bot turn must still render as context, which a single
+    boundary can't express when the buffer is in send-time order.)
+    """
     last_bot = -1
     for i, entry in enumerate(history):
         if entry["sender"] == BOT_NAME:
@@ -118,27 +140,53 @@ def _partition_index(history: List[Dict[str, Any]]) -> int:
     return last_bot + 1
 
 
+def _is_new_message(entry: Dict[str, Any], watermark: int) -> bool:
+    """True when ``entry`` is an unanswered *user* message (a non-bot turn whose
+    id exceeds the watermark). Rachel's own turns are never "new" — they're always
+    already-said context, even when their send-time id sorts them past the
+    watermark (which happens when the message that triggered them arrived mid-send)."""
+    return entry.get("sender") != BOT_NAME and entry.get("telegram_message_id", 0) > watermark
+
+
 def _build_history_messages(
-    history: List[Dict[str, Any]], divider_text: Optional[str] = None
+    history: List[Dict[str, Any]],
+    divider_text: Optional[str] = None,
+    watermark: Optional[int] = None,
 ) -> List[Any]:
-    """Render history as AIMessage/HumanMessage turns.
+    """Render history as AIMessage/HumanMessage turns, optionally split by a divider.
 
     Messages are built as concrete Message objects (not templated tuples) so any
     literal '{' or '}' in user content passes through verbatim rather than being
-    parsed as an f-string placeholder. When ``divider_text`` is given and there is
-    both a prior block and a new block, a HumanMessage divider is inserted before
-    the first 'new' message so the node acts only on what follows it.
+    parsed as an f-string placeholder.
+
+    When ``divider_text`` is given, a HumanMessage divider is placed between the
+    already-handled context and the new messages to act on. With a ``watermark``,
+    "new" means *unanswered user messages* (``_is_new_message``): every bot turn is
+    rendered as context above the divider regardless of its send-time id, so
+    Rachel's own last reply — which sorts to the tail when the triggering message
+    arrived while she was still sending — can't slip below the divider and get
+    re-generated. Without a watermark it falls back to the positional split at
+    ``_partition_index`` (one past Rachel's last message).
     """
-    idx = _partition_index(history)
+    def render(entry: Dict[str, Any]) -> Any:
+        text = f"{entry['sender']}: {entry['content']}"
+        return AIMessage(content=text) if entry["sender"] == BOT_NAME else HumanMessage(content=text)
+
+    if divider_text is not None and watermark is not None:
+        # Split into context vs. new, preserving each group's relative order. Bot
+        # turns always land in context. Only emit a divider when both sides exist.
+        context = [e for e in history if not _is_new_message(e, watermark)]
+        new = [e for e in history if _is_new_message(e, watermark)]
+        if context and new:
+            return [render(e) for e in context] + [HumanMessage(content=divider_text)] + [render(e) for e in new]
+        return [render(e) for e in history]
+
+    idx = _partition_index(history, watermark)
     msgs: List[Any] = []
     for i, entry in enumerate(history):
         if divider_text is not None and i == idx and 0 < idx < len(history):
             msgs.append(HumanMessage(content=divider_text))
-        msgs.append(
-            AIMessage(content=f"{entry['sender']}: {entry['content']}")
-            if entry["sender"] == BOT_NAME
-            else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
-        )
+        msgs.append(render(entry))
     return msgs
 
 
@@ -262,6 +310,9 @@ class GraphState(TypedDict):
     senders: Dict[int, str]  # sender_user_id -> display name
     must_reply: bool  # set by caller: Rachel was tagged/replied-to in a group
     is_private: bool  # set by caller: 1-on-1 DM (selects the PM router prompt)
+    # Highest telegram_message_id Rachel has already responded to; drives the
+    # "already handled vs. new" divider (see _partition_index). None on first contact.
+    responded_watermark: Optional[int]
     should_reply: bool
     schedule_context: str  # extra schedule context gathered by context_fetcher_node
     world_view: str  # world-view facts gathered by context_fetcher_node
@@ -350,7 +401,9 @@ async def router_node(state: GraphState) -> Dict:
     # Only show the router the most recent messages — it just needs the latest
     # context to judge whether a reply is warranted, not the whole buffer.
     recent_history = state["history"][-ROUTER_CONTEXT_MSGS:]
-    history_msgs = _build_history_messages(recent_history, divider_text=ROUTER_NODE_DIVIDER)
+    history_msgs = _build_history_messages(
+        recent_history, divider_text=ROUTER_NODE_DIVIDER, watermark=state.get("responded_watermark")
+    )
 
     # In a 1-on-1 DM use the PM-specific gate (filters out low-information
     # acknowledgements and already-answered messages); in groups use the default
@@ -479,7 +532,9 @@ async def _run_context_fetcher(state: GraphState) -> Tuple[str, str, str, str]:
     yields both their facts and their profile; all other (calendar) tools are
     concatenated into the schedule context."""
     senders = state.get("senders") or {}
-    history_msgs = _build_history_messages(state["history"], divider_text=CONTEXT_NODE_DIVIDER)
+    history_msgs = _build_history_messages(
+        state["history"], divider_text=CONTEXT_NODE_DIVIDER, watermark=state.get("responded_watermark")
+    )
 
     now = datetime.now(SGT)
     formatted_datetime = (
@@ -648,7 +703,9 @@ async def responder_node(state: GraphState) -> Dict:
         # injected here — context_fetcher_node fetches it via tools and it
         # arrives through {schedule_context}.
 
-        history_msgs = _build_history_messages(state["history"], divider_text=RESPONDER_NODE_DIVIDER)
+        history_msgs = _build_history_messages(
+            state["history"], divider_text=RESPONDER_NODE_DIVIDER, watermark=state.get("responded_watermark")
+        )
         history_tokens = sum(_count_tokens(f"{m.type}: {m.content}") for m in history_msgs)
         print(f"[responder] history fetched (count={len(history_msgs)}, tokens={history_tokens})")
         pprint(history_msgs)
@@ -744,6 +801,7 @@ async def get_response(
     senders: Dict[int, str] | None = None,
     must_reply: bool = False,
     is_private: bool = False,
+    responded_watermark: int | None = None,
 ) -> Tuple[str, str, str | None, float]:
     """Run the LangGraph pipeline and return ``(response_text, reason, new_summary, elapsed_seconds)``.
 
@@ -769,6 +827,7 @@ async def get_response(
         "senders": senders or {},
         "must_reply": must_reply,
         "is_private": is_private,
+        "responded_watermark": responded_watermark,
         "should_reply": True,
         "schedule_context": "",
         "world_view": "",

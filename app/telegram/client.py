@@ -65,6 +65,10 @@ class BufferedMessage(BaseModel):
         return {
             "sender": self.sender_name,
             "content": self.content,
+            # Carried so the responder's divider can partition on a causal
+            # watermark (highest id already responded to) rather than on
+            # Rachel's last-reply position — see llm._partition_index.
+            "telegram_message_id": self.telegram_message_id,
         }
     def to_llm_dict_full(self) -> Dict[str, Any]:
         return {
@@ -87,6 +91,13 @@ last_message_time: Dict[int, float] = {}
 # prevents two replies from interleaving their sends and from reading stale
 # context (Rachel not "seeing" what she just said). Created lazily per chat_id.
 reply_locks: Dict[int, asyncio.Lock] = {}
+# Per-chat causal watermark: the highest telegram_message_id Rachel has already
+# responded to (max id of the context she last replied against). Passed to
+# get_response so the divider partitions on "what's new since I last replied"
+# instead of on Rachel's last-reply *position* in the buffer — which is unreliable
+# because a message arriving mid-generation sorts (by send-time id) *behind* her
+# later reply, hiding it. Monotonic; never rewound.
+responded_watermark: Dict[int, int] = {}
 
 
 # helper functions
@@ -182,6 +193,15 @@ async def _reply(event):
             
         context_msgs = buffer[-N_PAST_MSG_REQUIRED:]
         context = [m.to_llm_dict() for m in context_msgs]
+        # Causal watermark for the divider: the highest id in the context Rachel
+        # is about to respond against. Anything that arrives later (even mid-send,
+        # which by send-time id sorts behind her reply) counts as new next time.
+        # Advance it now, before generation, so a message that lands during this
+        # LLM call is still treated as unanswered on the following reply.
+        watermark = responded_watermark.get(chat_id)
+        if context_msgs:
+            new_watermark = max(m.telegram_message_id for m in context_msgs)
+            responded_watermark[chat_id] = max(watermark or 0, new_watermark)
         # Unique senders in the context (excluding Rachel herself) as an
         # id -> name map, so the responder can pull each participant's stored
         # facts/preferences and render them by name. Later messages win on name
@@ -207,6 +227,7 @@ async def _reply(event):
                 senders=senders,
                 must_reply=must_reply,
                 is_private=is_private,
+                responded_watermark=watermark,
             )
         except Exception as e:
             print(f"[{chat_id}] get_response failed ({type(e).__name__}: {e}), retrying once...")
@@ -217,6 +238,7 @@ async def _reply(event):
                 senders=senders,
                 must_reply=must_reply,
                 is_private=is_private,
+                responded_watermark=watermark,
             )
 
         if new_summary is not None:
@@ -435,13 +457,19 @@ async def new_message(event):
     # On first contact for this chat, pre-load recent history into the buffer
     if chat_id not in current_messages_buffer:
         current_messages_buffer[chat_id] = []
+        # Tag Rachel's own past messages by id, not by resolved name: get_history
+        # resolves her turns to her Telegram first name (via COALESCE), which need
+        # not equal BOT_NAME. The downstream partition/AIMessage logic keys off
+        # sender == BOT_NAME, so normalize her seeded turns to BOT_NAME here.
+        me = await client.get_me()
         past = await get_history(chat_id, N_PAST_MSG_REQUIRED)
         for h in past:
+            is_bot = h["sender_user_id"] == me.id
             current_messages_buffer[chat_id].append(
                 BufferedMessage(
                     telegram_message_id=h["telegram_message_id"],
                     sender_user_id=h["sender_user_id"],
-                    sender_name=h["sender"],
+                    sender_name=BOT_NAME if is_bot else h["sender"],
                     content=h["content"],
                     is_persisted=True,
                 )
