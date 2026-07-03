@@ -23,15 +23,16 @@ from app.repository import (
     delete_summary,
     get_history,
     get_history_min_id,
+    get_last_processed_message_id,
     get_summary,
     get_summary_mood,
     rewrite_history,
+    set_last_processed_message_id,
     set_summary,
     upsert_user,
 )
 from app.services.llm import get_chat_mood, get_response, set_chat_mood
-from app.services.userfacts import update_user_facts
-from app.services.worldview import update_worldview
+from app.services.memory import update_memories
 from app.telegram.bot import ADMIN
 from app.utils import parse_history
 
@@ -41,7 +42,7 @@ client = TelegramClient("anon", settings.telegram_api_id, settings.telegram_api_
 
 # constants
 REPLY_DELAY = 7             # seconds to wait after last message before replying
-CHAT_BLACKOUT_TIME = 60 * 3          # 3 min of inactivity before flushing buffer to DB
+CHAT_BLACKOUT_TIME = 60          # 3 min of inactivity before flushing buffer to DB
 N_PAST_MSG_REQUIRED = 40         # messages pre-loaded on first contact and fed to LLM as context
 MAX_BUFFER_LEN = 150             # flush to DB immediately if buffer hits this length
 TYPING_SPEED = 22                # characters per second
@@ -70,6 +71,7 @@ class BufferedMessage(BaseModel):
             "sender": self.sender_name,
             "sender_user_id": self.sender_user_id,
             "content": self.content,
+            "telegram_message_id": self.telegram_message_id,
         }
 
 
@@ -326,11 +328,20 @@ async def finalize_conversation(chat_id: int, delay: float):
     # Snapshot the conversation summary before _flush_chat pops it from
     # pending_summaries; falls back to the persisted summary in DB.
     summary = pending_summaries.get(chat_id) or await get_summary(chat_id)
+    # Memory-pipeline watermark: only messages newer than this are extracted from
+    # (older ones were already processed in a previous finalize). Read before the
+    # pipelines run and passed in; both share this single per-chat value.
+    last_processed_id = await get_last_processed_message_id(chat_id)
     await _flush_chat(chat_id)
     if conversation:
-        asyncio.create_task(update_worldview(conversation, chat_id))
-        asyncio.create_task(update_user_facts(conversation, summary, chat_id))
-        print(f"[{chat_id}] Worldview + user-facts pipelines called")
+        asyncio.create_task(update_memories(conversation, summary, chat_id, last_processed_id))
+        # Advance the watermark once to the newest message we just handed off, so
+        # the next finalize treats everything up to here as already-processed.
+        # Done here (not inside the pipelines) so it happens exactly once.
+        new_last_id = max(int(m["telegram_message_id"]) for m in conversation)
+        if new_last_id > last_processed_id:
+            await set_last_processed_message_id(chat_id, new_last_id)
+        print(f"[{chat_id}] Memory pipelines called")
 
 
 async def flush_all_buffers() -> None:

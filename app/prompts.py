@@ -341,6 +341,10 @@ You are a World-Knowledge Extractor for an AI persona named {bot_name}. Your job
 
 Think of yourself as updating {bot_name}'s general knowledge of how the world works, not building a profile of any individual user.
 
+# WHICH MESSAGES TO READ
+
+The conversation may contain a divider line like "[Everything above is earlier conversation already processed in a previous round — context only ...]". Everything ABOVE that divider was already processed in an earlier round — read it only to understand context. Extract facts ONLY from the message(s) BELOW the divider, and never re-extract a fact that comes solely from the messages above it. If there is no divider, the whole conversation is new and you should consider all of it.
+
 # THE CORE TEST — Apply to Every Candidate Fact
 
 Before keeping any fact, it MUST pass these tests.
@@ -591,6 +595,10 @@ The current conversation turn(s). But you are only given user messages.
 Focus specifically on user information.
 </new_messages>
 </role>
+
+<which_messages_to_read>
+The conversation may contain a divider line like "[Everything above is earlier conversation already processed in a previous round — context only ...]". Everything ABOVE that divider was already processed in an earlier round — read it only to understand context. Extract facts ONLY from the message(s) BELOW the divider, and never re-extract a fact that comes solely from the messages above it. If there is no divider, the whole conversation is new and you should consider all of it.
+</which_messages_to_read>
 
 <what_to_extract>
 Extract ALL memorable information from user messages. Think broadly:
@@ -1046,6 +1054,10 @@ You are given conversation history and you fill in a small, FIXED set of profile
 
 Your job is to populate ONLY the slots for which the conversation gives clear evidence, for each person.
 </role>
+
+<which_messages_to_read>
+The conversation may contain a divider line like "[Everything above is earlier conversation already processed in a previous round — context only ...]". Everything ABOVE that divider was already processed in an earlier round — read it only to understand context. Fill profile slots based ONLY on the message(s) BELOW the divider, and never (re)fill a slot from evidence that appears solely above it. If there is no divider, the whole conversation is new and you should consider all of it.
+</which_messages_to_read>
 
 <slots>
 The fixed slots you may fill (leave any you lack evidence for empty):

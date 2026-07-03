@@ -14,10 +14,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import session_scope
 from app.models import (
+    ChatState,
     History,
     PersonalityTrait,
     ScheduleActivity,
-    SummaryMood,
     SystemPrompt,
     User,
     UserFactsPreferences,
@@ -439,7 +439,7 @@ async def rewrite_history(chat_id: int, parsed_history: list[dict]) -> None:
 async def get_summary(chat_id: int) -> Union[str, None]:
     async with session_scope() as session:
         return await session.scalar(
-            select(SummaryMood.summary).where(SummaryMood.chat_id == chat_id)
+            select(ChatState.summary).where(ChatState.chat_id == chat_id)
         )
 
 
@@ -448,8 +448,8 @@ async def get_summary_mood(chat_id: int) -> tuple[Union[str, None], Union[str, N
     async with session_scope() as session:
         row = (
             await session.execute(
-                select(SummaryMood.summary, SummaryMood.mood).where(
-                    SummaryMood.chat_id == chat_id
+                select(ChatState.summary, ChatState.mood).where(
+                    ChatState.chat_id == chat_id
                 )
             )
         ).first()
@@ -459,9 +459,9 @@ async def get_summary_mood(chat_id: int) -> tuple[Union[str, None], Union[str, N
 async def set_summary(chat_id: int, summary: str, mood: str = "default") -> None:
     """Upsert the summary and last-detected mood for a chat."""
     async with session_scope() as session:
-        stmt = pg_insert(SummaryMood).values(chat_id=chat_id, summary=summary, mood=mood)
+        stmt = pg_insert(ChatState).values(chat_id=chat_id, summary=summary, mood=mood)
         stmt = stmt.on_conflict_do_update(
-            index_elements=[SummaryMood.chat_id],
+            index_elements=[ChatState.chat_id],
             set_={"summary": summary, "mood": mood},
         )
         await session.execute(stmt)
@@ -469,7 +469,32 @@ async def set_summary(chat_id: int, summary: str, mood: str = "default") -> None
 
 async def delete_summary(chat_id: int) -> None:
     async with session_scope() as session:
-        await session.execute(delete(SummaryMood).where(SummaryMood.chat_id == chat_id))
+        await session.execute(delete(ChatState).where(ChatState.chat_id == chat_id))
+
+
+async def get_last_processed_message_id(chat_id: int) -> int:
+    """Return the memory-pipeline high-water mark for a chat (0 if none yet)."""
+    async with session_scope() as session:
+        val = await session.scalar(
+            select(ChatState.last_processed_message_id).where(ChatState.chat_id == chat_id)
+        )
+    return val or 0
+
+
+async def set_last_processed_message_id(chat_id: int, message_id: int) -> None:
+    """Advance a chat's memory-pipeline watermark, inserting the row if needed.
+
+    Only ``last_processed_message_id`` is written; summary/mood are left to their
+    own upsert (or the row's defaults on first insert)."""
+    async with session_scope() as session:
+        stmt = pg_insert(ChatState).values(
+            chat_id=chat_id, last_processed_message_id=message_id
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[ChatState.chat_id],
+            set_={"last_processed_message_id": message_id},
+        )
+        await session.execute(stmt)
 
 
 # --- user profiles ----------------------------------------------------------

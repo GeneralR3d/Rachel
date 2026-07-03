@@ -29,7 +29,6 @@ from typing import Any, Dict, List
 
 import tiktoken
 
-from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
 from langchain_openrouter import ChatOpenRouter
@@ -69,7 +68,14 @@ class ExtractorOutput(BaseModel):
 
 
 class WorldviewState(TypedDict):
-    conversation: List[Dict[str, Any]]
+    # Pre-divided extraction history built once upstream (in
+    # app/services/memory.py::update_memories): the conversation rendered as LLM
+    # turns with the "already-processed" divider already inserted. The fact
+    # extractor reads these directly instead of re-dividing.
+    extraction_msgs: List[Any]
+    # False when every message is at or below the watermark (nothing new to
+    # extract), letting fact_extractor_node short-circuit.
+    has_new: bool
     extracted_facts: List[str]
     # Originating chat, threaded through purely so node logs can be tagged and
     # disambiguated when multiple chats finalize concurrently.
@@ -121,15 +127,12 @@ async def search_world_view(query: str) -> str:
 
 async def fact_extractor_node(state: WorldviewState) -> Dict:
     tag = _tag(state.get("chat_id"))
-    # History is built as concrete Message objects (not templated tuples) so any
-    # literal '{' or '}' in user content is passed through verbatim rather than
-    # parsed as an f-string placeholder, which would crash from_messages.
-    history_msgs = [
-        AIMessage(content=f"{entry['sender']}: {entry['content']}")
-        if entry["sender"] == BOT_NAME
-        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
-        for entry in state["conversation"]
-    ]
+    # extraction_msgs is pre-divided upstream: older (already-processed) messages
+    # sit above the divider as context, only newer ones below are to be extracted.
+    if not state.get("has_new"):
+        print(f"{tag} no new messages since last processed; skipping extraction")
+        return {"extracted_facts": []}
+    history_msgs = state["extraction_msgs"]
     system_msgs = ChatPromptTemplate.from_messages(
         [("system", FACT_EXTRACTOR_SYSTEM_PROMPT)]
     ).format_messages(bot_name=BOT_NAME)
@@ -181,19 +184,27 @@ _graph = _build_graph()
 
 
 async def update_worldview(
-    conversation: List[Dict[str, str]], chat_id: int | None = None
+    extraction_msgs: List[Any],
+    has_new: bool,
+    chat_id: int | None = None,
 ) -> List[str] | None:
     """Extract facts from a finished conversation and ingest them into Graphiti.
+
+    ``extraction_msgs`` is the pre-divided extraction history and ``has_new``
+    whether it contains any not-yet-processed messages — both built once upstream
+    by app/services/memory.py::update_memories (the divider helper is no longer
+    called here).
 
     Returns the list of newly ingested facts, or None when nothing new was
     learned (or on error). Never raises — memory upkeep must not crash the caller.
     """
-    if not conversation:
+    if not extraction_msgs:
         return None
 
     tag = _tag(chat_id)
     state: WorldviewState = {
-        "conversation": conversation,
+        "extraction_msgs": extraction_msgs,
+        "has_new": has_new,
         "extracted_facts": [],
         "chat_id": chat_id,
     }

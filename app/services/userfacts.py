@@ -44,7 +44,6 @@ from pprint import pprint
 
 import tiktoken
 
-from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
 from langchain_openrouter import ChatOpenRouter
@@ -236,12 +235,22 @@ class ProfileExtractorOutput(BaseModel):
 
 
 class UserFactsState(TypedDict):
-    conversation: List[Dict[str, Any]]
-    # Maps each sender name in the conversation to its numeric user_id.
+    # Maps each sender name in the (whole) conversation to its numeric user_id.
+    # Built at the entry point from the structured conversation — the only thing
+    # still derived from it, since extraction_msgs (rendered strings) carry no ids
+    # and resolution must cover people who spoke only in the context portion.
     name_to_id: Dict[str, int]
     # Narrative summary of the just-finished conversation, injected into the
     # extractor prompt as {chat_summary} to enrich extractions.
     summary: str
+    # Pre-divided extraction history built once upstream (in
+    # app/services/memory.py::update_memories): the conversation rendered as LLM
+    # turns with the "already-processed" divider inserted. Both the facts and
+    # profile branches read these directly.
+    extraction_msgs: List[Any]
+    # False when every message is at or below the watermark (nothing new to
+    # extract), letting the facts branch short-circuit.
+    has_new: bool
     # Extracted new facts keyed by user_id.
     extracted: Dict[int, List[str]]
     # Originating chat, threaded through purely so node logs can be tagged and
@@ -303,16 +312,13 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
     tag = _tag(state.get("chat_id"))
     # Only the sender NAME is shown to the model — it is far less likely to
     # hallucinate a name than a numeric id. We resolve names back to ids below
-    # via name_to_id.
-    # History is built as concrete Message objects (not templated tuples) so any
-    # literal '{' or '}' in user content is passed through verbatim rather than
-    # parsed as an f-string placeholder, which would crash from_messages.
-    history_msgs = [
-        AIMessage(content=f"{entry['sender']}: {entry['content']}")
-        if entry["sender"] == BOT_NAME
-        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
-        for entry in state["conversation"]
-    ]
+    # via name_to_id. extraction_msgs is pre-divided upstream: older
+    # (already-processed) messages sit above the divider as context, only newer
+    # ones below are to be extracted.
+    if not state.get("has_new"):
+        print(f"{tag} no new messages since last processed; skipping extraction")
+        return {"extracted": {}}
+    history_msgs = state["extraction_msgs"]
 
     now = datetime.now(SGT)
     formatted_date = (
@@ -404,12 +410,14 @@ async def profile_extraction_update_node(state: UserFactsState) -> Dict:
 
     tag = _profile_tag(state.get("chat_id"))
     name_to_id = state["name_to_id"]
-    history_msgs = [
-        AIMessage(content=f"{entry['sender']}: {entry['content']}")
-        if entry["sender"] == BOT_NAME
-        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
-        for entry in state["conversation"]
-    ]
+    # extraction_msgs is pre-divided upstream: older (already-processed) messages
+    # sit above the divider as context, only newer ones below are to be extracted.
+    # Short-circuit when there is nothing new so we neither re-derive profile slots
+    # from already-processed messages nor spend an LLM call.
+    if not state.get("has_new"):
+        print(f"{tag} no new messages since last processed; skipping profile extraction")
+        return {}
+    history_msgs = state["extraction_msgs"]
 
     # Show the model each participant's CURRENT stored profile so it can skip
     # already-known slots and concentrate on the empty ones / genuine updates.
@@ -528,9 +536,19 @@ _graph = _build_graph()
 
 
 async def update_user_facts(
-    conversation: List[Dict[str, Any]], summary: str = "", chat_id: int | None = None
+    conversation: List[Dict[str, Any]],
+    extraction_msgs: List[Any],
+    has_new: bool,
+    summary: str = "",
+    chat_id: int | None = None,
 ) -> None:
     """Extract per-user facts from a finished conversation and ingest into Graphiti.
+
+    ``extraction_msgs`` / ``has_new`` are the pre-divided extraction history built
+    once upstream (app/services/memory.py::update_memories); both branches extract
+    only from messages newer than the watermark. The raw ``conversation`` is used
+    solely to build the name→id map (extraction_msgs carry no ids, and resolution
+    must cover people who spoke only in the already-processed context portion).
 
     Also runs the parallel profile branch, which still writes to Postgres.
     Never raises — errors are caught and logged so memory upkeep can't crash the
@@ -549,9 +567,10 @@ async def update_user_facts(
     }
 
     state: UserFactsState = {
-        "conversation": conversation,
         "name_to_id": name_to_id,
         "summary": summary or "",
+        "extraction_msgs": extraction_msgs,
+        "has_new": has_new,
         "extracted": {},
         "chat_id": chat_id,
     }
