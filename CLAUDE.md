@@ -26,6 +26,9 @@ docker compose up -d db neo4j
 uv run python -m scripts.add_worldview_fact "Chagee is a bubble tea brand"  # ingest one fact
 uv run python -m scripts.ingest_worldview_md path/to/facts.md               # bulk-ingest a markdown file
 uv run python -m scripts.clear_graph                                        # WIPE the entire Neo4j graph (typed confirmation)
+
+# Render the three LangGraph pipelines to PNGs in the repo root (also importable as scripts.draw_graphs.render_graphs())
+uv run python -m scripts.draw_graphs
 ```
 
 Copy `template.env` to `.env` and fill in the required values before running. Rachel's own Telegram account credentials are entered interactively during `scripts.login` and saved to `anon.session` — they are never in `.env`.
