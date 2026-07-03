@@ -386,10 +386,27 @@ def checker_node(state: GraphState) -> Dict:
     return {}
 
 
+def _has_new_messages(state: GraphState) -> bool:
+    """True when the history holds at least one unanswered user message (a non-bot
+    turn past the watermark). With no watermark (first contact) everything counts
+    as new. Mirrors the divider logic in _build_history_messages so the graph and
+    the client agree on what 'nothing to reply to' means."""
+    watermark = state.get("responded_watermark")
+    if watermark is None:
+        return True
+    return any(_is_new_message(e, watermark) for e in state["history"])
+
+
 def _route_after_checker(state: GraphState):
     """Conditional edge: if the caller forced a reply (1-on-1 chat or Rachel was
     tagged), skip the router and fan out to the summarizer + context_fetcher.
     Otherwise let the router decide whether a reply is warranted."""
+    # "Nothing new" overrides everything, including must_reply: if there is nothing
+    # unanswered since the watermark there is nothing to reply to, and running on a
+    # divider-less flat transcript would only risk a repeat (defense-in-depth for
+    # the client's shield-race redundant reply). Short-circuit to END.
+    if not _has_new_messages(state):
+        return END
     if state.get("must_reply", False):
         return ["summarizer_node", "context_fetcher_node"]
     return "router_node"
@@ -771,6 +788,7 @@ def _build_graph():
             "summarizer_node": "summarizer_node",
             "context_fetcher_node": "context_fetcher_node",
             "router_node": "router_node",
+            END: END,
         },
     )
     # Router gates everything: if no reply is warranted, jump straight to END.

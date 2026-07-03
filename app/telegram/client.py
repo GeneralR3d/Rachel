@@ -229,6 +229,26 @@ async def _reply(event):
         is_private = bool(event.is_private)
         must_reply = pending_mention.pop(chat_id, False) or bool(event.mentioned)
 
+        # Guard against the shield-race redundant reply: a message that arrived
+        # while an earlier reply was already committed (past its REPLY_DELAY, mid
+        # get_response) gets both absorbed into that reply's context AND scheduled
+        # its own wait_task. When that task fires, everything in the slice is either
+        # a bot turn or already <= the watermark the earlier reply advanced, so
+        # there is genuinely nothing new to answer. Replying anyway makes Rachel
+        # re-answer the last user turn (the divider collapses to a flat transcript
+        # in _build_history_messages) — i.e. she repeats herself. Bail before we
+        # spend an LLM call or send. "Nothing new" overrides must_reply: an @mention
+        # only warrants a reply if the message carrying it is itself unanswered, so a
+        # stale/already-consumed mention with no new content must not fire again.
+        has_new = any(
+            m.sender_user_id != me.id
+            and m.telegram_message_id > (watermark if watermark is not None else -1)
+            for m in context_msgs
+        )
+        if not has_new:
+            print(f"[{chat_id}] Nothing new since watermark {watermark} — skipping redundant reply")
+            return
+
         try:
             response, response_reason, new_summary, load_time = await get_response(
                 history=context,
