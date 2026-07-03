@@ -165,22 +165,24 @@ async def search_user_info(user_id: int, query: str | None = None) -> tuple[str,
 
 
 @tool("search_user_info")
-async def search_user_info_tool(user_id: int, query: str) -> str:
+async def search_user_info_tool(name: str, query: str) -> str:
     """Recall what Rachel remembers about ONE conversation participant.
 
     Each participant has their own memory: durable personal facts and preferences
-    learned from past conversations (relationships, plans, likes/dislikes, ongoing situations) plus a structured profile of core attributes. 
-    Use this to recall what Rachel already knows about a person so the responder can reply personally, 
+    learned from past conversations (relationships, plans, likes/dislikes, ongoing situations) plus a structured profile of core attributes.
+    Use this to recall what Rachel already knows about a person so the responder can reply personally,
     e.g. when they mention something about their own life or when personal context would clearly help.
 
     Args:
-        user_id: The numeric user id of the participant, exactly as listed in the
-            participants section of your instructions. Never invent an id.
+        name: The participant's name, exactly as listed in the participants
+            section of your instructions. Never invent a name.
         query: A focused, natural-language description of what to look up about
             this person (e.g. "job and internship plans", "food preferences").
     """
-    facts, _profile = await search_user_info(user_id, query)
-    return facts or "No stored facts about this user matched."
+    # Name -> user_id resolution happens in the context_fetcher pipeline
+    # (app.services.llm), which reads this tool call's args and invokes
+    # search_user_info directly; this body is only a fallback for standalone use.
+    return "Name-based lookup is resolved by the context fetcher pipeline."
 
 
 # --- Structured outputs ------------------------------------------------------

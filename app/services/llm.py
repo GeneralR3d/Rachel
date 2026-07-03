@@ -33,11 +33,12 @@ responder_node:      generates Rachel's reply using the mood detected in the
 """
 
 import asyncio
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
 SGT = timezone(timedelta(hours=8))
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from pprint import pprint
 
 import tiktoken
@@ -393,6 +394,37 @@ async def summarizer_node(state: GraphState) -> Dict:
     return {"mood": result.mood, "current_summary": result.summary}
 
 
+def _normalize_name(name: str) -> str:
+    """Reduce a name to a stripped, lowercase, alphanumeric-only key so the
+    model's loosely-typed name output can be matched against the participant
+    list regardless of whitespace, casing, or punctuation."""
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def _build_name_to_id(senders: Dict[int, str]) -> Dict[str, Optional[int]]:
+    """Map each participant's normalized name to their user_id. If two
+    participants normalize to the same key, that key is marked ambiguous
+    (mapped to ``None``) so it can never resolve to a wrong user."""
+    mapping: Dict[str, Optional[int]] = {}
+    for uid, name in senders.items():
+        key = _normalize_name(name)
+        if not key:
+            continue
+        if key in mapping and mapping[key] != uid:
+            mapping[key] = None  # ambiguous: two senders share this normalized name
+        else:
+            mapping[key] = uid
+    return mapping
+
+
+def _resolve_name_to_id(
+    raw_name: str, name_to_id: Dict[str, Optional[int]]
+) -> Optional[int]:
+    """Clean the model's raw name output and return the unique matching
+    user_id, or ``None`` if there's no unambiguous match."""
+    return name_to_id.get(_normalize_name(raw_name))
+
+
 async def _run_context_fetcher(state: GraphState) -> Tuple[str, str, str, str]:
     """Single pass for context_fetcher_node: one LLM call decides which tools to
     call, then those tools are run once. Factored out so the node can wrap it in
@@ -418,10 +450,10 @@ async def _run_context_fetcher(state: GraphState) -> Tuple[str, str, str, str]:
         f"the current day of week is {now.strftime('%A')}, "
         f"the current time is {now.strftime('%H:%M')}"
     )
-    participants = (
-        ", ".join(f"{name} (user_id {uid})" for uid, name in senders.items())
-        or "(unknown)"
-    )
+    participants = ", ".join(senders.values()) or "(unknown)"
+    # Normalized-name -> user_id map used to resolve the model's name output back
+    # to a concrete id downstream (the model only ever sees/emits names).
+    name_to_id = _build_name_to_id(senders)
     system_msgs = ChatPromptTemplate.from_messages(
         [("system", CONTEXT_FETCHER_SYSTEM_PROMPT)]
     ).format_messages(
@@ -463,10 +495,10 @@ async def _run_context_fetcher(state: GraphState) -> Tuple[str, str, str, str]:
             # structured profile (search_user_info) — facts go to the responder's
             # {user_facts} slot, profile to {user_profiles}, both labelled per
             # participant. Fails open, never crashes.
-            try:
-                user_id = int(tc["args"].get("user_id"))
-            except (TypeError, ValueError):
-                print(f"[context_fetcher] user-info search skipped (bad user_id: {tc['args']})")
+            raw_name = tc["args"].get("name", "")
+            user_id = _resolve_name_to_id(raw_name, name_to_id)
+            if user_id is None:
+                print(f"[context_fetcher] user-info search skipped (unresolved name: {tc['args']})")
                 continue
             query = tc["args"].get("query", "")
             try:
@@ -502,10 +534,6 @@ async def _run_context_fetcher(state: GraphState) -> Tuple[str, str, str, str]:
     world_view = "\n".join(world_view_parts)
     user_facts = "\n\n".join(user_facts_parts)
     user_profiles = "\n\n".join(user_profile_parts)
-    print(f"[context_fetcher] ===== fetched schedule context =====\n{schedule_context or '(none)'}")
-    print(f"[context_fetcher] ===== fetched world-view facts =====\n{world_view or '(none)'}")
-    print(f"[context_fetcher] ===== fetched user facts =====\n{user_facts or '(none)'}")
-    print(f"[context_fetcher] ===== fetched user profiles =====\n{user_profiles or '(none)'}")
     return schedule_context, world_view, user_facts, user_profiles
 
 

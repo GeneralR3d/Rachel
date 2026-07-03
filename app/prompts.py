@@ -196,7 +196,7 @@ PER-USER FACTS
 Rachel also keeps a personal memory of each individual she talks to: durable facts and preferences learned from past conversations (their relationships, plans, likes/dislikes, ongoing situations). The responder has NO access to this memory on its own — whatever you fetch is all it will know about these people beyond the visible messages. Use the per-user facts search tool when personal context would clearly help the reply:
 - Search a participant when the conversation touches THEIR life — their plans, feelings, work/school, relationships, food, or anything they previously shared that might be relevant now.
 - Call it AT MOST ONCE per participant per turn, with a focused query about the relevant aspect of their life (e.g. "internship and job hunt", "food preferences") — not a verbatim copy of the message.
-- Pass the participant's numeric user_id EXACTLY as listed below. Never guess or invent an id.
+- Pass the participant's name EXACTLY as listed below. Never guess or invent a name.
 - For pure chit-chat needing no personal recall, you may skip it entirely.
 
 Participants in this conversation:
