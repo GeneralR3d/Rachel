@@ -88,6 +88,59 @@ ROUTER_CONTEXT_MSGS = 15
 _chat_mood: Dict[int, str] = {}
 DEFAULT_MOOD = "default"
 
+# Rachel's own replies sit in the history we feed the graph (sender == BOT_NAME).
+# To stop her re-answering messages she already handled, we partition the history
+# at her *last* message: everything up to & including it is settled context, and
+# only the messages after it are "new" and to be acted on. A divider message is
+# inserted at that boundary in the router/context_fetcher/responder inputs (the
+# summarizer keeps seeing the whole conversation, undivided).
+ROUTER_NODE_DIVIDER = (
+    "[Everything above is earlier conversation, already handled — context only. "
+    "Base your decision ONLY on the message(s) below.]"
+)
+CONTEXT_NODE_DIVIDER = (
+    "[Everything above is earlier conversation, already handled — context only. "
+    "Gather background needed to respond to the NEW message(s) below.]"
+)
+RESPONDER_NODE_DIVIDER = (
+    "[Everything above is earlier conversation you have ALREADY responded to — "
+    "context only. Reply ONLY to the new message(s) below; do NOT re-answer "
+    "anything above.]"
+)
+
+
+def _partition_index(history: List[Dict[str, Any]]) -> int:
+    """First 'new' index = one past Rachel's last message; 0 if she has none here."""
+    last_bot = -1
+    for i, entry in enumerate(history):
+        if entry["sender"] == BOT_NAME:
+            last_bot = i
+    return last_bot + 1
+
+
+def _build_history_messages(
+    history: List[Dict[str, Any]], divider_text: Optional[str] = None
+) -> List[Any]:
+    """Render history as AIMessage/HumanMessage turns.
+
+    Messages are built as concrete Message objects (not templated tuples) so any
+    literal '{' or '}' in user content passes through verbatim rather than being
+    parsed as an f-string placeholder. When ``divider_text`` is given and there is
+    both a prior block and a new block, a HumanMessage divider is inserted before
+    the first 'new' message so the node acts only on what follows it.
+    """
+    idx = _partition_index(history)
+    msgs: List[Any] = []
+    for i, entry in enumerate(history):
+        if divider_text is not None and i == idx and 0 < idx < len(history):
+            msgs.append(HumanMessage(content=divider_text))
+        msgs.append(
+            AIMessage(content=f"{entry['sender']}: {entry['content']}")
+            if entry["sender"] == BOT_NAME
+            else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
+        )
+    return msgs
+
 
 def get_chat_mood(chat_id: int) -> str:
     """Return the last-detected mood for a chat (DEFAULT_MOOD if none)."""
@@ -297,12 +350,7 @@ async def router_node(state: GraphState) -> Dict:
     # Only show the router the most recent messages — it just needs the latest
     # context to judge whether a reply is warranted, not the whole buffer.
     recent_history = state["history"][-ROUTER_CONTEXT_MSGS:]
-    history_msgs = [
-        AIMessage(content=f"{entry['sender']}: {entry['content']}")
-        if entry["sender"] == BOT_NAME
-        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
-        for entry in recent_history
-    ]
+    history_msgs = _build_history_messages(recent_history, divider_text=ROUTER_NODE_DIVIDER)
 
     # In a 1-on-1 DM use the PM-specific gate (filters out low-information
     # acknowledgements and already-answered messages); in groups use the default
@@ -361,15 +409,9 @@ def _route_after_router(state: GraphState):
 
 
 async def summarizer_node(state: GraphState) -> Dict:
-    # History is built as concrete Message objects (not templated tuples) so any
-    # literal '{' or '}' in user content is passed through verbatim rather than
-    # parsed as an f-string placeholder, which would crash from_messages.
-    history_msgs = [
-        AIMessage(content=f"{entry['sender']}: {entry['content']}")
-        if entry["sender"] == BOT_NAME
-        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
-        for entry in state["history"]
-    ]
+    # The summarizer summarizes the WHOLE conversation, so no divider — it sees the
+    # full, undivided history.
+    history_msgs = _build_history_messages(state["history"])
 
     system_prompt_str = await get_summarizer_system_prompt()
 
@@ -437,12 +479,7 @@ async def _run_context_fetcher(state: GraphState) -> Tuple[str, str, str, str]:
     yields both their facts and their profile; all other (calendar) tools are
     concatenated into the schedule context."""
     senders = state.get("senders") or {}
-    history_msgs = [
-        AIMessage(content=f"{entry['sender']}: {entry['content']}")
-        if entry["sender"] == BOT_NAME
-        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
-        for entry in state["history"]
-    ]
+    history_msgs = _build_history_messages(state["history"], divider_text=CONTEXT_NODE_DIVIDER)
 
     now = datetime.now(SGT)
     formatted_datetime = (
@@ -611,15 +648,7 @@ async def responder_node(state: GraphState) -> Dict:
         # injected here — context_fetcher_node fetches it via tools and it
         # arrives through {schedule_context}.
 
-        # History is built as concrete Message objects (not templated tuples) so
-        # any literal '{' or '}' in user content is passed through verbatim rather
-        # than parsed as an f-string placeholder, which would crash from_messages.
-        history_msgs = [
-            AIMessage(content=f"{entry['sender']}: {entry['content']}")
-            if entry["sender"] == BOT_NAME
-            else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
-            for entry in state["history"]
-        ]
+        history_msgs = _build_history_messages(state["history"], divider_text=RESPONDER_NODE_DIVIDER)
         history_tokens = sum(_count_tokens(f"{m.type}: {m.content}") for m in history_msgs)
         print(f"[responder] history fetched (count={len(history_msgs)}, tokens={history_tokens})")
         pprint(history_msgs)
