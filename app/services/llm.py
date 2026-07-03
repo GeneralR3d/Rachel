@@ -68,7 +68,7 @@ from app.prompts import (
     USER_PROFILE_FIELDS,
 )
 from app.calander import CALENDAR_TOOLS
-from app.services.userfacts import search_user_facts, search_user_facts_tool
+from app.services.userfacts import search_user_facts, search_user_info, search_user_info_tool
 from app.services.worldview import search_world_view, search_worldview
 from app.repository import (
     get_active_trait_prompts,
@@ -212,6 +212,7 @@ class GraphState(TypedDict):
     schedule_context: str  # extra schedule context gathered by context_fetcher_node
     world_view: str  # world-view facts gathered by context_fetcher_node
     user_facts: str  # per-user facts gathered by context_fetcher_node (Graphiti)
+    user_profiles: str  # per-user structured profiles gathered by context_fetcher_node
     response_text: str
     response_reason: str
 
@@ -244,7 +245,7 @@ _responder_llm = ChatOpenRouter(
 # single source of truth: it drives both the bound tools and the prompt's {tools}
 # listing (via format_tools). It combines the calendar tools with the world-view
 # search tool (Rachel's general learned facts).
-CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_facts_tool]
+CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool]
 
 
 def format_tools(tools) -> str:
@@ -392,16 +393,17 @@ async def summarizer_node(state: GraphState) -> Dict:
     return {"mood": result.mood, "current_summary": result.summary}
 
 
-async def _run_context_fetcher(state: GraphState) -> Tuple[str, str, str]:
+async def _run_context_fetcher(state: GraphState) -> Tuple[str, str, str, str]:
     """Single pass for context_fetcher_node: one LLM call decides which tools to
     call, then those tools are run once. Factored out so the node can wrap it in
     a single asyncio timeout. Returns ``(schedule_context, world_view,
-    user_facts)`` — all empty if the model asked for no tools.
+    user_facts, user_profiles)`` — all empty if the model asked for no tools.
 
-    The world-view and per-user facts tools' outputs are routed to their own
-    return slots (so they land in the responder's ``{world_view}`` /
-    ``{user_facts}`` sections, not ``{schedule_context}``); all other (calendar)
-    tools are concatenated into the schedule context."""
+    The world-view and per-user tools' outputs are routed to their own return
+    slots (so they land in the responder's ``{world_view}`` / ``{user_facts}`` /
+    ``{user_profiles}`` sections, not ``{schedule_context}``) — looking up a user
+    yields both their facts and their profile; all other (calendar) tools are
+    concatenated into the schedule context."""
     senders = state.get("senders") or {}
     history_msgs = [
         AIMessage(content=f"{entry['sender']}: {entry['content']}")
@@ -435,11 +437,12 @@ async def _run_context_fetcher(state: GraphState) -> Tuple[str, str, str]:
     for tc in tool_calls:
         print(f"[context_fetcher]   -> {tc['name']}({tc['args']})")
     if not tool_calls:
-        return "", "", ""
+        return "", "", "", ""
 
     collected: List[str] = []
     world_view_parts: List[str] = []
     user_facts_parts: List[str] = []
+    user_profile_parts: List[str] = []
     for tc in tool_calls:
         if tc["name"] == search_world_view.name:
             # World-view output goes to its own slot (the responder's {world_view}
@@ -455,25 +458,33 @@ async def _run_context_fetcher(state: GraphState) -> Tuple[str, str, str]:
                 world_view_parts.append(result)
             continue
 
-        if tc["name"] == search_user_facts_tool.name:
-            # Per-user facts go to their own slot (the responder's {user_facts}
-            # section), labelled per participant. Fails open, never crashes.
+        if tc["name"] == search_user_info_tool.name:
+            # Looking up a user pulls BOTH their free-form facts and their
+            # structured profile (search_user_info) — facts go to the responder's
+            # {user_facts} slot, profile to {user_profiles}, both labelled per
+            # participant. Fails open, never crashes.
             try:
                 user_id = int(tc["args"].get("user_id"))
             except (TypeError, ValueError):
-                print(f"[context_fetcher] user-facts search skipped (bad user_id: {tc['args']})")
+                print(f"[context_fetcher] user-info search skipped (bad user_id: {tc['args']})")
                 continue
             query = tc["args"].get("query", "")
             try:
-                result = await search_user_facts(user_id, query)
+                facts, profile = await search_user_info(user_id, query)
             except Exception as e:
-                print(f"[context_fetcher] user-facts search error: {type(e).__name__}: {e}")
-                result = ""
-            print(f"[context_fetcher] {tc['name']}({tc['args']}) result:\n{result}")
-            if result:
-                name = (senders.get(user_id) or "").strip()
-                label = f"{name} (id {user_id})" if name else f"User {user_id}"
-                user_facts_parts.append(f"{label}:\n{result}")
+                print(f"[context_fetcher] user-info search error: {type(e).__name__}: {e}")
+                facts, profile = "", {}
+            name = (senders.get(user_id) or "").strip()
+            label = f"{name} (id {user_id})" if name else f"User {user_id}"
+            print(f"[context_fetcher] {tc['name']}({tc['args']}) facts:\n{facts}")
+            if facts:
+                user_facts_parts.append(f"{label}:\n{facts}")
+            # Show every slot (NIL for empties) so the responder sees which
+            # attributes are still gaps to subtly probe.
+            rendered_profile = _render_profile(profile, show_unknown=True)
+            print(f"[context_fetcher] {tc['name']}({tc['args']}) profile:\n{rendered_profile}")
+            if rendered_profile:
+                user_profile_parts.append(f"{label}:\n{rendered_profile}")
             continue
 
         tool = _context_tools_by_name.get(tc["name"])
@@ -490,10 +501,12 @@ async def _run_context_fetcher(state: GraphState) -> Tuple[str, str, str]:
     schedule_context = "\n\n".join(collected)
     world_view = "\n".join(world_view_parts)
     user_facts = "\n\n".join(user_facts_parts)
+    user_profiles = "\n\n".join(user_profile_parts)
     print(f"[context_fetcher] ===== fetched schedule context =====\n{schedule_context or '(none)'}")
     print(f"[context_fetcher] ===== fetched world-view facts =====\n{world_view or '(none)'}")
     print(f"[context_fetcher] ===== fetched user facts =====\n{user_facts or '(none)'}")
-    return schedule_context, world_view, user_facts
+    print(f"[context_fetcher] ===== fetched user profiles =====\n{user_profiles or '(none)'}")
+    return schedule_context, world_view, user_facts, user_profiles
 
 
 async def context_fetcher_node(state: GraphState) -> Dict:
@@ -503,22 +516,28 @@ async def context_fetcher_node(state: GraphState) -> Dict:
     pipeline: on any error or timeout it falls open to empty context (the
     responder still has the mood/summary and can reply without extras)."""
     try:
-        schedule_context, world_view, user_facts = await asyncio.wait_for(
+        schedule_context, world_view, user_facts, user_profiles = await asyncio.wait_for(
             _run_context_fetcher(state), timeout=CONTEXT_FETCHER_TIMEOUT
         )
     except asyncio.TimeoutError:
         print(f"[context_fetcher] timed out after {CONTEXT_FETCHER_TIMEOUT}s (no extra context)")
-        return {"schedule_context": "", "world_view": "", "user_facts": ""}
+        return {"schedule_context": "", "world_view": "", "user_facts": "", "user_profiles": ""}
     except Exception as e:
         print(f"[context_fetcher] error (no extra context): {type(e).__name__}: {e}")
-        return {"schedule_context": "", "world_view": "", "user_facts": ""}
+        return {"schedule_context": "", "world_view": "", "user_facts": "", "user_profiles": ""}
 
     print(
         f"[context_fetcher] gathered {_count_tokens(schedule_context)} tokens of "
         f"schedule context + {_count_tokens(world_view)} tokens of world-view facts "
-        f"+ {_count_tokens(user_facts)} tokens of user facts"
+        f"+ {_count_tokens(user_facts)} tokens of user facts "
+        f"+ {_count_tokens(user_profiles)} tokens of user profiles"
     )
-    return {"schedule_context": schedule_context, "world_view": world_view, "user_facts": user_facts}
+    return {
+        "schedule_context": schedule_context,
+        "world_view": world_view,
+        "user_facts": user_facts,
+        "user_profiles": user_profiles,
+    }
 
 
 async def responder_node(state: GraphState) -> Dict:
@@ -542,30 +561,14 @@ async def responder_node(state: GraphState) -> Dict:
         print(f"[responder] world view from state (tokens={_count_tokens(world_view)})")
 
 
-        # Pull the structured profile for all participants (cached per user).
-        # Free-form facts are fetched by context_fetcher_node via the
-        # search_user_facts Graphiti tool and arrive in state.
-        senders = state.get("senders") or {}
-        sender_user_ids = list(senders)
-        print(f"All users is {senders}")
-        profiles_by_user = await _get_user_profiles_cached(sender_user_ids)
-
-        def _label(uid: int) -> str:
-            """Human-readable header for a participant: name + id when known."""
-            name = (senders.get(uid) or "").strip()
-            return f"{name} (id {uid})" if name else f"User {uid}"
-
-        # Free-form facts → {user_facts} (from the context_fetcher's search)
+        # Both the free-form facts and the structured profiles are fetched by
+        # context_fetcher_node (its search_user_info tool pulls both halves for
+        # each participant it decides to look up) and arrive in state — the
+        # responder no longer reads profiles itself.
         user_facts = state.get("user_facts") or "Nothing learned yet."
-        # Structured profiles → {user_profiles}; show every slot (NIL for empties)
-        # so the responder knows which attributes are still gaps to subtly probe.
-        profile_blocks = [
-            f"{_label(uid)}:\n{_render_profile(profiles_by_user.get(uid, {}), show_unknown=True)}"
-            for uid in sender_user_ids
-        ]
-        user_profiles = "\n\n".join(profile_blocks) or "No one identified yet."
+        user_profiles = state.get("user_profiles") or "No one looked up yet."
         print(
-            f"[responder] profiles fetched for {len(sender_user_ids)} sender(s) "
+            f"[responder] user memory from state "
             f"(facts_tokens={_count_tokens(user_facts)}, profile_tokens={_count_tokens(user_profiles)})"
         )
 

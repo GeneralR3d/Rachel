@@ -143,15 +143,35 @@ async def get_user_facts(user_id: int) -> List[str]:
     return await list_episodes(user_facts_group_id(user_id))
 
 
-@tool("search_user_facts")
-async def search_user_facts_tool(user_id: int, query: str) -> str:
-    """Search the personal facts Rachel remembers about ONE conversation participant.
+async def search_user_info(user_id: int, query: str | None = None) -> tuple[str, dict]:
+    """Fetch BOTH halves of Rachel's memory about one participant in one shot.
 
-    Each participant has their own store of durable personal facts and preferences
-    learned from past conversations (their relationships, plans, likes/dislikes,
-    ongoing situations). Use this to recall what Rachel already knows about a
-    person so the responder can reply personally, e.g. when they mention something
-    about their own life or when personal context would clearly help.
+    Wraps ``search_user_facts`` (the free-form Graphiti facts) and, in addition,
+    pulls that user's fixed-slot structured profile via the responder's per-user
+    cache (``get_user_profiles_cached``). The idea: whenever the context fetcher
+    decides personal context about someone is worth looking up, we automatically
+    grab their profile too, so both feed into the responder together.
+
+    Returns ``(facts_text, profile_dict)`` — facts is the hybrid-search string
+    (possibly empty), profile is the raw slot dict (``{}`` when nothing stored).
+    """
+    # Lazy import: app.services.llm imports this module for the tool, so a
+    # top-level import here would be circular.
+    from app.services.llm import get_user_profiles_cached
+
+    facts = await search_user_facts(user_id, query)
+    profiles = await get_user_profiles_cached([user_id])
+    return facts, profiles.get(user_id, {})
+
+
+@tool("search_user_info")
+async def search_user_info_tool(user_id: int, query: str) -> str:
+    """Recall what Rachel remembers about ONE conversation participant.
+
+    Each participant has their own memory: durable personal facts and preferences
+    learned from past conversations (relationships, plans, likes/dislikes, ongoing situations) plus a structured profile of core attributes. 
+    Use this to recall what Rachel already knows about a person so the responder can reply personally, 
+    e.g. when they mention something about their own life or when personal context would clearly help.
 
     Args:
         user_id: The numeric user id of the participant, exactly as listed in the
@@ -159,7 +179,8 @@ async def search_user_facts_tool(user_id: int, query: str) -> str:
         query: A focused, natural-language description of what to look up about
             this person (e.g. "job and internship plans", "food preferences").
     """
-    return await search_user_facts(user_id, query) or "No stored facts about this user matched."
+    facts, _profile = await search_user_info(user_id, query)
+    return facts or "No stored facts about this user matched."
 
 
 # --- Structured outputs ------------------------------------------------------

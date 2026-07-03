@@ -300,7 +300,7 @@
     <!-- USERS (list + profile) -->
     <section id="users">
       <h2>Users</h2>
-      <div class="desc">Pick a user on the left to view and edit their profile (all slots, including empty). Free-form facts now live in the Graphiti knowledge graph (Neo4j) and are not editable here.</div>
+      <div class="desc">Pick a user on the left to view and edit their profile (all slots, including empty) and their free-form facts stored in the Graphiti knowledge graph (Neo4j).</div>
       <div class="userlayout">
         <div class="userlist">
           <div class="btns"><button onclick="loadUsers()" class="ghost">Reload</button></div>
@@ -323,6 +323,18 @@
             <div class="btns">
               <button onclick="saveProfile()">Save profile</button>
               <button onclick="deleteProfile()" class="danger">Clear profile</button>
+            </div>
+
+            <h3 class="subhead">Facts</h3>
+            <div class="muted inline-note">Free-form facts stored in Graphiti (Neo4j). Add one fact per line. No edit/delete — Graphiti supersedes old facts on re-ingest.</div>
+            <div id="factsOut" class="out" style="margin-top:10px"></div>
+            <div class="btns">
+              <button onclick="loadUserFacts()" class="ghost">Reload</button>
+            </div>
+            <label style="margin-top:14px">Add facts (one per line)</label>
+            <textarea id="factsInput" placeholder="e.g. Likes hiking&#10;Works as a software engineer" style="min-height:80px"></textarea>
+            <div class="btns">
+              <button onclick="addUserFacts()">Add Facts</button>
             </div>
           </div>
         </div>
@@ -675,7 +687,8 @@ async function selectUser(id, nameHtml) {
   document.getElementById("userDetailBody").style.display = "block";
   document.getElementById("detailName").innerHTML = nameHtml || "User";
   document.getElementById("detailId").textContent = "ID " + id;
-  await loadProfile();
+  document.getElementById("factsInput").value = "";
+  await Promise.all([loadProfile(), loadUserFacts()]);
 }
 
 // profile ----------------------------------------------------------------
@@ -723,6 +736,33 @@ async function deleteProfile() {
     toast("Profile cleared", "ok");
     loadProfile();
   } catch (e) { toast("Delete: " + e.message, "err"); }
+}
+
+// facts -----------------------------------------------------------------
+async function loadUserFacts() {
+  if (!selectedUser) return;
+  const box = document.getElementById("factsOut");
+  box.textContent = "Loading…";
+  try {
+    const r = await api("/user-facts/" + selectedUser);
+    if (!r.facts.length) { box.textContent = "(no facts)"; return; }
+    box.textContent = r.facts.map((f, i) => (i + 1) + ". " + f).join("\n");
+  } catch (e) { box.textContent = ""; toast("Facts: " + e.message, "err"); }
+}
+async function addUserFacts() {
+  if (!selectedUser) return;
+  const raw = document.getElementById("factsInput").value;
+  const facts = raw.split("\n").map(s => s.trim()).filter(Boolean);
+  if (!facts.length) { toast("Enter at least one fact", "err"); return; }
+  const btn = document.querySelector("#userDetailBody button[onclick='addUserFacts()']");
+  if (btn) btn.disabled = true;
+  try {
+    await api("/user-facts/" + selectedUser, { method: "POST", body: { facts } });
+    toast("Facts ingested (Graphiti may take a moment)", "ok");
+    document.getElementById("factsInput").value = "";
+    await loadUserFacts();
+  } catch (e) { toast("Add facts: " + e.message, "err"); }
+  finally { if (btn) btn.disabled = false; }
 }
 
 // --- architecture (rendered LangGraph diagrams) -------------------------
