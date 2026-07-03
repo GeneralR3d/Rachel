@@ -35,9 +35,9 @@ BOT_NAME = get_settings().bot_name
 # Divider inserted between already-processed context and the new messages the
 # extractors should pull facts from. Shared by both pipelines' fact extractors.
 EXTRACTOR_DIVIDER = (
-    "[Everything above is earlier conversation already processed in a previous "
-    "round — context only. Extract new facts ONLY from the message(s) below; do "
-    "NOT re-extract anything above.]"
+    "[EVERYTHING ABOVE IS EARLIER CONVERSATION ALREADY PROCESSED IN A PREVIOUS "
+    "ROUND — CONTEXT ONLY. EXTRACT NEW FACTS ONLY FROM THE MESSAGE(S) BELOW; DO "
+    "NOT RE-EXTRACT ANYTHING ABOVE.]"
 )
 
 

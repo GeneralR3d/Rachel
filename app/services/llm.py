@@ -95,17 +95,17 @@ DEFAULT_MOOD = "default"
 # inserted at that boundary in the router/context_fetcher/responder inputs (the
 # summarizer keeps seeing the whole conversation, undivided).
 ROUTER_NODE_DIVIDER = (
-    "[Everything above is earlier conversation, already handled — context only. "
-    "Base your decision ONLY on the message(s) below.]"
+    "[EVERYTHING ABOVE IS EARLIER CONVERSATION, ALREADY HANDLED — CONTEXT ONLY. "
+    "BASE YOUR DECISION ONLY ON THE MESSAGE(S) BELOW.]"
 )
 CONTEXT_NODE_DIVIDER = (
-    "[Everything above is earlier conversation, already handled — context only. "
-    "Gather background needed to respond to the NEW message(s) below.]"
+    "[EVERYTHING ABOVE IS EARLIER CONVERSATION, ALREADY HANDLED — CONTEXT ONLY. "
+    "GATHER BACKGROUND NEEDED TO RESPOND TO THE NEW MESSAGE(S) BELOW.]"
 )
 RESPONDER_NODE_DIVIDER = (
-    "[Everything above is earlier conversation you have ALREADY responded to — "
-    "context only. Reply ONLY to the new message(s) below; do NOT re-answer "
-    "anything above.]"
+    "[EVERYTHING ABOVE IS EARLIER CONVERSATION YOU HAVE ALREADY RESPONDED TO — "
+    "CONTEXT ONLY. REPLY ONLY TO THE NEW MESSAGE(S) BELOW; DO NOT RE-ANSWER "
+    "ANYTHING ABOVE.]"
 )
 
 
