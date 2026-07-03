@@ -1,60 +1,60 @@
-"""Rachel's persistent "world view" — a flat list of facts she has learned.
+"""Rachel's persistent "world view" — durable, general facts she has learned.
 
 This is a self-contained LangGraph pipeline that runs once per conversation,
 after the CHAT_BLACKOUT_TIME flush (see app/telegram/client.py::finalize_conversation).
 
 Two nodes run **sequentially**:
 
-  START → fact_extractor_node → (any new facts?) → consolidation_node → END
+  START → fact_extractor_node → (any new facts?) → ingest_node → END
                                        └── no ──→ END
 
 - fact_extractor_node: reads the just-finished dialogue and pulls out new,
-  permanent facts about the world. Returns nothing if it learned
-  nothing new (short-circuits straight to END — no file write).
-- consolidation_node: reads the *existing* facts plus the freshly extracted
-  ones, then de-duplicates and resolves conflicts. Newer information always
-  wins. Returns the full, rewritten fact set.
+  permanent facts about the world. Returns nothing if it learned nothing new
+  (short-circuits straight to END — no graph write).
+- ingest_node: writes each extracted fact into **Graphiti** (a temporal
+  knowledge graph backed by Neo4j) as one episode per fact. Graphiti performs
+  its own entity/edge extraction, de-duplication, and temporal conflict
+  resolution on ingest, so there is no hand-rolled consolidation step anymore.
 
-Storage is a plain markdown file (one fact per `- ` bullet line). There is a
-single global file for now; per-user files are a future expansion. All facts
-are assumed to fit comfortably in one context window, so there is no search /
-retrieval step — the whole file is read and rewritten each time.
-
-Readers of the file:  responder_node (app/services/llm.py), consolidation_node.
-Writers of the file:  consolidation_node (via update_worldview).
+Retrieval: ``search_worldview()`` runs a Graphiti hybrid search and returns the
+matching facts as a ``- ``-bulleted string; it is exposed to the context_fetcher
+node as the ``search_world_view`` LangChain tool. The context_fetcher generates a
+conversation-aware query and the result is threaded into the responder as
+``{world_view}`` (see app/services/llm.py).
 """
 
-import asyncio
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List
 
 import tiktoken
 
-from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.tools import tool
 from langchain_openrouter import ChatOpenRouter
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
-from telethon.custom import conversation
 from typing_extensions import TypedDict
 
 from app.config import get_settings
-from app.prompts import CONSOLIDATION_SYSTEM_PROMPT, FACT_EXTRACTOR_SYSTEM_PROMPT
+from app.prompts import FACT_EXTRACTOR_SYSTEM_PROMPT
+from app.services.graphiti import ingest_facts, search_graph
 
 settings = get_settings()
 BOT_NAME = settings.bot_name
 _WORLDVIEW_PATH = Path(settings.worldview_path)
+
+# Graphiti partition for Rachel's general world-view memory. All world-view
+# episodes are written under this group_id and searches are scoped to it, so
+# that the per-user memory partitions (see userfacts.user_facts_group_id) never
+# clash with it or each other.
+_WORLDVIEW_GROUP_ID = "worldview"
 
 _tokenizer = tiktoken.get_encoding("cl100k_base")
 
 
 def _count_tokens(text: str) -> int:
     return len(_tokenizer.encode(text))
-
-# The file is read-modify-written as a whole, so serialise concurrent
-# consolidations (two chats finishing near-simultaneously) to avoid clobbering.
-_file_lock = asyncio.Lock()
 
 
 # --- Structured outputs ------------------------------------------------------
@@ -67,18 +67,16 @@ class ExtractorOutput(BaseModel):
     )
 
 
-class ConsolidationOutput(BaseModel):
-    facts: List[str] = Field(
-        default_factory=list,
-        description="The full, de-duplicated and conflict-resolved fact set as short sentences.",
-    )
-
-
 class WorldviewState(TypedDict):
-    conversation: List[Dict[str, Any]]
-    existing_facts: List[str]
+    # Pre-divided extraction history built once upstream (in
+    # app/services/memory.py::update_memories): the conversation rendered as LLM
+    # turns with the "already-processed" divider already inserted. The fact
+    # extractor reads these directly instead of re-dividing.
+    extraction_msgs: List[Any]
+    # False when every message is at or below the watermark (nothing new to
+    # extract), letting fact_extractor_node short-circuit.
+    has_new: bool
     extracted_facts: List[str]
-    consolidated_facts: List[str]
     # Originating chat, threaded through purely so node logs can be tagged and
     # disambiguated when multiple chats finalize concurrently.
     chat_id: int | None
@@ -89,49 +87,39 @@ def _tag(chat_id: int | None) -> str:
     return f"[worldview][{chat_id}]" if chat_id is not None else "[worldview]"
 
 
+# Uses the Graphiti key too: this extractor is the front half of the same
+# world-view memory pipeline that feeds Graphiti, so all its cost is billed to
+# the same separate OpenRouter key.
 _extractor_llm = ChatOpenRouter(
     model=settings.openrouter_model,
-    api_key=settings.openrouter_api_key,
+    api_key=settings.graphiti_api_key,
     temperature=0.0,
 ).with_structured_output(ExtractorOutput)
 
-_consolidation_llm = ChatOpenRouter(
-    model=settings.openrouter_model,
-    api_key=settings.openrouter_api_key,
-    temperature=0.0,
-).with_structured_output(ConsolidationOutput)
+
+# --- Retrieval ---------------------------------------------------------------
 
 
-# --- File helpers ------------------------------------------------------------
+async def search_worldview(query: str | None = None) -> str:
+    """Search the world-view partition; see ``graphiti.search_graph`` for semantics."""
+    return await search_graph(query, _WORLDVIEW_GROUP_ID, "[worldview]")
 
 
-def read_worldview() -> str:
-    """Return the raw markdown body of the world view (for prompt injection).
+@tool
+async def search_world_view(query: str) -> str:
+    """Search Rachel's world-view knowledge base of general facts.
 
-    Empty string when the file does not exist yet.
+    The world-view database stores short, single-sentence general facts Rachel has
+    learned about the world from past conversations (about brands, places, people,
+    events. Use this to look up what Rachel already knows about whatever the conversation is touching on, so the
+    responder can reply accurately instead of guessing.
+
+    Args:
+        query: A focused, natural-language description of what to look up, derived
+            from what the conversation is about (e.g. "Chagee bubble tea brand").
+            Do not just copy the last message verbatim — capture the topic/entity.
     """
-    if not _WORLDVIEW_PATH.exists():
-        return ""
-    return _WORLDVIEW_PATH.read_text(encoding="utf-8").strip()
-
-
-def _read_facts() -> List[str]:
-    """Parse the markdown file into a list of fact strings (one per bullet)."""
-    facts: List[str] = []
-    for line in read_worldview().splitlines():
-        line = line.strip()
-        if line.startswith("- "):
-            facts.append(line[2:].strip())
-        elif line and not line.startswith("#"):
-            facts.append(line)
-    return [f for f in facts if f]
-
-
-def _write_facts(facts: List[str]) -> None:
-    """Overwrite the markdown file with the given facts (one per bullet)."""
-    body = "# Rachel's world view\n\n" + "\n".join(f"- {f}" for f in facts) + "\n"
-    _WORLDVIEW_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _WORLDVIEW_PATH.write_text(body, encoding="utf-8")
+    return await search_worldview(query) or "No relevant facts found."
 
 
 # --- Nodes -------------------------------------------------------------------
@@ -139,15 +127,12 @@ def _write_facts(facts: List[str]) -> None:
 
 async def fact_extractor_node(state: WorldviewState) -> Dict:
     tag = _tag(state.get("chat_id"))
-    # History is built as concrete Message objects (not templated tuples) so any
-    # literal '{' or '}' in user content is passed through verbatim rather than
-    # parsed as an f-string placeholder, which would crash from_messages.
-    history_msgs = [
-        AIMessage(content=f"{entry['sender']}: {entry['content']}")
-        if entry["sender"] == BOT_NAME
-        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
-        for entry in state["conversation"]
-    ]
+    # extraction_msgs is pre-divided upstream: older (already-processed) messages
+    # sit above the divider as context, only newer ones below are to be extracted.
+    if not state.get("has_new"):
+        print(f"{tag} no new messages since last processed; skipping extraction")
+        return {"extracted_facts": []}
+    history_msgs = state["extraction_msgs"]
     system_msgs = ChatPromptTemplate.from_messages(
         [("system", FACT_EXTRACTOR_SYSTEM_PROMPT)]
     ).format_messages(bot_name=BOT_NAME)
@@ -160,81 +145,80 @@ async def fact_extractor_node(state: WorldviewState) -> Dict:
     return {"extracted_facts": facts}
 
 
-async def consolidation_node(state: WorldviewState) -> Dict:
+async def ingest_node(state: WorldviewState) -> Dict:
+    """Write each extracted fact into Graphiti as its own episode (see ingest_facts)."""
     tag = _tag(state.get("chat_id"))
-    existing = state["existing_facts"]
-    extracted = state["extracted_facts"]
-
-    existing_facts_text = "\n".join(f"- {f}" for f in existing) or "(none)"
-    new_facts_text = "\n".join(f"- {f}" for f in extracted)
-
-    prompt = ChatPromptTemplate.from_messages([("system", CONSOLIDATION_SYSTEM_PROMPT)])
-    msgs = prompt.format_messages(
-        bot_name=BOT_NAME, existing_facts=existing_facts_text, new_facts=new_facts_text
+    facts = state["extracted_facts"]
+    # World-view facts are general knowledge, not chat-scoped, so the episode
+    # name is deliberately chat-agnostic — only timestamped to stay unique.
+    await ingest_facts(
+        facts,
+        group_id=_WORLDVIEW_GROUP_ID,
+        source_description="Rachel worldview fact",
+        name_prefix="worldview",
     )
-    msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
-    print(f"{tag} consolidation context: {len(msgs)} messages, {msgs_tokens} tokens")
-    result: ConsolidationOutput = await _consolidation_llm.ainvoke(msgs)
-    facts = [f.strip() for f in result.facts if f.strip()]
-    print(f"{tag} consolidated to {len(facts)} fact(s)")
-    return {"consolidated_facts": facts}
+    print(f"{tag} ingested {len(facts)} fact(s) into Graphiti")
+    return {}
 
 
 def _route_after_extraction(state: WorldviewState) -> str:
-    """Skip consolidation (and the file write) when nothing new was learned."""
-    return "consolidation_node" if state["extracted_facts"] else END
+    """Skip ingestion when nothing new was learned."""
+    return "ingest_node" if state["extracted_facts"] else END
 
 
 def _build_graph():
     graph: StateGraph = StateGraph(WorldviewState)
     graph.add_node("fact_extractor_node", fact_extractor_node)
-    graph.add_node("consolidation_node", consolidation_node)
+    graph.add_node("ingest_node", ingest_node)
     graph.add_edge(START, "fact_extractor_node")
     graph.add_conditional_edges(
         "fact_extractor_node",
         _route_after_extraction,
-        {"consolidation_node": "consolidation_node", END: END},
+        {"ingest_node": "ingest_node", END: END},
     )
-    graph.add_edge("consolidation_node", END)
+    graph.add_edge("ingest_node", END)
     return graph.compile()
 
 
 _graph = _build_graph()
 
 
-async def update_worldview(conversation: List[Dict[str, str]], chat_id: int | None = None) -> List[str] | None:
-    """Extract facts from a finished conversation and merge them into the file.
+async def update_worldview(
+    extraction_msgs: List[Any],
+    has_new: bool,
+    chat_id: int | None = None,
+) -> List[str] | None:
+    """Extract facts from a finished conversation and ingest them into Graphiti.
 
-    Returns the new full fact set if the file was rewritten, else None (nothing
-    new was learned). The whole read-modify-write is held under _file_lock so
-    concurrent conversations cannot clobber each other.
+    ``extraction_msgs`` is the pre-divided extraction history and ``has_new``
+    whether it contains any not-yet-processed messages — both built once upstream
+    by app/services/memory.py::update_memories (the divider helper is no longer
+    called here).
+
+    Returns the list of newly ingested facts, or None when nothing new was
+    learned (or on error). Never raises — memory upkeep must not crash the caller.
     """
-    if not conversation:
+    if not extraction_msgs:
         return None
 
     tag = _tag(chat_id)
-    async with _file_lock:
-        existing_facts = _read_facts()
-        state: WorldviewState = {
-            "conversation": conversation,
-            "existing_facts": existing_facts,
-            "extracted_facts": [],
-            "consolidated_facts": [],
-            "chat_id": chat_id,
-        }
-        try:
-            result = await _graph.ainvoke(state)
-        except Exception as e:  # never let memory upkeep crash the caller
-            print(f"{tag} update failed: {e}")
-            traceback.print_exc()
-            return None
+    state: WorldviewState = {
+        "extraction_msgs": extraction_msgs,
+        "has_new": has_new,
+        "extracted_facts": [],
+        "chat_id": chat_id,
+    }
+    try:
+        result = await _graph.ainvoke(state)
+    except Exception as e:  # never let memory upkeep crash the caller
+        print(f"{tag} update failed: {e}")
+        traceback.print_exc()
+        return None
 
+    facts = result["extracted_facts"]
+    if not facts:
+        print(f"{tag} nothing new from chat; graph unchanged")
+        return None
 
-        if not result["extracted_facts"]:
-            print(f"{tag} nothing new from chat; file unchanged")
-            return None
-
-        new_facts = result["consolidated_facts"]
-        _write_facts(new_facts)
-        print(f"{tag} file updated ({len(new_facts)} fact(s)) after chat")
-        return new_facts
+    print(f"{tag} graph updated ({len(facts)} fact(s)) after chat")
+    return facts

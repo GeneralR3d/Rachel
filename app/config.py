@@ -25,7 +25,25 @@ class Settings(BaseSettings):
 
     # OpenRouter
     openrouter_api_key: str
-    openrouter_model: str = "google/gemini-2.0-flash-001"
+    # Separate key used for everything Graphiti-related (world-view LLM,
+    # embedder, reranker). Falls back to openrouter_api_key when unset so
+    # existing single-key setups keep working; see graphiti_api_key.
+    openrouter_graphiti_api_key: str | None = None
+    openrouter_model: str = "deepseek/deepseek-v4-flash"
+    # OpenAI-compatible base URL for OpenRouter, shared by Graphiti's LLM /
+    # embedder / reranker clients (OpenRouter now exposes /v1/embeddings).
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # Smaller/cheaper model Graphiti uses for its internal helper + reranker calls.
+    openrouter_small_model: str = "deepseek/deepseek-v4-flash"
+    # Embedding model id (routed through OpenRouter) used by Graphiti's embedder.
+    openrouter_embedding_model: str = "openai/text-embedding-3-small"
+
+    # Neo4j connection for Graphiti (the world-view knowledge graph). The app
+    # container reaches the service as `db`-style host `neo4j`; locally it's the
+    # loopback-mapped port from docker-compose.
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "password"
 
     # Admin whitelist (your personal Telegram user id, from @userinfobot)
     admin_id: int = 0
@@ -39,6 +57,11 @@ class Settings(BaseSettings):
 
     # Markdown file holding Rachel's persistent "world view" (learned facts)
     worldview_path: str = "worldview.md"
+
+    @property
+    def graphiti_api_key(self) -> str:
+        """OpenRouter key for Graphiti, falling back to the main key when unset."""
+        return self.openrouter_graphiti_api_key or self.openrouter_api_key
 
 
 @lru_cache

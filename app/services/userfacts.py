@@ -8,27 +8,29 @@ world-view pipeline keeps only *general*, non-personal facts, this one keeps the
 
 Flow:
 
-  START → fact_extractor_node → (any new facts?) → consolidation_node (×N) → END
+  START → fact_extractor_node → (any new facts?) → ingest_node → END
         →                              └── no ──→ END
-        → profile_extraction_update_node ──────────────────────────────────→ END
+        → profile_extraction_update_node ────────────────────→ END
 
 - fact_extractor_node: reads the just-finished dialogue once and pulls out new,
   durable personal facts/preferences, **grouped by the user they are about**.
   Returns nothing if it learned nothing new (short-circuits straight to END).
-- consolidation_node: fanned out **in parallel, one instance per user** that had
-  new facts. Each instance reads that user's existing facts, merges in the newly
-  extracted ones (de-dup + conflict resolution, newer wins), and writes the
-  rewritten profile back.
+- ingest_node: writes each user's new facts into **Graphiti** (the same temporal
+  knowledge graph the world-view pipeline uses, see app/services/worldview.py),
+  one episode per fact under a per-user group_id. Graphiti performs its own
+  entity/edge extraction, de-duplication, and temporal conflict resolution on
+  ingest, so there is no LLM consolidation node anymore.
 - profile_extraction_update_node: the fixed-slot-profile counterpart, running on
   a separate START branch in parallel. It extracts the structured profile slots
   for every participant and, in the same node, writes each user's slots back —
   the merge is a deterministic field-level overwrite (newer non-empty value
-  wins), so it needs no separate LLM consolidation pass or per-user fan-out.
+  wins), so it needs no consolidation pass or per-user fan-out. Profiles stay in
+  the per-user ``user_facts_preferences.profile`` JSONB column in Postgres.
 
-Storage is the per-user ``user_facts_preferences`` table, read/written via
-``get_user_facts`` / ``set_user_facts`` in app/repository.py — there is no
-markdown file. Each profile is assumed to fit comfortably in one context window,
-so the whole profile is read and rewritten each time.
+Retrieval of the free-form facts is via ``search_user_facts`` below (a
+group-scoped Graphiti hybrid search), exposed to the context_fetcher node as the
+``search_user_facts`` LangChain tool and threaded into the responder as
+``{user_facts}`` (see app/services/llm.py).
 """
 
 import asyncio
@@ -42,35 +44,42 @@ from pprint import pprint
 
 import tiktoken
 
-from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.tools import tool
 from langchain_openrouter import ChatOpenRouter
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Send
 from pydantic import BaseModel, Field, create_model
 from typing_extensions import TypedDict
 
 from app.config import get_settings
 from app.prompts import (
-    USER_FACT_CONSOLIDATION_SYSTEM_PROMPT,
     USER_FACT_EXTRACTOR_SYSTEM_PROMPT,
     USER_PROFILE_EXTRACTOR_SYSTEM_PROMPT,
     USER_PROFILE_FIELDS,
 )
 from app.repository import (
-    get_user_facts,
     get_user_profile,
-    set_user_facts,
     set_user_profile,
 )
-from app.services.llm import (
-    get_user_profiles_cached,
-    update_user_facts_cache,
-    update_user_profile_cache,
-)
+from app.services.graphiti import ingest_facts, list_episodes, search_graph
+
+# NOTE: app.services.llm imports this module (for the search_user_facts tool),
+# so the profile-cache helpers it provides (get_user_profiles_cached /
+# update_user_profile_cache) are imported lazily inside
+# profile_extraction_update_node to avoid a circular import at load time.
 
 settings = get_settings()
 BOT_NAME = settings.bot_name
+
+# Per-user facts live in the same Neo4j database as the world view but under
+# one Graphiti group_id per user, keeping each person's memory partition
+# separate from the world view and from every other user.
+_USER_FACTS_GROUP_PREFIX = "user-facts-"
+
+
+def user_facts_group_id(user_id: int) -> str:
+    """Graphiti group_id holding the personal-facts graph for one user."""
+    return f"{_USER_FACTS_GROUP_PREFIX}{user_id}"
 
 _tokenizer = tiktoken.get_encoding("cl100k_base")
 
@@ -88,12 +97,91 @@ def _profile_tag(chat_id: int | None) -> str:
     """Log prefix for the user_profile node, with the chat id when we know it."""
     return f"[userprofile][{chat_id}]" if chat_id is not None else "[userprofile]"
 
-# Per-user lock guarding the read-modify-write in consolidation_node. Two
-# conversations finishing at once that both involve the same user would
+# Per-user lock guarding the read-modify-write in profile_extraction_update_node.
+# Two conversations finishing at once that both involve the same user would
 # otherwise race (both read the old profile, second write clobbers the first).
 # Single-process/single-event-loop only — switch to a PG advisory lock if this
 # ever runs across multiple workers.
 _user_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+# --- Storage access (Graphiti) ------------------------------------------------
+
+
+async def search_user_facts(user_id: int, query: str | None = None) -> str:
+    """Search one user's personal-facts partition; see ``graphiti.search_graph``."""
+    return await search_graph(query, user_facts_group_id(user_id), "[userfacts]")
+
+
+async def add_user_facts(user_id: int, facts: List[str]) -> None:
+    """
+    Setter method.
+    Ingest new facts about one user into their Graphiti partition.
+
+    One episode per fact; Graphiti's own dedup / temporal conflict resolution
+    merges them against what is already stored. Used by the pipeline's
+    ingest_node and by the admin surfaces (HTTP API + bot). Slow — each fact is
+    several LLM round-trips (see graphiti.ingest_facts).
+    """
+    await ingest_facts(
+        facts,
+        group_id=user_facts_group_id(user_id),
+        source_description="Rachel user fact",
+        name_prefix=f"user-facts-{user_id}",
+    )
+
+
+async def get_user_facts(user_id: int) -> List[str]:
+    """
+    Getter method.
+    Return every fact episode stored for one user, oldest first.
+
+    Reads the raw ingested sentences straight off the user's partition — the
+    full dump, not a search. Used by the admin surfaces (HTTP API + bot).
+    """
+    return await list_episodes(user_facts_group_id(user_id))
+
+
+async def search_user_info(user_id: int, query: str | None = None) -> tuple[str, dict]:
+    """Fetch BOTH halves of Rachel's memory about one participant in one shot.
+
+    Wraps ``search_user_facts`` (the free-form Graphiti facts) and, in addition,
+    pulls that user's fixed-slot structured profile via the responder's per-user
+    cache (``get_user_profiles_cached``). The idea: whenever the context fetcher
+    decides personal context about someone is worth looking up, we automatically
+    grab their profile too, so both feed into the responder together.
+
+    Returns ``(facts_text, profile_dict)`` — facts is the hybrid-search string
+    (possibly empty), profile is the raw slot dict (``{}`` when nothing stored).
+    """
+    # Lazy import: app.services.llm imports this module for the tool, so a
+    # top-level import here would be circular.
+    from app.services.llm import get_user_profiles_cached
+
+    facts = await search_user_facts(user_id, query)
+    profiles = await get_user_profiles_cached([user_id])
+    return facts, profiles.get(user_id, {})
+
+
+@tool("search_user_info")
+async def search_user_info_tool(name: str, query: str) -> str:
+    """Recall what Rachel remembers about ONE conversation participant.
+
+    Each participant has their own memory: durable personal facts and preferences
+    learned from past conversations (relationships, plans, likes/dislikes, ongoing situations) plus a structured profile of core attributes.
+    Use this to recall what Rachel already knows about a person so the responder can reply personally,
+    e.g. when they mention something about their own life or when personal context would clearly help.
+
+    Args:
+        name: The participant's name, exactly as listed in the participants
+            section of your instructions. Never invent a name.
+        query: A focused, natural-language description of what to look up about
+            this person (e.g. "job and internship plans", "food preferences").
+    """
+    # Name -> user_id resolution happens in the context_fetcher pipeline
+    # (app.services.llm), which reads this tool call's args and invokes
+    # search_user_info directly; this body is only a fallback for standalone use.
+    return "Name-based lookup is resolved by the context fetcher pipeline."
 
 
 # --- Structured outputs ------------------------------------------------------
@@ -113,13 +201,6 @@ class ExtractorOutput(BaseModel):
     user_facts: List[UserFacts] = Field(
         default_factory=list,
         description="One entry per user who yielded new facts. Empty if nothing new was learned.",
-    )
-
-
-class ConsolidationOutput(BaseModel):
-    facts: List[str] = Field(
-        default_factory=list,
-        description="The full, de-duplicated and conflict-resolved profile as short sentences.",
     )
 
 
@@ -154,12 +235,22 @@ class ProfileExtractorOutput(BaseModel):
 
 
 class UserFactsState(TypedDict):
-    conversation: List[Dict[str, Any]]
-    # Maps each sender name in the conversation to its numeric user_id.
+    # Maps each sender name in the (whole) conversation to its numeric user_id.
+    # Built at the entry point from the structured conversation — the only thing
+    # still derived from it, since extraction_msgs (rendered strings) carry no ids
+    # and resolution must cover people who spoke only in the context portion.
     name_to_id: Dict[str, int]
     # Narrative summary of the just-finished conversation, injected into the
     # extractor prompt as {chat_summary} to enrich extractions.
     summary: str
+    # Pre-divided extraction history built once upstream (in
+    # app/services/memory.py::update_memories): the conversation rendered as LLM
+    # turns with the "already-processed" divider inserted. Both the facts and
+    # profile branches read these directly.
+    extraction_msgs: List[Any]
+    # False when every message is at or below the watermark (nothing new to
+    # extract), letting the facts branch short-circuit.
+    has_new: bool
     # Extracted new facts keyed by user_id.
     extracted: Dict[int, List[str]]
     # Originating chat, threaded through purely so node logs can be tagged and
@@ -172,12 +263,6 @@ _extractor_llm = ChatOpenRouter(
     api_key=settings.openrouter_api_key,
     temperature=0.0,
 ).with_structured_output(ExtractorOutput)
-
-_consolidation_llm = ChatOpenRouter(
-    model=settings.openrouter_model,
-    api_key=settings.openrouter_api_key,
-    temperature=0.0,
-).with_structured_output(ConsolidationOutput)
 
 _profile_extractor_llm = ChatOpenRouter(
     model=settings.openrouter_model,
@@ -220,26 +305,6 @@ def _render_existing_profiles(profiles_by_name: Dict[str, Dict[str, str]]) -> st
     return "\n\n".join(blocks)
 
 
-# --- Fact text <-> list helpers ----------------------------------------------
-
-
-def _parse_facts(text: str) -> List[str]:
-    """Parse a stored profile (one fact per `- ` bullet line) into a list."""
-    facts: List[str] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("- "):
-            facts.append(line[2:].strip())
-        elif line and not line.startswith("#"):
-            facts.append(line)
-    return [f for f in facts if f]
-
-
-def _format_facts(facts: List[str]) -> str:
-    """Render a list of facts as bullet lines for storage."""
-    return "\n".join(f"- {f}" for f in facts)
-
-
 # --- Nodes -------------------------------------------------------------------
 
 
@@ -247,16 +312,13 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
     tag = _tag(state.get("chat_id"))
     # Only the sender NAME is shown to the model — it is far less likely to
     # hallucinate a name than a numeric id. We resolve names back to ids below
-    # via name_to_id.
-    # History is built as concrete Message objects (not templated tuples) so any
-    # literal '{' or '}' in user content is passed through verbatim rather than
-    # parsed as an f-string placeholder, which would crash from_messages.
-    history_msgs = [
-        AIMessage(content=f"{entry['sender']}: {entry['content']}")
-        if entry["sender"] == BOT_NAME
-        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
-        for entry in state["conversation"]
-    ]
+    # via name_to_id. extraction_msgs is pre-divided upstream: older
+    # (already-processed) messages sit above the divider as context, only newer
+    # ones below are to be extracted.
+    if not state.get("has_new"):
+        print(f"{tag} no new messages since last processed; skipping extraction")
+        return {"extracted": {}}
+    history_msgs = state["extraction_msgs"]
 
     now = datetime.now(SGT)
     formatted_date = (
@@ -274,6 +336,10 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
     msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
     print(f"{tag} extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
     result: ExtractorOutput = await _extractor_llm.ainvoke(msgs)
+
+    if result is None:
+        print(f"{tag} extractor returned None (LLM parse failure); skipping")
+        return {"extracted": {}}
 
     name_to_id = state["name_to_id"]
     # Log exactly what the model returned vs. what names we can resolve, so the
@@ -302,48 +368,26 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
         extracted.setdefault(user_id, []).extend(facts)
 
     if not extracted:
-        print(f"{tag} nothing to consolidate (no resolvable new facts), ending")
+        print(f"{tag} nothing to ingest (no resolvable new facts), ending")
     for uid, facts in extracted.items():
         print(f"{tag} extracted facts for user {uid}")
         pprint(facts)
     return {"extracted": extracted}
 
 
-async def consolidation_node(payload: Dict) -> Dict:
-    """Merge one user's new facts into their stored profile and persist it.
+async def ingest_node(state: UserFactsState) -> Dict:
+    """Write each user's new facts into their Graphiti partition.
 
-    Fanned out one instance per user via Send, so each call handles a single
-    user_id and writes independently.
+    One episode per fact, under that user's group_id. All users' facts are
+    ingested sequentially — ``ingest_facts`` serialises episode writes under the
+    shared Graphiti lock anyway (concurrent add_episode calls race the shared
+    graph), and Graphiti's own dedup / temporal conflict resolution replaces the
+    old LLM consolidation pass entirely.
     """
-    user_id: int = payload["user_id"]
-    extracted: List[str] = payload["new_facts"]
-    tag = _tag(payload.get("chat_id"))
-
-    # Serialise the whole read-modify-write per user so concurrent conversations
-    # touching the same user can't clobber each other's profile.
-    async with _user_locks[user_id]:
-        existing = _parse_facts(await get_user_facts(user_id))
-
-        existing_facts_text = "\n".join(f"- {f}" for f in existing) or "(none)"
-        new_facts_text = "\n".join(f"- {f}" for f in extracted)
-
-        prompt = ChatPromptTemplate.from_messages(
-            [("system", USER_FACT_CONSOLIDATION_SYSTEM_PROMPT)]
-        )
-        msgs = prompt.format_messages(
-            bot_name=BOT_NAME, existing_facts=existing_facts_text, new_facts=new_facts_text
-        )
-        msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
-        print(f"{tag} consolidation context (user {user_id}): {len(msgs)} messages, {msgs_tokens} tokens")
-        result: ConsolidationOutput = await _consolidation_llm.ainvoke(msgs)
-        facts = [f.strip() for f in result.facts if f.strip()]
-
-        facts_text = _format_facts(facts)
-        await set_user_facts(user_id, facts_text)
-        # Write-through the responder's cache so it doesn't serve the stale
-        # pre-consolidation profile for up to USER_FACTS_CACHE_TTL.
-        update_user_facts_cache(user_id, facts_text)
-        print(f"{tag} user {user_id} profile updated ({len(facts)} fact(s))")
+    tag = _tag(state.get("chat_id"))
+    for user_id, facts in state["extracted"].items():
+        await add_user_facts(user_id, facts)
+        print(f"{tag} ingested {len(facts)} fact(s) for user {user_id} into Graphiti")
     return {}
 
 
@@ -360,14 +404,20 @@ async def profile_extraction_update_node(state: UserFactsState) -> Dict:
     read-modify-write their profile under the per-user lock and write through the
     responder's cache.
     """
+    # Imported lazily: app.services.llm imports this module for the
+    # search_user_facts tool, so a top-level import here would be circular.
+    from app.services.llm import get_user_profiles_cached, update_user_profile_cache
+
     tag = _profile_tag(state.get("chat_id"))
     name_to_id = state["name_to_id"]
-    history_msgs = [
-        AIMessage(content=f"{entry['sender']}: {entry['content']}")
-        if entry["sender"] == BOT_NAME
-        else HumanMessage(content=f"{entry['sender']}: {entry['content']}")
-        for entry in state["conversation"]
-    ]
+    # extraction_msgs is pre-divided upstream: older (already-processed) messages
+    # sit above the divider as context, only newer ones below are to be extracted.
+    # Short-circuit when there is nothing new so we neither re-derive profile slots
+    # from already-processed messages nor spend an LLM call.
+    if not state.get("has_new"):
+        print(f"{tag} no new messages since last processed; skipping profile extraction")
+        return {}
+    history_msgs = state["extraction_msgs"]
 
     # Show the model each participant's CURRENT stored profile so it can skip
     # already-known slots and concentrate on the empty ones / genuine updates.
@@ -393,6 +443,10 @@ async def profile_extraction_update_node(state: UserFactsState) -> Dict:
     msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
     print(f"{tag} profile extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
     result: ProfileExtractorOutput = await _profile_extractor_llm.ainvoke(msgs)
+
+    if result is None:
+        print(f"{tag} profile extractor returned None (LLM parse failure); skipping")
+        return {}
 
     returned = [
         (e.sender, len([k for k in _PROFILE_KEYS if getattr(e.profile, k, "").strip()]))
@@ -447,38 +501,31 @@ async def profile_extraction_update_node(state: UserFactsState) -> Dict:
     return {}
 
 
-def _route_after_extraction(state: UserFactsState):
-    """Fan out one consolidation_node per user; skip entirely if nothing new."""
-    extracted = state["extracted"]
-    if not extracted:
-        return END
-    chat_id = state.get("chat_id")
-    return [
-        Send("consolidation_node", {"user_id": user_id, "new_facts": facts, "chat_id": chat_id})
-        for user_id, facts in extracted.items()
-    ]
+def _route_after_extraction(state: UserFactsState) -> str:
+    """Skip ingestion when nothing new was learned about anyone."""
+    return "ingest_node" if state["extracted"] else END
 
 
 def _build_graph():
     graph: StateGraph = StateGraph(UserFactsState)
     graph.add_node("fact_extractor_node", fact_extractor_node)
-    graph.add_node("consolidation_node", consolidation_node)
+    graph.add_node("ingest_node", ingest_node)
     graph.add_node("profile_extraction_update_node", profile_extraction_update_node)
 
     # Two independent branches fan out from START in parallel: free-form facts
     # and the fixed-slot profile. They read the same conversation but write to
-    # different storage (facts text column vs. profile JSONB), then join at END.
-    #
-    # The facts branch still splits extraction from a per-user LLM consolidation
-    # fan-out; the profile branch does extraction + a deterministic field-level
-    # write in a single node, so it needs no routing or fan-out of its own.
+    # different storage (per-user Graphiti partitions vs. profile JSONB), then
+    # join at END. The facts branch mirrors the world-view pipeline: extract,
+    # then ingest into Graphiti (which handles dedup/conflicts itself); the
+    # profile branch does extraction + a deterministic field-level write in a
+    # single node, so it needs no routing of its own.
     graph.add_edge(START, "fact_extractor_node")
     graph.add_conditional_edges(
         "fact_extractor_node",
         _route_after_extraction,
-        ["consolidation_node", END],
+        {"ingest_node": "ingest_node", END: END},
     )
-    graph.add_edge("consolidation_node", END)
+    graph.add_edge("ingest_node", END)
 
     graph.add_edge(START, "profile_extraction_update_node")
     graph.add_edge("profile_extraction_update_node", END)
@@ -489,13 +536,23 @@ _graph = _build_graph()
 
 
 async def update_user_facts(
-    conversation: List[Dict[str, Any]], summary: str = "", chat_id: int | None = None
+    conversation: List[Dict[str, Any]],
+    extraction_msgs: List[Any],
+    has_new: bool,
+    summary: str = "",
+    chat_id: int | None = None,
 ) -> None:
-    """Extract per-user facts from a finished conversation and merge each into DB.
+    """Extract per-user facts from a finished conversation and ingest into Graphiti.
 
+    ``extraction_msgs`` / ``has_new`` are the pre-divided extraction history built
+    once upstream (app/services/memory.py::update_memories); both branches extract
+    only from messages newer than the watermark. The raw ``conversation`` is used
+    solely to build the name→id map (extraction_msgs carry no ids, and resolution
+    must cover people who spoke only in the already-processed context portion).
+
+    Also runs the parallel profile branch, which still writes to Postgres.
     Never raises — errors are caught and logged so memory upkeep can't crash the
-    caller. Per-user consolidations run in parallel and each writes its own row,
-    so there is no shared file to serialise.
+    caller.
     """
     if not conversation:
         return
@@ -510,9 +567,10 @@ async def update_user_facts(
     }
 
     state: UserFactsState = {
-        "conversation": conversation,
         "name_to_id": name_to_id,
         "summary": summary or "",
+        "extraction_msgs": extraction_msgs,
+        "has_new": has_new,
         "extracted": {},
         "chat_id": chat_id,
     }

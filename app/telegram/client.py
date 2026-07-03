@@ -23,15 +23,16 @@ from app.repository import (
     delete_summary,
     get_history,
     get_history_min_id,
+    get_last_processed_message_id,
     get_summary,
     get_summary_mood,
     rewrite_history,
+    set_last_processed_message_id,
     set_summary,
     upsert_user,
 )
 from app.services.llm import get_chat_mood, get_response, set_chat_mood
-from app.services.userfacts import update_user_facts
-from app.services.worldview import update_worldview
+from app.services.memory import update_memories
 from app.telegram.bot import ADMIN
 from app.utils import parse_history
 
@@ -41,7 +42,7 @@ client = TelegramClient("anon", settings.telegram_api_id, settings.telegram_api_
 
 # constants
 REPLY_DELAY = 7             # seconds to wait after last message before replying
-CHAT_BLACKOUT_TIME = 60 * 3          # 3 min of inactivity before flushing buffer to DB
+CHAT_BLACKOUT_TIME = 60 *3          # 3 min of inactivity before flushing buffer to DB
 N_PAST_MSG_REQUIRED = 40         # messages pre-loaded on first contact and fed to LLM as context
 MAX_BUFFER_LEN = 150             # flush to DB immediately if buffer hits this length
 TYPING_SPEED = 22                # characters per second
@@ -64,12 +65,17 @@ class BufferedMessage(BaseModel):
         return {
             "sender": self.sender_name,
             "content": self.content,
+            # Carried so the responder's divider can partition on a causal
+            # watermark (highest id already responded to) rather than on
+            # Rachel's last-reply position — see llm._partition_index.
+            "telegram_message_id": self.telegram_message_id,
         }
     def to_llm_dict_full(self) -> Dict[str, Any]:
         return {
             "sender": self.sender_name,
             "sender_user_id": self.sender_user_id,
             "content": self.content,
+            "telegram_message_id": self.telegram_message_id,
         }
 
 
@@ -85,6 +91,19 @@ last_message_time: Dict[int, float] = {}
 # prevents two replies from interleaving their sends and from reading stale
 # context (Rachel not "seeing" what she just said). Created lazily per chat_id.
 reply_locks: Dict[int, asyncio.Lock] = {}
+# Per-chat causal watermark: the highest telegram_message_id Rachel has already
+# responded to (max id of the context she last replied against). Passed to
+# get_response so the divider partitions on "what's new since I last replied"
+# instead of on Rachel's last-reply *position* in the buffer — which is unreliable
+# because a message arriving mid-generation sorts (by send-time id) *behind* her
+# later reply, hiding it. Monotonic; never rewound.
+responded_watermark: Dict[int, int] = {}
+# Per-chat sticky mention flag: set whenever an incoming message tags/replies-to
+# Rachel, consumed when she actually replies. Needed because the reply task fires
+# on the *latest* event, so a mention in an earlier message of a burst would be
+# lost (and the router wrongly consulted) if an untagged message follows within
+# REPLY_DELAY. Latching it here keeps must_reply true across the whole burst.
+pending_mention: Dict[int, bool] = {}
 
 
 # helper functions
@@ -180,6 +199,15 @@ async def _reply(event):
             
         context_msgs = buffer[-N_PAST_MSG_REQUIRED:]
         context = [m.to_llm_dict() for m in context_msgs]
+        # Causal watermark for the divider: the highest id in the context Rachel
+        # is about to respond against. Anything that arrives later (even mid-send,
+        # which by send-time id sorts behind her reply) counts as new next time.
+        # Advance it now, before generation, so a message that lands during this
+        # LLM call is still treated as unanswered on the following reply.
+        watermark = responded_watermark.get(chat_id)
+        if context_msgs:
+            new_watermark = max(m.telegram_message_id for m in context_msgs)
+            responded_watermark[chat_id] = max(watermark or 0, new_watermark)
         # Unique senders in the context (excluding Rachel herself) as an
         # id -> name map, so the responder can pull each participant's stored
         # facts/preferences and render them by name. Later messages win on name
@@ -194,8 +222,12 @@ async def _reply(event):
         # tagged/replied-to in a group. In a 1-on-1 DM (not is_group) she still
         # runs the router, but with the PM-specific gate that only suppresses
         # low-information acknowledgements and already-answered messages.
+        # Read the sticky mention flag rather than this single event's .mentioned:
+        # the reply fires on the latest event of a burst, so an @mention in an
+        # earlier message would otherwise be lost. Consume it here — once she
+        # replies, the mention is handled (a new tag re-latches it independently).
         is_private = bool(event.is_private)
-        must_reply = bool(event.mentioned) 
+        must_reply = pending_mention.pop(chat_id, False) or bool(event.mentioned)
 
         try:
             response, response_reason, new_summary, load_time = await get_response(
@@ -205,6 +237,7 @@ async def _reply(event):
                 senders=senders,
                 must_reply=must_reply,
                 is_private=is_private,
+                responded_watermark=watermark,
             )
         except Exception as e:
             print(f"[{chat_id}] get_response failed ({type(e).__name__}: {e}), retrying once...")
@@ -215,6 +248,7 @@ async def _reply(event):
                 senders=senders,
                 must_reply=must_reply,
                 is_private=is_private,
+                responded_watermark=watermark,
             )
 
         if new_summary is not None:
@@ -326,11 +360,20 @@ async def finalize_conversation(chat_id: int, delay: float):
     # Snapshot the conversation summary before _flush_chat pops it from
     # pending_summaries; falls back to the persisted summary in DB.
     summary = pending_summaries.get(chat_id) or await get_summary(chat_id)
+    # Memory-pipeline watermark: only messages newer than this are extracted from
+    # (older ones were already processed in a previous finalize). Read before the
+    # pipelines run and passed in; both share this single per-chat value.
+    last_processed_id = await get_last_processed_message_id(chat_id)
     await _flush_chat(chat_id)
     if conversation:
-        asyncio.create_task(update_worldview(conversation, chat_id))
-        asyncio.create_task(update_user_facts(conversation, summary, chat_id))
-        print(f"[{chat_id}] Worldview + user-facts pipelines called")
+        asyncio.create_task(update_memories(conversation, summary, chat_id, last_processed_id))
+        # Advance the watermark once to the newest message we just handed off, so
+        # the next finalize treats everything up to here as already-processed.
+        # Done here (not inside the pipelines) so it happens exactly once.
+        new_last_id = max(int(m["telegram_message_id"]) for m in conversation)
+        if new_last_id > last_processed_id:
+            await set_last_processed_message_id(chat_id, new_last_id)
+        print(f"[{chat_id}] Memory pipelines called")
 
 
 async def flush_all_buffers() -> None:
@@ -424,13 +467,19 @@ async def new_message(event):
     # On first contact for this chat, pre-load recent history into the buffer
     if chat_id not in current_messages_buffer:
         current_messages_buffer[chat_id] = []
+        # Tag Rachel's own past messages by id, not by resolved name: get_history
+        # resolves her turns to her Telegram first name (via COALESCE), which need
+        # not equal BOT_NAME. The downstream partition/AIMessage logic keys off
+        # sender == BOT_NAME, so normalize her seeded turns to BOT_NAME here.
+        me = await client.get_me()
         past = await get_history(chat_id, N_PAST_MSG_REQUIRED)
         for h in past:
+            is_bot = h["sender_user_id"] == me.id
             current_messages_buffer[chat_id].append(
                 BufferedMessage(
                     telegram_message_id=h["telegram_message_id"],
                     sender_user_id=h["sender_user_id"],
-                    sender_name=h["sender"],
+                    sender_name=BOT_NAME if is_bot else h["sender"],
                     content=h["content"],
                     is_persisted=True,
                 )
@@ -474,6 +523,12 @@ async def new_message(event):
     print(f"[{chat_id}] buffer length: {len(current_messages_buffer[chat_id])}")
 
     last_message_time[chat_id] = time.time()
+
+    # Latch a mention so it survives the rest of the burst: the reply task fires
+    # on the latest event, so without this an @mention/reply-to in an earlier
+    # message would be dropped and the router wrongly consulted. Consumed in _reply.
+    if event.mentioned:
+        pending_mention[chat_id] = True
 
     # Rachel considers replying to every message — private or group, tagged or
     # not. Whether a reply is actually warranted is decided downstream by the

@@ -2,7 +2,7 @@
 
 Original SQLite tables (see Reference/app/db.py):
     SystemPrompt(SystemPrompt TEXT)
-    Summary(chat_id INTEGER PK, summary TEXT)  # now SummaryMood(chat_id, summary, mood)
+    Summary(chat_id INTEGER PK, summary TEXT)  # now ChatState(chat_id, summary, mood, last_processed_message_id)
     History(message_id INTEGER PK AUTOINCREMENT, chat_id INTEGER, sender TEXT, content TEXT)
 """
 
@@ -28,15 +28,26 @@ class SystemPrompt(Base):
     summarizer_system_prompt: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
 
 
-class SummaryMood(Base):
-    __tablename__ = "summary_mood"
+class ChatState(Base):
+    __tablename__ = "chat_state"
 
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    # server_default="" so a row can be inserted watermark-first (before any
+    # summary exists) — e.g. a busy group Rachel never replies in still runs the
+    # memory pipelines and advances the watermark without ever writing a summary.
+    summary: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     # Last conversational mood detected for this chat (one of MOOD_LABELS).
     # Persisted alongside the summary so it survives restarts and can re-seed
     # the in-memory mood cache when the chat is next loaded.
     mood: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    # Per-chat high-water mark for the memory pipelines (worldview + userfacts):
+    # the highest telegram_message_id already handed to the fact extractors.
+    # Messages at or below it are already-processed context; only newer ones are
+    # extracted from. Both pipelines share this single value (they run on the same
+    # finalized snapshot) and it is advanced once per finalize.
+    last_processed_message_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0"
+    )
 
 
 class User(Base):
@@ -86,10 +97,11 @@ class UserFactsPreferences(Base):
     __tablename__ = "user_facts_preferences"
 
     # References users.telegram_user_id — no FK constraint to avoid cascade issues.
+    # Free-form facts used to live here too (a `facts` text column); they are now
+    # stored in Graphiti/Neo4j under a per-user group_id (see
+    # app/services/worldview.py::user_facts_group_id), so only the fixed-slot
+    # profile remains in Postgres.
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    # Open-ended, free-form facts maintained by the userfacts extract→consolidate
-    # pipeline (one fact per `- ` bullet line).
-    facts: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     # Fixed-slot structured profile (generation, life stage, food vibe, …). A
     # single JSONB blob rather than one column per attribute: the field set is
     # defined in code (app.prompts.USER_PROFILE_FIELDS) and only ever rendered

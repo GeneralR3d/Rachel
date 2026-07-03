@@ -14,10 +14,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import session_scope
 from app.models import (
+    ChatState,
     History,
     PersonalityTrait,
     ScheduleActivity,
-    SummaryMood,
     SystemPrompt,
     User,
     UserFactsPreferences,
@@ -169,67 +169,8 @@ async def ensure_schedule_seeded() -> None:
 
 
 # --- weekly schedule ------------------------------------------------------
-
-
-def _activity_to_dict(a: ScheduleActivity, partial: bool = False) -> dict:
-    if partial:
-        return {
-            "name": a.name,
-            "duration_hours": a.duration_hours,
-            "location": a.location,
-        }
-    return {
-        "day_of_week": a.day_of_week,
-        "start_hour": a.start_hour,
-        "name": a.name,
-        "description": a.description,
-        "location": a.location,
-        "duration_hours": a.duration_hours,
-        "ends_at": f"{(a.start_hour + a.duration_hours) % 24:02d}:00",
-        "companions": a.companions,
-        "reason": a.reason,
-        "interesting_event": a.interesting_event,
-    }
-
-
-async def get_current_activity(day_of_week: int, hour: int) -> Optional[dict]:
-    """Return the activity covering the given hour of the given day, if any.
-
-    Also checks the previous day for activities that start late and run past
-    midnight (e.g. start_hour=23, duration_hours=8 covers 23:00-07:00).
-    """
-    previous_day = (day_of_week - 1) % 7
-    async with session_scope() as session:
-        activity = await session.scalar(
-            select(ScheduleActivity).where(
-                sa.or_(
-                    sa.and_(
-                        ScheduleActivity.day_of_week == day_of_week,
-                        ScheduleActivity.start_hour <= hour,
-                        ScheduleActivity.start_hour + ScheduleActivity.duration_hours > hour,
-                    ),
-                    sa.and_(
-                        ScheduleActivity.day_of_week == previous_day,
-                        ScheduleActivity.start_hour + ScheduleActivity.duration_hours > 24,
-                        ScheduleActivity.start_hour + ScheduleActivity.duration_hours - 24 > hour,
-                    ),
-                )
-            )
-        )
-    return _activity_to_dict(activity) if activity is not None else None
-
-
-async def get_day_summary(day_of_week: int) -> list[dict]:
-    """Return only name, duration_hours and location for the day's activities, ordered by start time."""
-    async with session_scope() as session:
-        rows = (
-            await session.execute(
-                select(ScheduleActivity)
-                .where(ScheduleActivity.day_of_week == day_of_week)
-                .order_by(ScheduleActivity.start_hour)
-            )
-        ).scalars().all()
-    return [_activity_to_dict(a, partial=True) for a in rows]
+# Schedule lookups (get_current_activity / get_day_summary / …) now live in
+# app/calander.py, alongside the LangChain tool wrappers built on top of them.
 
 
 async def ensure_system_prompts_seeded() -> None:
@@ -498,7 +439,7 @@ async def rewrite_history(chat_id: int, parsed_history: list[dict]) -> None:
 async def get_summary(chat_id: int) -> Union[str, None]:
     async with session_scope() as session:
         return await session.scalar(
-            select(SummaryMood.summary).where(SummaryMood.chat_id == chat_id)
+            select(ChatState.summary).where(ChatState.chat_id == chat_id)
         )
 
 
@@ -507,8 +448,8 @@ async def get_summary_mood(chat_id: int) -> tuple[Union[str, None], Union[str, N
     async with session_scope() as session:
         row = (
             await session.execute(
-                select(SummaryMood.summary, SummaryMood.mood).where(
-                    SummaryMood.chat_id == chat_id
+                select(ChatState.summary, ChatState.mood).where(
+                    ChatState.chat_id == chat_id
                 )
             )
         ).first()
@@ -518,9 +459,9 @@ async def get_summary_mood(chat_id: int) -> tuple[Union[str, None], Union[str, N
 async def set_summary(chat_id: int, summary: str, mood: str = "default") -> None:
     """Upsert the summary and last-detected mood for a chat."""
     async with session_scope() as session:
-        stmt = pg_insert(SummaryMood).values(chat_id=chat_id, summary=summary, mood=mood)
+        stmt = pg_insert(ChatState).values(chat_id=chat_id, summary=summary, mood=mood)
         stmt = stmt.on_conflict_do_update(
-            index_elements=[SummaryMood.chat_id],
+            index_elements=[ChatState.chat_id],
             set_={"summary": summary, "mood": mood},
         )
         await session.execute(stmt)
@@ -528,54 +469,37 @@ async def set_summary(chat_id: int, summary: str, mood: str = "default") -> None
 
 async def delete_summary(chat_id: int) -> None:
     async with session_scope() as session:
-        await session.execute(delete(SummaryMood).where(SummaryMood.chat_id == chat_id))
+        await session.execute(delete(ChatState).where(ChatState.chat_id == chat_id))
 
 
-# --- user facts / preferences ---------------------------------------------
-
-
-async def get_user_facts(user_id: int) -> str:
-    """Return the raw facts/preferences text for a user, or "" if none stored yet."""
+async def get_last_processed_message_id(chat_id: int) -> int:
+    """Return the memory-pipeline high-water mark for a chat (0 if none yet)."""
     async with session_scope() as session:
-        facts = await session.scalar(
-            select(UserFactsPreferences.facts).where(UserFactsPreferences.user_id == user_id)
+        val = await session.scalar(
+            select(ChatState.last_processed_message_id).where(ChatState.chat_id == chat_id)
         )
-    return facts or ""
+    return val or 0
 
 
-async def get_user_facts_batch(user_ids: list[int]) -> dict[int, str]:
-    """Return facts/preferences text for many users in a single query.
+async def set_last_processed_message_id(chat_id: int, message_id: int) -> None:
+    """Advance a chat's memory-pipeline watermark, inserting the row if needed.
 
-    Keyed by user_id; users with no stored facts are simply absent from the dict.
-    """
-    if not user_ids:
-        return {}
+    Only ``last_processed_message_id`` is written; summary/mood are left to their
+    own upsert (or the row's defaults on first insert)."""
     async with session_scope() as session:
-        rows = (
-            await session.execute(
-                select(UserFactsPreferences.user_id, UserFactsPreferences.facts)
-                .where(UserFactsPreferences.user_id.in_(user_ids))
-            )
-        ).all()
-    return {r.user_id: r.facts for r in rows if r.facts}
-
-
-async def set_user_facts(user_id: int, facts: str) -> None:
-    """Upsert the full facts/preferences text for a user."""
-    async with session_scope() as session:
-        stmt = pg_insert(UserFactsPreferences).values(user_id=user_id, facts=facts)
+        stmt = pg_insert(ChatState).values(
+            chat_id=chat_id, last_processed_message_id=message_id
+        )
         stmt = stmt.on_conflict_do_update(
-            index_elements=[UserFactsPreferences.user_id],
-            set_={"facts": facts, "updated_at": func.now()},
+            index_elements=[ChatState.chat_id],
+            set_={"last_processed_message_id": message_id},
         )
         await session.execute(stmt)
 
 
-async def delete_user_facts(user_id: int) -> None:
-    async with session_scope() as session:
-        await session.execute(
-            delete(UserFactsPreferences).where(UserFactsPreferences.user_id == user_id)
-        )
+# --- user profiles ----------------------------------------------------------
+# Free-form user facts now live in Graphiti/Neo4j (see app/services/worldview.py
+# and app/services/userfacts.py); only the fixed-slot profile stays in Postgres.
 
 
 async def delete_user_profile(user_id: int) -> None:
@@ -614,11 +538,7 @@ async def get_user_profiles_batch(user_ids: list[int]) -> dict[int, dict]:
 
 
 async def set_user_profile(user_id: int, profile: dict) -> None:
-    """Upsert the structured profile blob for a user.
-
-    Touches only the `profile` column so it never clobbers the free-form `facts`
-    written by the parallel facts pipeline (and vice versa).
-    """
+    """Upsert the structured profile blob for a user."""
     async with session_scope() as session:
         stmt = pg_insert(UserFactsPreferences).values(user_id=user_id, profile=profile)
         stmt = stmt.on_conflict_do_update(
