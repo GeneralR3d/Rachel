@@ -42,7 +42,7 @@ client = TelegramClient("anon", settings.telegram_api_id, settings.telegram_api_
 
 # constants
 REPLY_DELAY = 7             # seconds to wait after last message before replying
-CHAT_BLACKOUT_TIME = 60          # 3 min of inactivity before flushing buffer to DB
+CHAT_BLACKOUT_TIME = 60 *30           # 3 min of inactivity before flushing buffer to DB
 N_PAST_MSG_REQUIRED = 40         # messages pre-loaded on first contact and fed to LLM as context
 MAX_BUFFER_LEN = 150             # flush to DB immediately if buffer hits this length
 TYPING_SPEED = 22                # characters per second
@@ -98,6 +98,12 @@ reply_locks: Dict[int, asyncio.Lock] = {}
 # because a message arriving mid-generation sorts (by send-time id) *behind* her
 # later reply, hiding it. Monotonic; never rewound.
 responded_watermark: Dict[int, int] = {}
+# Per-chat sticky mention flag: set whenever an incoming message tags/replies-to
+# Rachel, consumed when she actually replies. Needed because the reply task fires
+# on the *latest* event, so a mention in an earlier message of a burst would be
+# lost (and the router wrongly consulted) if an untagged message follows within
+# REPLY_DELAY. Latching it here keeps must_reply true across the whole burst.
+pending_mention: Dict[int, bool] = {}
 
 
 # helper functions
@@ -216,8 +222,12 @@ async def _reply(event):
         # tagged/replied-to in a group. In a 1-on-1 DM (not is_group) she still
         # runs the router, but with the PM-specific gate that only suppresses
         # low-information acknowledgements and already-answered messages.
+        # Read the sticky mention flag rather than this single event's .mentioned:
+        # the reply fires on the latest event of a burst, so an @mention in an
+        # earlier message would otherwise be lost. Consume it here — once she
+        # replies, the mention is handled (a new tag re-latches it independently).
         is_private = bool(event.is_private)
-        must_reply = bool(event.mentioned) 
+        must_reply = pending_mention.pop(chat_id, False) or bool(event.mentioned)
 
         try:
             response, response_reason, new_summary, load_time = await get_response(
@@ -513,6 +523,12 @@ async def new_message(event):
     print(f"[{chat_id}] buffer length: {len(current_messages_buffer[chat_id])}")
 
     last_message_time[chat_id] = time.time()
+
+    # Latch a mention so it survives the rest of the burst: the reply task fires
+    # on the latest event, so without this an @mention/reply-to in an earlier
+    # message would be dropped and the router wrongly consulted. Consumed in _reply.
+    if event.mentioned:
+        pending_mention[chat_id] = True
 
     # Rachel considers replying to every message — private or group, tagged or
     # not. Whether a reply is actually warranted is decided downstream by the
