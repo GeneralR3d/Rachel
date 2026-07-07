@@ -335,7 +335,14 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
     msgs = [*system_msgs, *history_msgs]
     msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
     print(f"{tag} extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
-    result: ExtractorOutput = await _extractor_llm.ainvoke(msgs)
+    try:
+        result: ExtractorOutput = await _extractor_llm.ainvoke(msgs)
+    except Exception as e:
+        # A transient provider/transport error (e.g. an OpenRouter 403 error body)
+        # must not abort the whole graph and discard the parallel profile branch —
+        # skip fact extraction this round, same as a parse failure.
+        print(f"{tag} extractor LLM call failed ({type(e).__name__}: {e}); skipping")
+        return {"extracted": {}}
 
     if result is None:
         print(f"{tag} extractor returned None (LLM parse failure); skipping")
@@ -442,7 +449,14 @@ async def profile_extraction_update_node(state: UserFactsState) -> Dict:
     msgs = [*system_msgs, *history_msgs]
     msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
     print(f"{tag} profile extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
-    result: ProfileExtractorOutput = await _profile_extractor_llm.ainvoke(msgs)
+    try:
+        result: ProfileExtractorOutput = await _profile_extractor_llm.ainvoke(msgs)
+    except Exception as e:
+        # A transient provider/transport error (e.g. an OpenRouter 403 error body)
+        # must not abort the whole graph and discard the parallel fact branch —
+        # skip the profile update this round, same as a parse failure.
+        print(f"{tag} profile extractor LLM call failed ({type(e).__name__}: {e}); skipping")
+        return {}
 
     if result is None:
         print(f"{tag} profile extractor returned None (LLM parse failure); skipping")

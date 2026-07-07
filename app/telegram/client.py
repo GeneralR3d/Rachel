@@ -192,6 +192,10 @@ async def _reply(event):
             # summary *and* mood, re-seeding the in-memory mood so it survives
             # restarts (otherwise the responder would reset to the default mood).
             current_summary, persisted_mood = await get_summary_mood(chat_id)
+            # Coerce a missing summary to "" — the chat_state.summary column is
+            # NOT NULL (with a "" server default), so a None seeded here would
+            # blow up set_summary() at flush time if the summarizer returns NIL.
+            current_summary = current_summary or ""
             pending_summaries[chat_id] = current_summary
             if persisted_mood:
                 set_chat_mood(chat_id, persisted_mood)

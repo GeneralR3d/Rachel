@@ -458,6 +458,7 @@ async def get_summary_mood(chat_id: int) -> tuple[Union[str, None], Union[str, N
 
 async def set_summary(chat_id: int, summary: str, mood: str = "default") -> None:
     """Upsert the summary and last-detected mood for a chat."""
+    summary = summary or ""  # summary column is NOT NULL; coerce None → ""
     async with session_scope() as session:
         stmt = pg_insert(ChatState).values(chat_id=chat_id, summary=summary, mood=mood)
         stmt = stmt.on_conflict_do_update(
