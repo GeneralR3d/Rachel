@@ -1,6 +1,6 @@
 # Rachel
 
-> A Telegram chatbot that texts like a real person — a 22-year-old Singaporean university student with moods, memory, a weekly schedule, and a tunable personality — not like a chatbot.
+> A Telegram agent that texts like a real person — a 22-year-old Singaporean university student with moods, memory, a weekly schedule, and a tunable personality — not like a chatbot.
 
 ![Python](https://img.shields.io/badge/python-%E2%89%A53.11-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-async-009688)
