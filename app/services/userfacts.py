@@ -62,6 +62,7 @@ from app.repository import (
     set_user_profile,
 )
 from app.services.graphiti import ingest_facts, list_episodes, search_graph
+from app.services.metrics import LLM_CALLS, record_llm_error
 
 # NOTE: app.services.llm imports this module (for the search_user_facts tool),
 # so the profile-cache helpers it provides (get_user_profiles_cached /
@@ -335,13 +336,15 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
     msgs = [*system_msgs, *history_msgs]
     msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
     print(f"{tag} extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
+    LLM_CALLS.labels(node="userfacts_extractor").inc()
     try:
         result: ExtractorOutput = await _extractor_llm.ainvoke(msgs)
     except Exception as e:
         # A transient provider/transport error (e.g. an OpenRouter 403 error body)
         # must not abort the whole graph and discard the parallel profile branch —
         # skip fact extraction this round, same as a parse failure.
-        print(f"{tag} extractor LLM call failed ({type(e).__name__}: {e}); skipping")
+        kind = record_llm_error("userfacts_extractor", e)
+        print(f"{tag} extractor LLM call failed ({kind}: {type(e).__name__}: {e}); skipping")
         return {"extracted": {}}
 
     if result is None:
@@ -449,13 +452,15 @@ async def profile_extraction_update_node(state: UserFactsState) -> Dict:
     msgs = [*system_msgs, *history_msgs]
     msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
     print(f"{tag} profile extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
+    LLM_CALLS.labels(node="userfacts_profile").inc()
     try:
         result: ProfileExtractorOutput = await _profile_extractor_llm.ainvoke(msgs)
     except Exception as e:
         # A transient provider/transport error (e.g. an OpenRouter 403 error body)
         # must not abort the whole graph and discard the parallel fact branch —
         # skip the profile update this round, same as a parse failure.
-        print(f"{tag} profile extractor LLM call failed ({type(e).__name__}: {e}); skipping")
+        kind = record_llm_error("userfacts_profile", e)
+        print(f"{tag} profile extractor LLM call failed ({kind}: {type(e).__name__}: {e}); skipping")
         return {}
 
     if result is None:

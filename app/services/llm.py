@@ -44,6 +44,7 @@ from pprint import pprint
 import tiktoken
 
 from app.services import worldview
+from app.services.metrics import LLM_CALLS, record_llm_error
 
 _tokenizer = tiktoken.get_encoding("cl100k_base")
 
@@ -434,10 +435,12 @@ async def router_node(state: GraphState) -> Dict:
     msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
     print(f"[router] context: {len(msgs)} messages, {msgs_tokens} tokens")
 
+    LLM_CALLS.labels(node="router").inc()
     try:
         result = await _router_llm.ainvoke(msgs)
     except Exception as e:
-        print(f"[router] LLM error (defaulting to reply): {type(e).__name__}: {e}")
+        kind = record_llm_error("router", e)
+        print(f"[router] LLM error ({kind}; defaulting to reply): {type(e).__name__}: {e}")
         return {"should_reply": True}
 
     parsed: RouterOutput | None = result.get("parsed")
@@ -495,10 +498,12 @@ async def summarizer_node(state: GraphState) -> Dict:
     msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
     print(f"[summarizer] context: {len(msgs)} messages, {msgs_tokens} tokens")
 
+    LLM_CALLS.labels(node="summarizer").inc()
     try:
         result: SummarizerOutput = await _summarizer_llm.ainvoke(msgs)
     except Exception as e:
-        print(f"[summarizer] LLM error (keeping current mood/summary): {type(e).__name__}: {e}")
+        kind = record_llm_error("summarizer", e)
+        print(f"[summarizer] LLM error ({kind}; keeping current mood/summary): {type(e).__name__}: {e}")
         return {}
     print(f"Detected mood: {result.mood} | Summary: {result.summary}")
     if result.summary == "NIL":
@@ -652,15 +657,18 @@ async def context_fetcher_node(state: GraphState) -> Dict:
     Runs in parallel with summarizer_node. Never raises and never stalls the
     pipeline: on any error or timeout it falls open to empty context (the
     responder still has the mood/summary and can reply without extras)."""
+    LLM_CALLS.labels(node="context_fetcher").inc()
     try:
         schedule_context, world_view, user_facts, user_profiles = await asyncio.wait_for(
             _run_context_fetcher(state), timeout=CONTEXT_FETCHER_TIMEOUT
         )
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as e:
+        record_llm_error("context_fetcher", e)
         print(f"[context_fetcher] timed out after {CONTEXT_FETCHER_TIMEOUT}s (no extra context)")
         return {"schedule_context": "", "world_view": "", "user_facts": "", "user_profiles": ""}
     except Exception as e:
-        print(f"[context_fetcher] error (no extra context): {type(e).__name__}: {e}")
+        kind = record_llm_error("context_fetcher", e)
+        print(f"[context_fetcher] error ({kind}; no extra context): {type(e).__name__}: {e}")
         return {"schedule_context": "", "world_view": "", "user_facts": "", "user_profiles": ""}
 
     print(
@@ -745,6 +753,7 @@ async def responder_node(state: GraphState) -> Dict:
         msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
         print(f"[responder] TOTAL context: {len(msgs)} messages, {msgs_tokens} tokens")
 
+        LLM_CALLS.labels(node="responder").inc()
         try:
             result: ResponseOutput = await _responder_llm.ainvoke(msgs)
         except OutputParserException as e:
@@ -757,6 +766,7 @@ async def responder_node(state: GraphState) -> Dict:
                 raw = raw[len(prefix):].strip()
             if not raw:
                 raise
+            record_llm_error("responder", e)
             print(f"[responder] json parse failed; salvaging raw text ({len(raw)} chars)")
             return {
                 "response_text": raw,
@@ -766,6 +776,10 @@ async def responder_node(state: GraphState) -> Dict:
         return {"response_text": result.content, "response_reason": result.reason}
     except BaseException as e:
         import traceback
+        # Don't count cooperative cancellation (a racing new message cancels the
+        # shielded reply task) as an LLM failure — only real errors.
+        if not isinstance(e, asyncio.CancelledError):
+            record_llm_error("responder", e)
         print(f"[responder] EXCEPTION {type(e).__name__}: {e}")
         traceback.print_exc()
         raise

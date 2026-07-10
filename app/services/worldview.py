@@ -39,6 +39,7 @@ from typing_extensions import TypedDict
 from app.config import get_settings
 from app.prompts import FACT_EXTRACTOR_SYSTEM_PROMPT
 from app.services.graphiti import ingest_facts, list_episodes, search_graph
+from app.services.metrics import LLM_CALLS, record_llm_error
 
 settings = get_settings()
 BOT_NAME = settings.bot_name
@@ -171,7 +172,16 @@ async def fact_extractor_node(state: WorldviewState) -> Dict:
     msgs = [*system_msgs, *history_msgs]
     msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
     print(f"{tag} extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
-    result: ExtractorOutput = await _extractor_llm.ainvoke(msgs)
+    LLM_CALLS.labels(node="worldview_extractor").inc()
+    try:
+        result: ExtractorOutput = await _extractor_llm.ainvoke(msgs)
+    except Exception as e:
+        # Record then re-raise: the graph-level handler in update_worldview logs
+        # and fails open (returns None), so behaviour here is unchanged — we only
+        # want the failure counted/classified before it propagates.
+        kind = record_llm_error("worldview_extractor", e)
+        print(f"{tag} extractor LLM call failed ({kind}: {type(e).__name__}: {e})")
+        raise
     facts = [f.strip() for f in result.facts if f.strip()]
     print(f"{tag} extracted {len(facts)} new fact(s): {facts}")
     return {"extracted_facts": facts}

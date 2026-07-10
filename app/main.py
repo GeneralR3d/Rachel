@@ -11,6 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
+from prometheus_client import make_asgi_app
 
 from app.config import get_settings
 from app.database import dispose_engine
@@ -59,6 +60,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Rachel", lifespan=lifespan)
 app.include_router(admin.router)
+
+# Prometheus scrape target. Same-origin with the dashboard, so it sits behind the
+# same nginx basic auth on the VPS — point Prometheus at it with basic_auth creds.
+# Exposes rachel_llm_calls_total / rachel_llm_errors_total (see app.services.metrics).
+app.mount("/metrics", make_asgi_app())
 
 _DASHBOARD = Path(__file__).parent / "static" / "index.html"
 

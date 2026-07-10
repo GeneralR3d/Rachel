@@ -31,6 +31,7 @@ from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
 
 from app.config import get_settings
+from app.services.metrics import LLM_CALLS, record_llm_error
 
 settings = get_settings()
 
@@ -63,6 +64,21 @@ class _RetryingOpenAIGenericClient(OpenAIGenericClient):
 
     _VALIDATION_RETRIES = 3
 
+    async def generate_response(self, *args, **kwargs) -> Dict[str, Any]:
+        """Public entry point Graphiti calls for every LLM round-trip (node
+        extraction, node dedup, edge extraction/invalidation, attribute
+        hydration). Counts each logical call and records a classified error when
+        one ultimately fails — i.e. survives the client's own tenacity retry
+        (transport/rate-limit/5xx). Structured-output *shape* mismatches don't
+        raise here (see _generate_response); they're counted there on exhaustion."""
+        LLM_CALLS.labels(node="graphiti_llm").inc()
+        try:
+            return await super().generate_response(*args, **kwargs)
+        except Exception as e:
+            kind = record_llm_error("graphiti_llm", e)
+            print(f"[graphiti] LLM call failed ({kind}: {type(e).__name__}: {e})")
+            raise
+
     async def _generate_response(
         self,
         messages: list[Message],
@@ -86,6 +102,10 @@ class _RetryingOpenAIGenericClient(OpenAIGenericClient):
             except ValidationError as e:
                 name = getattr(response_model, "__name__", "response")
                 if attempt == self._VALIDATION_RETRIES:
+                    # Exhausted the re-rolls — Graphiti will raise this same
+                    # ValidationError downstream (outside this client), so it
+                    # never reaches generate_response's except. Count it here.
+                    record_llm_error("graphiti_llm", e)  # -> kind=response_validation
                     print(
                         f"[graphiti] structured-output still invalid after "
                         f"{attempt + 1} attempts ({name}); passing through"

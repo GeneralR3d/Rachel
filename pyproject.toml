@@ -19,6 +19,7 @@ dependencies = [
     "langgraph>=0.2",
     "tiktoken>=0.13.0",
     "graphiti-core>=0.3",
+    "prometheus-client>=0.20",
 ]
 
 [tool.uv]
