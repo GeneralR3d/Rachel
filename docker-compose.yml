@@ -13,6 +13,7 @@ services:
       - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rachel -d rachel"]
       interval: 5s
@@ -32,6 +33,7 @@ services:
       - "127.0.0.1:7474:7474"
     volumes:
       - neo4jdata:/data
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
       interval: 10s
