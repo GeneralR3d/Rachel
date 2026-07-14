@@ -62,7 +62,11 @@ from app.repository import (
     set_user_profile,
 )
 from app.services.graphiti import ingest_facts, list_episodes, search_graph
-from app.services.metrics import LLM_CALLS, record_llm_error
+from app.services.metrics import (
+    LLM_CALLS,
+    record_llm_empty_output,
+    record_llm_error,
+)
 
 # NOTE: app.services.llm imports this module (for the search_user_facts tool),
 # so the profile-cache helpers it provides (get_user_profiles_cached /
@@ -348,7 +352,8 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
         return {"extracted": {}}
 
     if result is None:
-        print(f"{tag} extractor returned None (LLM parse failure); skipping")
+        kind = record_llm_empty_output("userfacts_extractor")
+        print(f"{tag} extractor returned None ({kind}: LLM parse failure); skipping")
         return {"extracted": {}}
 
     name_to_id = state["name_to_id"]
@@ -464,7 +469,8 @@ async def profile_extraction_update_node(state: UserFactsState) -> Dict:
         return {}
 
     if result is None:
-        print(f"{tag} profile extractor returned None (LLM parse failure); skipping")
+        kind = record_llm_empty_output("userfacts_profile")
+        print(f"{tag} profile extractor returned None ({kind}: LLM parse failure); skipping")
         return {}
 
     returned = [

@@ -92,3 +92,18 @@ def record_llm_error(node: str, exc: BaseException) -> str:
     kind = classify_llm_error(exc)
     LLM_ERRORS.labels(node=node, kind=kind).inc()
     return kind
+
+
+def record_llm_empty_output(node: str) -> str:
+    """Count a structured-output call that returned ``None`` (no parsed object).
+
+    LangChain returns ``None`` — rather than raising — when the model emits a
+    payload that fails to validate against the requested schema (e.g. a null or
+    a dropped required field). That bypasses ``record_llm_error``'s ``except``
+    sites entirely, so without this the failure goes uncounted (and, before the
+    ``is None`` guards, surfaced only as a downstream ``AttributeError``). It is
+    a genuine response-shape failure, so it's bucketed as ``response_validation``
+    — the same ``kind`` a pydantic ``.../v/missing`` error maps to."""
+    kind = "response_validation"
+    LLM_ERRORS.labels(node=node, kind=kind).inc()
+    return kind
