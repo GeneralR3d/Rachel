@@ -9,6 +9,7 @@ Ported from Reference/app/client.py. Behaviour is unchanged; the only edits are:
 
 import asyncio
 import bisect
+import random
 import time
 from pprint import pprint
 from typing import Any, Dict, List, Optional
@@ -45,6 +46,7 @@ REPLY_DELAY = 7             # seconds to wait after last message before replying
 CHAT_BLACKOUT_TIME = 60 *3          # 3 min of inactivity before flushing buffer to DB
 N_PAST_MSG_REQUIRED = 40         # messages pre-loaded on first contact and fed to LLM as context
 MAX_BUFFER_LEN = 150             # flush to DB immediately if buffer hits this length
+SPONTANEOUS_REPLY_CHANCE = 0.05  # chance an untagged message still forces a reply (skips the router)
 TYPING_SPEED = 22                # characters per second
 
 # only used for summarisation
@@ -232,6 +234,14 @@ async def _reply(event):
         # replies, the mention is handled (a new tag re-latches it independently).
         is_private = bool(event.is_private)
         must_reply = pending_mention.pop(chat_id, False) or bool(event.mentioned)
+
+        # Spontaneity: even when untagged, force a reply (skipping the router) with
+        # a small fixed probability, so Rachel occasionally chimes into a group
+        # unprompted. Guarded by has_new below, so this can only fire on genuinely
+        # new content — never re-answer an already-handled message.
+        if not must_reply and random.random() < SPONTANEOUS_REPLY_CHANCE:
+            must_reply = True
+            print(f"[{chat_id}] Spontaneous reply triggered ({SPONTANEOUS_REPLY_CHANCE:.0%})")
 
         # Guard against the shield-race redundant reply: a message that arrived
         # while an earlier reply was already committed (past its REPLY_DELAY, mid
