@@ -10,10 +10,14 @@ from app.config import get_settings
 from app.prompts import USER_PROFILE_FIELDS
 from app.services.userfacts import add_user_facts, get_user_facts
 from app.repository import (
+    add_model,
     clear_history,
+    delete_model,
     delete_summary,
     delete_user_profile,
+    get_active_models,
     get_all_chats,
+    get_all_models,
     get_all_users,
     get_history,
     get_summarizer_system_prompt,
@@ -22,6 +26,7 @@ from app.repository import (
     get_traits,
     get_user_profile,
     reset_traits,
+    set_active_model,
     set_summarizer_system_prompt,
     set_responder_system_prompt,
     set_trait_value,
@@ -299,3 +304,89 @@ async def on_set_trait_usage(event):
 async def on_reset_traits(event):
     await reset_traits()
     await event.reply("All traits reset to medium.")
+
+
+# --- llm models ----------------------------------------------------------
+# Manage the catalog of "<provider>/<model_name>" strings and which one is
+# active per role (main / small / embedding). Switching an active model
+# rebuilds the LLM clients at runtime — no restart needed.
+
+_MODEL_ROLES = ("main", "small", "embedding")
+
+
+@bot.on(events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/list_models$"))
+async def on_list_models(event):
+    models = await get_all_models()
+    if not models:
+        await event.reply("No models in catalog.")
+        return
+    await event.reply("\n".join(m["model_string"] for m in models))
+
+
+@bot.on(events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/list_active_models$"))
+async def on_list_active_models(event):
+    active = await get_active_models()
+    lines = [f"{role}: {active.get(role, '—')}" for role in _MODEL_ROLES]
+    await event.reply("\n".join(lines))
+
+
+@bot.on(
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/add_model\s+(\S+)$")
+)
+async def on_add_model(event):
+    model_string = event.pattern_match.group(1).strip()
+    if "/" not in model_string:
+        await event.reply("model must be '<provider>/<model_name>'")
+        raise events.StopPropagation
+    await add_model(model_string)
+    await event.reply(f"Added model {model_string} to catalog.")
+    raise events.StopPropagation
+
+
+@bot.on(events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/add_model(\s+.*)?$"))
+async def on_add_model_usage(event):
+    await event.reply("Usage: /add_model <provider/model>")
+
+
+@bot.on(
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/delete_model\s+(\S+)$")
+)
+async def on_delete_model(event):
+    model_string = event.pattern_match.group(1).strip()
+    await delete_model(model_string)
+    await event.reply(f"Deleted model {model_string} from catalog.")
+    raise events.StopPropagation
+
+
+@bot.on(events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/delete_model(\s+.*)?$"))
+async def on_delete_model_usage(event):
+    await event.reply("Usage: /delete_model <provider/model>")
+
+
+@bot.on(
+    events.NewMessage(
+        incoming=True,
+        from_users=[ADMIN],
+        pattern=r"\/set_active_model\s+(main|small|embedding)\s+(\S+)$",
+    )
+)
+async def on_set_active_model(event):
+    role = event.pattern_match.group(1)
+    model_string = event.pattern_match.group(2).strip()
+    catalog = {m["model_string"] for m in await get_all_models()}
+    if model_string not in catalog:
+        await event.reply(f"{model_string} is not in the catalog — /add_model it first.")
+        raise events.StopPropagation
+    await set_active_model(role, model_string)
+    note = ""
+    if role == "embedding":
+        note = "\n⚠️ New embeddings may not match existing Neo4j vectors — search may degrade until re-ingested."
+    await event.reply(f"Active {role} model set to {model_string}.{note}")
+    raise events.StopPropagation
+
+
+@bot.on(
+    events.NewMessage(incoming=True, from_users=[ADMIN], pattern=r"\/set_active_model(\s+.*)?$")
+)
+async def on_set_active_model_usage(event):
+    await event.reply("Usage: /set_active_model <main|small|embedding> <provider/model>")

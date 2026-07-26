@@ -73,6 +73,7 @@ from app.calander import CALENDAR_TOOLS
 from app.services.userfacts import search_user_facts, search_user_info, search_user_info_tool
 from app.services.worldview import search_world_view, search_worldview
 from app.repository import (
+    get_active_models,
     get_active_trait_prompts,
     get_responder_system_prompt,
     get_summarizer_system_prompt,
@@ -329,29 +330,62 @@ class GraphState(TypedDict):
 # capabilities (['json_schema'])"). function_calling was also what the previous
 # ChatOpenRouter clients defaulted to, so this keeps behaviour identical.
 #
+# The four reply-pipeline clients are built lazily and cached keyed on the active
+# "main" model string (from the DB, via repository.get_active_models), so an admin
+# switching the model at runtime takes effect on the next node call without a
+# restart. invalidate_model_clients() clears this cache (and resets Graphiti's
+# singleton) when the active model changes.
+#
 # include_raw lets router_node salvage should_reply from the raw tool-call args
 # when structured parsing fails (the model occasionally omits a required field).
-_router_llm = ChatOpenAI(
-    model=settings.llm_model,
-    api_key=settings.merge_gateway_api_key,
-    base_url=settings.merge_gateway_openai_base_url,
-    temperature=0.0,
-).with_structured_output(RouterOutput, method="function_calling", include_raw=True)
+_client_cache: Dict[str, Any] = {}
 
-_summarizer_llm = ChatOpenAI(
-    model=settings.llm_model,
-    api_key=settings.merge_gateway_api_key,
-    base_url=settings.merge_gateway_openai_base_url,
-    temperature=0.0,
-).with_structured_output(SummarizerOutput, method="function_calling")
 
-# json_mode avoids tool-calling, which hangs on this model.
-_responder_llm = ChatOpenAI(
-    model=settings.llm_model,
-    api_key=settings.merge_gateway_api_key,
-    base_url=settings.merge_gateway_openai_base_url,
-    temperature=0.2,
-).with_structured_output(ResponseOutput, method="function_calling")
+async def _current_main_model() -> str:
+    """The active 'main' model string, falling back to config on any error."""
+    try:
+        return (await get_active_models())["main"]
+    except Exception:
+        return settings.llm_model
+
+
+def _base_chat(model: str, temperature: float) -> ChatOpenAI:
+    return ChatOpenAI(
+        model=model,
+        api_key=settings.merge_gateway_api_key,
+        base_url=settings.merge_gateway_openai_base_url,
+        temperature=temperature,
+    )
+
+
+async def _get_router_llm():
+    model = await _current_main_model()
+    key = f"router:{model}"
+    if key not in _client_cache:
+        _client_cache[key] = _base_chat(model, 0.0).with_structured_output(
+            RouterOutput, method="function_calling", include_raw=True
+        )
+    return _client_cache[key]
+
+
+async def _get_summarizer_llm():
+    model = await _current_main_model()
+    key = f"summarizer:{model}"
+    if key not in _client_cache:
+        _client_cache[key] = _base_chat(model, 0.0).with_structured_output(
+            SummarizerOutput, method="function_calling"
+        )
+    return _client_cache[key]
+
+
+async def _get_responder_llm():
+    model = await _current_main_model()
+    key = f"responder:{model}"
+    if key not in _client_cache:
+        _client_cache[key] = _base_chat(model, 0.2).with_structured_output(
+            ResponseOutput, method="function_calling"
+        )
+    return _client_cache[key]
 
 # The context_fetcher is the one node that *does* use tool-calling: it has these
 # tools bound and decides which to call. (CLAUDE.md notes tool-calling can hang on
@@ -379,12 +413,38 @@ def format_tools(tools) -> str:
 
 
 _context_tools_by_name = {t.name: t for t in CONTEXT_TOOLS}
-_context_fetcher_llm = ChatOpenAI(
-    model=settings.llm_model,
-    api_key=settings.merge_gateway_api_key,
-    base_url=settings.merge_gateway_openai_base_url,
-    temperature=0.0,
-).bind_tools(CONTEXT_TOOLS)
+
+
+async def _get_context_fetcher_llm():
+    model = await _current_main_model()
+    key = f"context_fetcher:{model}"
+    if key not in _client_cache:
+        _client_cache[key] = _base_chat(model, 0.0).bind_tools(CONTEXT_TOOLS)
+    return _client_cache[key]
+
+
+def invalidate_model_clients() -> None:
+    """Clear the reply-pipeline client cache and reset dependent singletons so
+    the next node call rebuilds against the freshly-switched active model.
+
+    Called by repository._invalidate_active_models_cache() after a model switch.
+    Also resets the world-view / user-facts extractor clients and the Graphiti
+    client (all keyed on the same 'main' model)."""
+    _client_cache.clear()
+    # Extractor clients live in their own modules; reset them if importable.
+    for mod_name, reset_attr in (
+        ("app.services.worldview", "reset_extractor_clients"),
+        ("app.services.userfacts", "reset_extractor_clients"),
+        ("app.services.graphiti", "reset_graphiti"),
+    ):
+        try:
+            import importlib
+
+            reset = getattr(importlib.import_module(mod_name), reset_attr, None)
+            if reset is not None:
+                reset()
+        except Exception:
+            pass
 
 # The context_fetcher is a single pass (one LLM call → run whatever tools it
 # asked for → done), so the only guard needed is a wall-clock timeout.
@@ -447,7 +507,7 @@ async def router_node(state: GraphState) -> Dict:
 
     LLM_CALLS.labels(node="router").inc()
     try:
-        result = await _router_llm.ainvoke(msgs)
+        result = await (await _get_router_llm()).ainvoke(msgs)
     except Exception as e:
         kind = record_llm_error("router", e)
         print(f"[router] LLM error ({kind}; defaulting to reply): {type(e).__name__}: {e}")
@@ -510,7 +570,7 @@ async def summarizer_node(state: GraphState) -> Dict:
 
     LLM_CALLS.labels(node="summarizer").inc()
     try:
-        result: SummarizerOutput = await _summarizer_llm.ainvoke(msgs)
+        result: SummarizerOutput = await (await _get_summarizer_llm()).ainvoke(msgs)
     except Exception as e:
         kind = record_llm_error("summarizer", e)
         print(f"[summarizer] LLM error ({kind}; keeping current mood/summary): {type(e).__name__}: {e}")
@@ -587,7 +647,7 @@ async def _run_context_fetcher(state: GraphState) -> Tuple[str, str, str, str]:
     )
     msgs = [*system_msgs, *history_msgs]
 
-    ai: AIMessage = await _context_fetcher_llm.ainvoke(msgs)
+    ai: AIMessage = await (await _get_context_fetcher_llm()).ainvoke(msgs)
     tool_calls = getattr(ai, "tool_calls", None) or []
     print(f"[context_fetcher] LLM requested {len(tool_calls)} tool call(s):")
     for tc in tool_calls:
@@ -765,7 +825,7 @@ async def responder_node(state: GraphState) -> Dict:
 
         LLM_CALLS.labels(node="responder").inc()
         try:
-            result: ResponseOutput = await _responder_llm.ainvoke(msgs)
+            result: ResponseOutput = await (await _get_responder_llm()).ainvoke(msgs)
         except OutputParserException as e:
             # The model sometimes ignores json_mode and returns Rachel's reply as
             # plain prose. The raw text is still a usable reply, so salvage it from

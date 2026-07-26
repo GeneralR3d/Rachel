@@ -113,6 +113,28 @@ class UserFactsPreferences(Base):
     )
 
 
+class LLMModel(Base):
+    __tablename__ = "llm_models"
+
+    # Catalog of possible "<provider>/<model_name>" strings an admin can pick from
+    # at runtime. Mirrors the PersonalityTrait shape: surrogate PK + a unique text
+    # column. Which of these strings is *active* for each role is tracked in the
+    # separate active_models table.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model_string: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+
+
+class ActiveModel(Base):
+    __tablename__ = "active_models"
+
+    # One row per role — "main" (llm_model), "small" (llm_small_model), and
+    # "embedding" (llm_embedding_model). model_string points at whichever catalog
+    # entry is currently active for that role; switching it takes effect at
+    # runtime (see app/services/llm.py's lazy client factory).
+    role: Mapped[str] = mapped_column(Text, primary_key=True)
+    model_string: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class History(Base):
     __tablename__ = "history"
 

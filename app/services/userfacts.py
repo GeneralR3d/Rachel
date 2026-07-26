@@ -263,19 +263,50 @@ class UserFactsState(TypedDict):
     chat_id: int | None
 
 
-_extractor_llm = ChatOpenAI(
-    model=settings.llm_model,
-    api_key=settings.merge_gateway_api_key,
-    base_url=settings.merge_gateway_openai_base_url,
-    temperature=0.0,
-).with_structured_output(ExtractorOutput, method="function_calling")
+_extractor_cache: dict = {}
+_profile_extractor_cache: dict = {}
 
-_profile_extractor_llm = ChatOpenAI(
-    model=settings.llm_model,
-    api_key=settings.merge_gateway_api_key,
-    base_url=settings.merge_gateway_openai_base_url,
-    temperature=0.0,
-).with_structured_output(ProfileExtractorOutput, method="function_calling")
+
+async def _active_main_model() -> str:
+    from app.repository import get_active_models
+
+    try:
+        return (await get_active_models())["main"]
+    except Exception:
+        return settings.llm_model
+
+
+async def _get_extractor_llm():
+    """Lazily build & cache the user-fact extractor client keyed on the active
+    'main' model, so a runtime model switch rebuilds it."""
+    model = await _active_main_model()
+    if model not in _extractor_cache:
+        _extractor_cache[model] = ChatOpenAI(
+            model=model,
+            api_key=settings.merge_gateway_api_key,
+            base_url=settings.merge_gateway_openai_base_url,
+            temperature=0.0,
+        ).with_structured_output(ExtractorOutput, method="function_calling")
+    return _extractor_cache[model]
+
+
+async def _get_profile_extractor_llm():
+    model = await _active_main_model()
+    if model not in _profile_extractor_cache:
+        _profile_extractor_cache[model] = ChatOpenAI(
+            model=model,
+            api_key=settings.merge_gateway_api_key,
+            base_url=settings.merge_gateway_openai_base_url,
+            temperature=0.0,
+        ).with_structured_output(ProfileExtractorOutput, method="function_calling")
+    return _profile_extractor_cache[model]
+
+
+def reset_extractor_clients() -> None:
+    """Drop the cached extractor clients so the next call rebuilds against the
+    freshly-switched active model. Called by llm.invalidate_model_clients()."""
+    _extractor_cache.clear()
+    _profile_extractor_cache.clear()
 
 # Pre-rendered slot reference injected into the extractor prompt as
 # {slot_descriptions} (one "- key (Label): guidance" line per field).
@@ -344,7 +375,7 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
     print(f"{tag} extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
     LLM_CALLS.labels(node="userfacts_extractor").inc()
     try:
-        result: ExtractorOutput = await _extractor_llm.ainvoke(msgs)
+        result: ExtractorOutput = await (await _get_extractor_llm()).ainvoke(msgs)
     except Exception as e:
         # A transient provider/transport error (e.g. an OpenRouter 403 error body)
         # must not abort the whole graph and discard the parallel profile branch —
@@ -461,7 +492,7 @@ async def profile_extraction_update_node(state: UserFactsState) -> Dict:
     print(f"{tag} profile extractor context: {len(msgs)} messages, {msgs_tokens} tokens")
     LLM_CALLS.labels(node="userfacts_profile").inc()
     try:
-        result: ProfileExtractorOutput = await _profile_extractor_llm.ainvoke(msgs)
+        result: ProfileExtractorOutput = await (await _get_profile_extractor_llm()).ainvoke(msgs)
     except Exception as e:
         # A transient provider/transport error (e.g. an OpenRouter 403 error body)
         # must not abort the whole graph and discard the parallel fact branch —

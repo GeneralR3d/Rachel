@@ -303,6 +303,67 @@ async def reset_traits() -> None:
     await repository.reset_traits()
 
 
+# --- llm models ----------------------------------------------------------
+# A catalog of "<provider>/<model_name>" strings plus which one is active per
+# role (main / small / embedding). Switching an active model rebuilds the LLM
+# clients at runtime (no restart) — see repository.set_active_model.
+
+MODEL_ROLES = ("main", "small", "embedding")
+ModelRole = Literal["main", "small", "embedding"]
+
+
+class ModelOut(BaseModel):
+    id: int
+    model_string: str
+
+
+class ModelIn(BaseModel):
+    model_string: str
+
+
+class ActiveModelIn(BaseModel):
+    model_string: str
+
+
+@router.get("/models", response_model=list[ModelOut])
+async def list_models() -> list[ModelOut]:
+    return [ModelOut(**m) for m in await repository.get_all_models()]
+
+
+@router.post("/models", response_model=ModelOut, status_code=201)
+async def create_model(body: ModelIn) -> ModelOut:
+    model_string = body.model_string.strip()
+    if not model_string or "/" not in model_string:
+        raise HTTPException(
+            status_code=422, detail="model_string must be '<provider>/<model_name>'"
+        )
+    return ModelOut(**await repository.add_model(model_string))
+
+
+@router.delete("/models", status_code=204)
+async def delete_model(model_string: str) -> None:
+    """Delete a catalog entry. The '<provider>/<model>' string contains a slash,
+    so it's passed as a query param (?model_string=...) rather than a path arg."""
+    await repository.delete_model(model_string)
+
+
+@router.get("/active-models")
+async def read_active_models() -> dict[str, str]:
+    return await repository.get_active_models()
+
+
+@router.put("/active-models/{role}")
+async def set_active_model(role: ModelRole, body: ActiveModelIn) -> dict[str, str]:
+    model_string = body.model_string.strip()
+    catalog = {m["model_string"] for m in await repository.get_all_models()}
+    if model_string not in catalog:
+        raise HTTPException(
+            status_code=422, detail=f"model_string {model_string!r} is not in the catalog"
+        )
+    await repository.set_active_model(role, model_string)
+    return await repository.get_active_models()
+
+
 # --- architecture (LangGraph pipeline diagrams) --------------------------
 
 
