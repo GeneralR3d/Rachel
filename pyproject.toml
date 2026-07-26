@@ -15,7 +15,9 @@ dependencies = [
     "asyncpg>=0.29",
     "alembic>=1.13",
     "python-dotenv>=1.0",
-    "langchain-openrouter>=0.1",
+    # Replaced by langchain-openai (Merge Gateway speaks the OpenAI API).
+    # "langchain-openrouter>=0.1",
+    "langchain-openai>=0.3",
     "langgraph>=0.2",
     "tiktoken>=0.13.0",
     "graphiti-core>=0.3",

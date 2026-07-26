@@ -46,7 +46,7 @@ import tiktoken
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
-from langchain_openrouter import ChatOpenRouter
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field, create_model
 from typing_extensions import TypedDict
@@ -263,17 +263,19 @@ class UserFactsState(TypedDict):
     chat_id: int | None
 
 
-_extractor_llm = ChatOpenRouter(
-    model=settings.openrouter_model,
-    api_key=settings.openrouter_api_key,
+_extractor_llm = ChatOpenAI(
+    model=settings.llm_model,
+    api_key=settings.merge_gateway_api_key,
+    base_url=settings.merge_gateway_openai_base_url,
     temperature=0.0,
-).with_structured_output(ExtractorOutput)
+).with_structured_output(ExtractorOutput, method="function_calling")
 
-_profile_extractor_llm = ChatOpenRouter(
-    model=settings.openrouter_model,
-    api_key=settings.openrouter_api_key,
+_profile_extractor_llm = ChatOpenAI(
+    model=settings.llm_model,
+    api_key=settings.merge_gateway_api_key,
+    base_url=settings.merge_gateway_openai_base_url,
     temperature=0.0,
-).with_structured_output(ProfileExtractorOutput)
+).with_structured_output(ProfileExtractorOutput, method="function_calling")
 
 # Pre-rendered slot reference injected into the extractor prompt as
 # {slot_descriptions} (one "- key (Label): guidance" line per field).

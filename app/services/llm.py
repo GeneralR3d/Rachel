@@ -1,4 +1,4 @@
-"""LLM integration via LangGraph + LangChain OpenRouter.
+"""LLM integration via LangGraph + LangChain ChatOpenAI, pointed at Merge Gateway.
 
 The nodes are gated by a checker + router up front, then summarizer_node and
 context_fetcher_node fan out in parallel before the responder joins them:
@@ -55,7 +55,7 @@ def _count_tokens(text: str) -> int:
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openrouter import ChatOpenRouter
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
@@ -323,26 +323,35 @@ class GraphState(TypedDict):
     response_reason: str
 
 
+# method="function_calling" is pinned on every structured-output client below:
+# langchain-openai defaults to json_schema, which Merge Gateway rejects for models
+# without native constrained decoding ("no vendor supports the requested
+# capabilities (['json_schema'])"). function_calling was also what the previous
+# ChatOpenRouter clients defaulted to, so this keeps behaviour identical.
+#
 # include_raw lets router_node salvage should_reply from the raw tool-call args
 # when structured parsing fails (the model occasionally omits a required field).
-_router_llm = ChatOpenRouter(
-    model=settings.openrouter_model,
-    api_key=settings.openrouter_api_key,
+_router_llm = ChatOpenAI(
+    model=settings.llm_model,
+    api_key=settings.merge_gateway_api_key,
+    base_url=settings.merge_gateway_openai_base_url,
     temperature=0.0,
-).with_structured_output(RouterOutput, include_raw=True)
+).with_structured_output(RouterOutput, method="function_calling", include_raw=True)
 
-_summarizer_llm = ChatOpenRouter(
-    model=settings.openrouter_model,
-    api_key=settings.openrouter_api_key,
+_summarizer_llm = ChatOpenAI(
+    model=settings.llm_model,
+    api_key=settings.merge_gateway_api_key,
+    base_url=settings.merge_gateway_openai_base_url,
     temperature=0.0,
-).with_structured_output(SummarizerOutput)
+).with_structured_output(SummarizerOutput, method="function_calling")
 
 # json_mode avoids tool-calling, which hangs on this model.
-_responder_llm = ChatOpenRouter(
-    model=settings.openrouter_model,
-    api_key=settings.openrouter_api_key,
+_responder_llm = ChatOpenAI(
+    model=settings.llm_model,
+    api_key=settings.merge_gateway_api_key,
+    base_url=settings.merge_gateway_openai_base_url,
     temperature=0.2,
-).with_structured_output(ResponseOutput)
+).with_structured_output(ResponseOutput, method="function_calling")
 
 # The context_fetcher is the one node that *does* use tool-calling: it has these
 # tools bound and decides which to call. (CLAUDE.md notes tool-calling can hang on
@@ -370,9 +379,10 @@ def format_tools(tools) -> str:
 
 
 _context_tools_by_name = {t.name: t for t in CONTEXT_TOOLS}
-_context_fetcher_llm = ChatOpenRouter(
-    model=settings.openrouter_model,
-    api_key=settings.openrouter_api_key,
+_context_fetcher_llm = ChatOpenAI(
+    model=settings.llm_model,
+    api_key=settings.merge_gateway_api_key,
+    base_url=settings.merge_gateway_openai_base_url,
     temperature=0.0,
 ).bind_tools(CONTEXT_TOOLS)
 

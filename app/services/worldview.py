@@ -31,7 +31,7 @@ import tiktoken
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
-from langchain_openrouter import ChatOpenRouter
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
@@ -94,12 +94,13 @@ def _tag(chat_id: int | None) -> str:
 
 # Uses the Graphiti key too: this extractor is the front half of the same
 # world-view memory pipeline that feeds Graphiti, so all its cost is billed to
-# the same separate OpenRouter key.
-_extractor_llm = ChatOpenRouter(
-    model=settings.openrouter_model,
+# the same separate Gateway key.
+_extractor_llm = ChatOpenAI(
+    model=settings.llm_model,
     api_key=settings.graphiti_api_key,
+    base_url=settings.merge_gateway_openai_base_url,
     temperature=0.0,
-).with_structured_output(ExtractorOutput)
+).with_structured_output(ExtractorOutput, method="function_calling")
 
 
 # --- Retrieval ---------------------------------------------------------------

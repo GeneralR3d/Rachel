@@ -5,6 +5,7 @@ Replaces the scattered ``os.environ[...]`` reads in the original app.
 
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,20 +24,44 @@ class Settings(BaseSettings):
     # Admin bot token (the second bot, from @BotFather)
     telegram_bot_token: str
 
-    # OpenRouter
-    openrouter_api_key: str
+    # --- Merge Gateway (OpenAI-compatible LLM/embedding endpoint) ---
+    # Every LLM and embedding call goes through Merge Gateway. Its endpoint
+    # speaks the OpenAI API, so both the LangChain clients (ChatOpenAI) and
+    # Graphiti's OpenAI-SDK clients talk to it with nothing but a key +
+    # base_url change.
+    merge_gateway_api_key: str
+    # The Gateway serves its OpenAI-compatible /chat/completions under the
+    # /v1/openai path; plain /v1 is the Gateway-native API and is where
+    # /embeddings lives. Chat clients use the first, the embedder the second.
+    merge_gateway_base_url: str = "https://api-gateway.merge.dev/v1"
+    merge_gateway_openai_base_url: str = "https://api-gateway.merge.dev/v1/openai"
     # Separate key used for everything Graphiti-related (world-view LLM,
-    # embedder, reranker). Falls back to openrouter_api_key when unset so
-    # existing single-key setups keep working; see graphiti_api_key.
-    openrouter_graphiti_api_key: str | None = None
-    openrouter_model: str = "deepseek/deepseek-v4-flash"
-    # OpenAI-compatible base URL for OpenRouter, shared by Graphiti's LLM /
-    # embedder / reranker clients (OpenRouter now exposes /v1/embeddings).
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # embedder, reranker). Falls back to merge_gateway_api_key when unset so
+    # single-key setups keep working; see graphiti_api_key.
+    merge_gateway_graphiti_api_key: str | None = None
+
+    # Replaced by the MERGE_GATEWAY_* settings above; kept for reference.
+    # openrouter_api_key: str
+    # openrouter_graphiti_api_key: str | None = None
+    # openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    # Model ids, in the provider/model format the Gateway expects. Read from
+    # LLM_* env vars, still accepting the old OPENROUTER_* names so existing
+    # deployments don't need their .env rewritten.
+    llm_model: str = Field(
+        "deepseek/deepseek-v4-flash",
+        validation_alias=AliasChoices("llm_model", "openrouter_model"),
+    )
     # Smaller/cheaper model Graphiti uses for its internal helper + reranker calls.
-    openrouter_small_model: str = "deepseek/deepseek-v4-flash"
-    # Embedding model id (routed through OpenRouter) used by Graphiti's embedder.
-    openrouter_embedding_model: str = "openai/text-embedding-3-small"
+    llm_small_model: str = Field(
+        "deepseek/deepseek-v4-flash",
+        validation_alias=AliasChoices("llm_small_model", "openrouter_small_model"),
+    )
+    # Embedding model id used by Graphiti's embedder.
+    llm_embedding_model: str = Field(
+        "openai/text-embedding-3-small",
+        validation_alias=AliasChoices("llm_embedding_model", "openrouter_embedding_model"),
+    )
 
     # Neo4j connection for Graphiti (the world-view knowledge graph). The app
     # container reaches the service as `db`-style host `neo4j`; locally it's the
@@ -60,8 +85,8 @@ class Settings(BaseSettings):
 
     @property
     def graphiti_api_key(self) -> str:
-        """OpenRouter key for Graphiti, falling back to the main key when unset."""
-        return self.openrouter_graphiti_api_key or self.openrouter_api_key
+        """Gateway key for Graphiti, falling back to the main key when unset."""
+        return self.merge_gateway_graphiti_api_key or self.merge_gateway_api_key
 
 
 @lru_cache

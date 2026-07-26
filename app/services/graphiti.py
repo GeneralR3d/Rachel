@@ -1,7 +1,7 @@
 """Shared Graphiti (Neo4j temporal knowledge graph) infrastructure.
 
 Everything purely Graphiti-related lives here: the lazily-initialised
-process-wide client, the OpenRouter structured-output workaround, and the
+process-wide client, the structured-output workaround, and the
 generic ingest / search / episode-listing helpers. The memory pipelines build
 on top of this module:
 
@@ -133,8 +133,8 @@ class _RetryingOpenAIGenericClient(OpenAIGenericClient):
 async def get_graphiti() -> Graphiti:
     """Return the process-wide Graphiti client, initialising it on first use.
 
-    Both the LLM and the embedder are pointed at OpenRouter's OpenAI-compatible
-    endpoint, so a single OPENROUTER_API_KEY covers extraction, embeddings, and
+    Both the LLM and the embedder are pointed at Merge Gateway's OpenAI-compatible
+    endpoint, so a single MERGE_GATEWAY_API_KEY covers extraction, embeddings, and
     reranking. ``build_indices_and_constraints`` is idempotent and only needs to
     run once per database, so we call it as part of the one-time init. Guarded by
     ``_graphiti_lock`` (double-checked) so concurrent finalizations don't double-init.
@@ -148,14 +148,18 @@ async def get_graphiti() -> Graphiti:
                 settings.neo4j_uri,
                 settings.neo4j_user,
                 settings.neo4j_password,
+                # The LLM and reranker below speak /chat/completions, which the
+                # Gateway serves only under /v1/openai; the embedder's /embeddings
+                # lives on plain /v1. Hence the two different base URLs.
                 llm_client=_RetryingOpenAIGenericClient(
                     config=LLMConfig(
                         api_key=settings.graphiti_api_key,
-                        model=settings.openrouter_model,
-                        small_model=settings.openrouter_small_model,
-                        base_url=settings.openrouter_base_url,
+                        model=settings.llm_model,
+                        small_model=settings.llm_small_model,
+                        base_url=settings.merge_gateway_openai_base_url,
                     ),
-                    # OpenRouter downgrades json_schema to a plain json_object for
+                    # Kept from the OpenRouter era and still the safe default: a
+                    # gateway downgrades json_schema to a plain json_object for
                     # models without native constrained decoding, so the schema's
                     # field names are never enforced — the dedup model then emits
                     # `resolutions` instead of `entity_resolutions` and NodeResolutions
@@ -167,15 +171,15 @@ async def get_graphiti() -> Graphiti:
                 embedder=OpenAIEmbedder(
                     config=OpenAIEmbedderConfig(
                         api_key=settings.graphiti_api_key,
-                        embedding_model=settings.openrouter_embedding_model,
-                        base_url=settings.openrouter_base_url,
+                        embedding_model=settings.llm_embedding_model,
+                        base_url=settings.merge_gateway_base_url,
                     )
                 ),
                 cross_encoder=OpenAIRerankerClient(
                     config=LLMConfig(
                         api_key=settings.graphiti_api_key,
-                        model=settings.openrouter_small_model,
-                        base_url=settings.openrouter_base_url,
+                        model=settings.llm_small_model,
+                        base_url=settings.merge_gateway_openai_base_url,
                     )
                 ),
             )
