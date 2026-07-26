@@ -825,7 +825,7 @@ async def responder_node(state: GraphState) -> Dict:
 
         LLM_CALLS.labels(node="responder").inc()
         try:
-            result: ResponseOutput = await (await _get_responder_llm()).ainvoke(msgs)
+            result: ResponseOutput | None = await (await _get_responder_llm()).ainvoke(msgs)
         except OutputParserException as e:
             # The model sometimes ignores json_mode and returns Rachel's reply as
             # plain prose. The raw text is still a usable reply, so salvage it from
@@ -842,6 +842,14 @@ async def responder_node(state: GraphState) -> Dict:
                 "response_text": raw,
                 "response_reason": "Salvaged from non-JSON model output (json_mode parse failure).",
             }
+        if result is None:
+            # with_structured_output(method="function_calling") returns None when
+            # the model replies in plain prose without making a tool call. Raise so
+            # the outer BaseException handler logs it and re-raises (the reply task
+            # will fail open — the caller treats an empty response_text as no reply).
+            record_llm_error("responder", ValueError("with_structured_output returned None"))
+            print("[responder] structured output returned None (model sent no tool call)")
+            raise ValueError("Responder LLM returned None (no tool call in response)")
         print(f"[responder] LLM returned: content={result.content[:80]!r} | reason={result.reason!r}")
         return {"response_text": result.content, "response_reason": result.reason}
     except BaseException as e:
