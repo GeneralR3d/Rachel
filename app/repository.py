@@ -13,9 +13,12 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import session_scope
+from app.config import get_settings
 from app.models import (
+    ActiveModel,
     ChatState,
     History,
+    LLMModel,
     PersonalityTrait,
     ScheduleActivity,
     SystemPrompt,
@@ -33,6 +36,14 @@ _summarizer_system_prompt: Optional[str] = None
 TRAIT_CACHE_TTL = 5 * 60    # 5 min
 _active_trait_prompts_cache: Optional[str] = None
 _active_trait_prompts_cache_time: float = 0.0
+
+# The three switchable LLM roles and their corresponding settings fields (used
+# as the seed default when a role has no active row yet).
+MODEL_ROLES = ("main", "small", "embedding")
+
+# Cached active-model map (role -> model_string). Read on every LLM client build,
+# changes rarely — Style-A cache: populated on read, nulled on write/seed.
+_active_models_cache: Optional[dict[str, str]] = None
 
 
 async def ensure_traits_seeded() -> None:
@@ -246,6 +257,130 @@ async def set_summarizer_system_prompt(new_summarizer_system_prompt: str) -> Non
         await session.execute(
             update(SystemPrompt).values(summarizer_system_prompt=new_summarizer_system_prompt)
         )
+
+
+# --- llm models ----------------------------------------------------------
+
+
+def _role_settings_default(role: str) -> str:
+    """The .env/config fallback for a role, used when no active row exists yet."""
+    settings = get_settings()
+    return {
+        "main": settings.llm_model,
+        "small": settings.llm_small_model,
+        "embedding": settings.llm_embedding_model,
+    }[role]
+
+
+def _invalidate_active_models_cache() -> None:
+    """Drop the cached active-model map AND rebuild-trigger the LLM clients.
+
+    The client-cache reset lives in app.services.llm; import it lazily so
+    repository doesn't take a module-level dependency on llm (llm imports
+    repository, so a top-level import here would be a cycle)."""
+    global _active_models_cache
+    _active_models_cache = None
+    try:
+        from app.services.llm import invalidate_model_clients
+
+        invalidate_model_clients()
+    except Exception:
+        # Never let a client-cache reset failure break the DB write that
+        # triggered it; the next build simply reads the fresh DB value.
+        pass
+
+
+async def ensure_models_seeded() -> None:
+    """Seed the model catalog + active-model rows from config on every startup.
+
+    Catalog: idempotently insert the three configured model strings so the
+    dashboard always has at least the current models to pick from. Active rows:
+    inserted only if absent (on_conflict_do_nothing), so an admin's runtime
+    switch survives restarts rather than being reset to the .env values.
+    """
+    settings = get_settings()
+    async with session_scope() as session:
+        for model_string in {
+            settings.llm_model,
+            settings.llm_small_model,
+            settings.llm_embedding_model,
+        }:
+            await session.execute(
+                pg_insert(LLMModel)
+                .values(model_string=model_string)
+                .on_conflict_do_nothing(index_elements=[LLMModel.model_string])
+            )
+        for role in MODEL_ROLES:
+            await session.execute(
+                pg_insert(ActiveModel)
+                .values(role=role, model_string=_role_settings_default(role))
+                .on_conflict_do_nothing(index_elements=[ActiveModel.role])
+            )
+    _invalidate_active_models_cache()
+
+
+async def get_all_models() -> list[dict]:
+    """Return the model-string catalog."""
+    async with session_scope() as session:
+        rows = (
+            await session.execute(select(LLMModel).order_by(LLMModel.model_string))
+        ).scalars().all()
+    return [{"id": m.id, "model_string": m.model_string} for m in rows]
+
+
+async def add_model(model_string: str) -> dict:
+    """Add a model string to the catalog (idempotent). Returns the row."""
+    async with session_scope() as session:
+        await session.execute(
+            pg_insert(LLMModel)
+            .values(model_string=model_string)
+            .on_conflict_do_nothing(index_elements=[LLMModel.model_string])
+        )
+        row = (
+            await session.execute(
+                select(LLMModel).where(LLMModel.model_string == model_string)
+            )
+        ).scalar_one()
+        return {"id": row.id, "model_string": row.model_string}
+
+
+async def delete_model(model_string: str) -> None:
+    """Remove a model string from the catalog. Does not touch active_models."""
+    async with session_scope() as session:
+        await session.execute(
+            delete(LLMModel).where(LLMModel.model_string == model_string)
+        )
+
+
+async def get_active_models() -> dict[str, str]:
+    """Return the role -> active-model-string map, falling back to config for any
+    role with no active row. Cached (Style A) since it's read on every LLM build."""
+    global _active_models_cache
+    if _active_models_cache is not None:
+        return _active_models_cache
+
+    async with session_scope() as session:
+        rows = (await session.execute(select(ActiveModel))).scalars().all()
+    active = {r.role: r.model_string for r in rows}
+    # Guarantee every role is present so callers can index unconditionally.
+    for role in MODEL_ROLES:
+        active.setdefault(role, _role_settings_default(role))
+    _active_models_cache = active
+    return active
+
+
+async def set_active_model(role: str, model_string: str) -> None:
+    """Set the active model string for a role and invalidate caches/clients."""
+    if role not in MODEL_ROLES:
+        raise ValueError(f"Unknown model role: {role!r} (expected one of {MODEL_ROLES})")
+    async with session_scope() as session:
+        stmt = pg_insert(ActiveModel).values(role=role, model_string=model_string)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[ActiveModel.role],
+            set_={"model_string": model_string},
+        )
+        await session.execute(stmt)
+    _invalidate_active_models_cache()
 
 
 # --- users ---------------------------------------------------------------

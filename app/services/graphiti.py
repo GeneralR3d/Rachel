@@ -144,6 +144,18 @@ async def get_graphiti() -> Graphiti:
         return _graphiti
     async with _graphiti_lock:
         if _graphiti is None:
+            # Resolve the three model roles from the DB-backed active-model map,
+            # falling back to config. Read here (not at import) so a runtime model
+            # switch — which calls reset_graphiti() — takes effect on the rebuild.
+            try:
+                from app.repository import get_active_models
+
+                active = await get_active_models()
+            except Exception:
+                active = {}
+            main_model = active.get("main", settings.llm_model)
+            small_model = active.get("small", settings.llm_small_model)
+            embedding_model = active.get("embedding", settings.llm_embedding_model)
             g = Graphiti(
                 settings.neo4j_uri,
                 settings.neo4j_user,
@@ -154,8 +166,8 @@ async def get_graphiti() -> Graphiti:
                 llm_client=_RetryingOpenAIGenericClient(
                     config=LLMConfig(
                         api_key=settings.graphiti_api_key,
-                        model=settings.llm_model,
-                        small_model=settings.llm_small_model,
+                        model=main_model,
+                        small_model=small_model,
                         base_url=settings.merge_gateway_openai_base_url,
                     ),
                     # Kept from the OpenRouter era and still the safe default: a
@@ -171,14 +183,14 @@ async def get_graphiti() -> Graphiti:
                 embedder=OpenAIEmbedder(
                     config=OpenAIEmbedderConfig(
                         api_key=settings.graphiti_api_key,
-                        embedding_model=settings.llm_embedding_model,
+                        embedding_model=embedding_model,
                         base_url=settings.merge_gateway_base_url,
                     )
                 ),
                 cross_encoder=OpenAIRerankerClient(
                     config=LLMConfig(
                         api_key=settings.graphiti_api_key,
-                        model=settings.llm_small_model,
+                        model=small_model,
                         base_url=settings.merge_gateway_openai_base_url,
                     )
                 ),
@@ -200,6 +212,18 @@ async def get_graphiti() -> Graphiti:
             _graphiti = g
             print("[graphiti] Graphiti client initialised")
     return _graphiti
+
+
+def reset_graphiti() -> None:
+    """Drop the cached Graphiti client so the next get_graphiti() rebuilds it
+    against the freshly-switched active model map. Called by
+    llm.invalidate_model_clients() after a runtime model switch.
+
+    NOTE: switching the *embedding* model produces vectors whose dimensionality
+    may differ from those already stored in Neo4j; hybrid search can degrade
+    until the graph is re-ingested. No automatic re-index is performed."""
+    global _graphiti
+    _graphiti = None
 
 
 # --- Search --------------------------------------------------------------------

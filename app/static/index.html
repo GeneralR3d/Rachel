@@ -198,6 +198,7 @@
 <nav id="tabs">
   <button data-tab="prompts">Prompts</button>
   <button data-tab="personality">Personality</button>
+  <button data-tab="models">Models</button>
   <button data-tab="chats">Chats</button>
   <button data-tab="users">Users</button>
   <button data-tab="worldview">World View</button>
@@ -256,6 +257,28 @@
             <div class="spacer"></div>
             <div id="traitPrompts"></div>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- MODELS (LLM model catalog + active-per-role selection) -->
+    <section id="models">
+      <h2>LLM Models</h2>
+      <div class="desc">Manage the catalog of <span class="mono">&lt;provider&gt;/&lt;model_name&gt;</span> strings, and pick which one is active for each role. Switching a model applies immediately at runtime (no restart).</div>
+      <div class="userlayout">
+        <div class="userlist">
+          <div class="btns"><button onclick="loadModels()" class="ghost">Reload</button></div>
+          <div style="display:flex;gap:6px;margin-bottom:10px">
+            <input id="newModelInput" placeholder="provider/model_name" style="flex:1" />
+            <button onclick="addModel()">Add</button>
+          </div>
+          <div id="modelList"></div>
+        </div>
+        <div class="userdetail">
+          <div class="detailhead"><div><div class="detailname">Active models</div></div></div>
+          <div class="muted inline-note">Choose the active model for each role. Changes apply immediately (PUT).</div>
+          <div class="spacer"></div>
+          <div id="activeModels"></div>
         </div>
       </div>
     </section>
@@ -834,11 +857,99 @@ async function loadArchitecture() {
   }
 }
 
+// --- models -------------------------------------------------------------
+let MODELS = [];       // catalog: [{id, model_string}]
+let ACTIVE_MODELS = {}; // {main, small, embedding}
+const MODEL_ROLES = [
+  { key: "main", label: "Main LLM", note: "router / summarizer / responder / context-fetcher + memory extractors." },
+  { key: "small", label: "Small model", note: "Graphiti internal helper + reranker calls." },
+  { key: "embedding", label: "Embedding model", note: "⚠️ Changing this may not match existing Neo4j vectors — search can degrade until re-ingested." },
+];
+
+async function loadModels() {
+  try {
+    [MODELS, ACTIVE_MODELS] = await Promise.all([api("/models"), api("/active-models")]);
+  } catch (e) { toast(e.message, "err"); return; }
+  renderModelList();
+  renderActiveModels();
+}
+
+function renderModelList() {
+  const el = document.getElementById("modelList");
+  if (!MODELS.length) { el.innerHTML = '<div class="muted">No models in catalog.</div>'; return; }
+  el.innerHTML = "";
+  MODELS.forEach(m => {
+    const row = document.createElement("div");
+    row.className = "traitrow";
+    row.style.display = "flex";
+    row.style.justifyContent = "space-between";
+    row.style.alignItems = "center";
+    row.innerHTML = '<span class="mono">' + esc(m.model_string) + '</span>';
+    const del = document.createElement("button");
+    del.className = "danger";
+    del.textContent = "✕";
+    del.onclick = () => deleteModel(m.model_string);
+    row.appendChild(del);
+    el.appendChild(row);
+  });
+}
+
+function renderActiveModels() {
+  const el = document.getElementById("activeModels");
+  el.innerHTML = "";
+  MODEL_ROLES.forEach(r => {
+    const wrap = document.createElement("div");
+    wrap.style.marginBottom = "16px";
+    const opts = MODELS.map(m =>
+      '<option value="' + esc(m.model_string) + '"' +
+      (m.model_string === ACTIVE_MODELS[r.key] ? " selected" : "") + '>' +
+      esc(m.model_string) + '</option>').join("");
+    wrap.innerHTML =
+      '<div class="detailname">' + esc(r.label) + '</div>' +
+      '<div class="muted inline-note">' + esc(r.note) + '</div>' +
+      '<div style="display:flex;gap:6px;margin-top:6px">' +
+      '<select id="active_' + r.key + '" style="flex:1">' + opts + '</select>' +
+      '<button data-role="' + r.key + '">Save</button></div>';
+    wrap.querySelector("button").onclick = () =>
+      setActiveModel(r.key, document.getElementById("active_" + r.key).value);
+    el.appendChild(wrap);
+  });
+}
+
+async function addModel() {
+  const input = document.getElementById("newModelInput");
+  const v = input.value.trim();
+  if (!v) return;
+  try {
+    await api("/models", { method: "POST", body: { model_string: v } });
+    input.value = "";
+    toast("Model added", "ok");
+    await loadModels();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function deleteModel(model_string) {
+  if (!confirm("Delete " + model_string + " from the catalog?")) return;
+  try {
+    await api("/models?model_string=" + encodeURIComponent(model_string), { method: "DELETE" });
+    toast("Model deleted", "ok");
+    await loadModels();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function setActiveModel(role, model_string) {
+  try {
+    ACTIVE_MODELS = await api("/active-models/" + role, { method: "PUT", body: { model_string } });
+    toast("Active " + role + " model set", "ok");
+    renderActiveModels();
+  } catch (e) { toast(e.message, "err"); }
+}
+
 // --- tabs ---------------------------------------------------------------
 function showTab(name) {
   document.querySelectorAll("main > section").forEach(s =>
     s.classList.toggle("active", s.id === name));
-  document.querySelector("main").classList.toggle("wide", name === "prompts" || name === "chats" || name === "users" || name === "personality" || name === "architecture");
+  document.querySelector("main").classList.toggle("wide", name === "prompts" || name === "chats" || name === "users" || name === "personality" || name === "architecture" || name === "models");
   document.querySelectorAll("#tabs button").forEach(b =>
     b.classList.toggle("active", b.dataset.tab === name));
   if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name);
@@ -858,6 +969,7 @@ checkHealth();
 setInterval(checkHealth, 30000);
 loadPrompts();
 loadTraits();
+loadModels();
 loadChats();
 loadProfileFields().then(loadUsers);
 </script>

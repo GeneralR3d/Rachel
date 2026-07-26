@@ -95,12 +95,33 @@ def _tag(chat_id: int | None) -> str:
 # Uses the Graphiti key too: this extractor is the front half of the same
 # world-view memory pipeline that feeds Graphiti, so all its cost is billed to
 # the same separate Gateway key.
-_extractor_llm = ChatOpenAI(
-    model=settings.llm_model,
-    api_key=settings.graphiti_api_key,
-    base_url=settings.merge_gateway_openai_base_url,
-    temperature=0.0,
-).with_structured_output(ExtractorOutput, method="function_calling")
+_extractor_cache: dict = {}
+
+
+async def _get_extractor_llm():
+    """Lazily build & cache the fact-extractor client keyed on the active 'main'
+    model, so a runtime model switch rebuilds it. Billed to the Graphiti key,
+    like the rest of the world-view pipeline."""
+    from app.repository import get_active_models
+
+    try:
+        model = (await get_active_models())["main"]
+    except Exception:
+        model = settings.llm_model
+    if model not in _extractor_cache:
+        _extractor_cache[model] = ChatOpenAI(
+            model=model,
+            api_key=settings.graphiti_api_key,
+            base_url=settings.merge_gateway_openai_base_url,
+            temperature=0.0,
+        ).with_structured_output(ExtractorOutput, method="function_calling")
+    return _extractor_cache[model]
+
+
+def reset_extractor_clients() -> None:
+    """Drop the cached extractor client so the next call rebuilds against the
+    freshly-switched active model. Called by llm.invalidate_model_clients()."""
+    _extractor_cache.clear()
 
 
 # --- Retrieval ---------------------------------------------------------------
@@ -182,7 +203,7 @@ async def fact_extractor_node(state: WorldviewState) -> Dict:
         # No annotation: ainvoke can return None on a schema-validation failure,
         # so pinning it to ExtractorOutput makes the is-None guard below look
         # unreachable to the type checker.
-        result = await _extractor_llm.ainvoke(msgs)
+        result = await (await _get_extractor_llm()).ainvoke(msgs)
     except Exception as e:
         # Record then re-raise: the graph-level handler in update_worldview logs
         # and fails open (returns None), so behaviour here is unchanged — we only
