@@ -1,4 +1,4 @@
-"""Entry point + shared helpers for Rachel's post-conversation memory upkeep.
+"""Entry point + shared helpers for Bryan's post-conversation memory upkeep.
 
 ``update_memories`` wraps the two memory pipelines — the general world view
 (app/services/worldview.py) and the per-user facts/profile store

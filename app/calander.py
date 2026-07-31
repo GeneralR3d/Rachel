@@ -1,7 +1,7 @@
 """Calendar / weekly-schedule data access + LangChain tools.
 
 Moved out of repository.py so the schedule lookups live in one place. Everything
-Rachel knows about her schedule now flows through the LangChain ``@tool``s bound
+Bryan knows about her schedule now flows through the LangChain ``@tool``s bound
 to the context_fetcher node: the node calls them (right now / today / other days
 / specific times) and their output is injected into the responder as fetched
 context. The responder no longer reads the schedule directly.
@@ -22,7 +22,7 @@ from sqlalchemy import select
 from app.database import session_scope
 from app.models import ScheduleActivity
 
-# Rachel lives in Singapore; "now" for the schedule tools is always SGT.
+# Bryan lives in Singapore; "now" for the schedule tools is always SGT.
 SGT = timezone(timedelta(hours=8))
 
 # 0=Mon … 6=Sun, matching datetime.weekday().
@@ -138,9 +138,9 @@ async def get_day_activities(day_of_week: int) -> list[dict]:
 
 @tool
 async def get_schedule_for_day(day: str) -> str:
-    """Get Rachel's FULL schedule for a given day of the week.
+    """Get Bryan's FULL schedule for a given day of the week.
 
-    Use this to find out everything Rachel is doing on a particular day —
+    Use this to find out everything Bryan is doing on a particular day —
     every activity with its time, location, who she's with, why, and any
     interesting event. Useful when someone asks about her plans for a specific
     day (e.g. "what are you doing this Saturday?").
@@ -153,8 +153,8 @@ async def get_schedule_for_day(day: str) -> str:
         return f"Unrecognised day '{day}'. Use a weekday name like 'Monday'."
     activities = await get_day_activities(idx)
     if not activities:
-        return f"Rachel has nothing scheduled on {DAY_NAMES[idx]}."
-    lines = [f"Rachel's full schedule for {DAY_NAMES[idx]}:"]
+        return f"Bryan has nothing scheduled on {DAY_NAMES[idx]}."
+    lines = [f"Bryan's full schedule for {DAY_NAMES[idx]}:"]
     for a in activities:
         lines.append(
             f"- {a['start_hour']:02d}:00–{a['ends_at']} {a['name']} @ {a['location']} "
@@ -167,7 +167,7 @@ async def get_schedule_for_day(day: str) -> str:
 def _render_overview(idx: int, summary: list[dict], header: str) -> str:
     """Render a day-summary (name/duration/location only) as a bullet list."""
     if not summary:
-        return f"Rachel has nothing scheduled on {DAY_NAMES[idx]}."
+        return f"Bryan has nothing scheduled on {DAY_NAMES[idx]}."
     lines = [header]
     for a in summary:
         lines.append(f"- {a['name']} ({a['duration_hours']}h) @ {a['location']}")
@@ -189,12 +189,12 @@ async def get_day_overview(day: str) -> str:
     if idx is None:
         return f"Unrecognised day '{day}'. Use a weekday name like 'Monday'."
     summary = await get_day_summary(idx)
-    return _render_overview(idx, summary, f"Overview of Rachel's {DAY_NAMES[idx]}:")
+    return _render_overview(idx, summary, f"Overview of Bryan's {DAY_NAMES[idx]}:")
 
 
 @tool
 async def get_today_overview() -> str:
-    """Get a quick overview of what Rachel has on TODAY: each activity's name, duration and location only.
+    """Get a quick overview of what Bryan has on TODAY: each activity's name, duration and location only.
 
     Takes no arguments — it always uses the current (Singapore) date. Use this
     when the conversation is about today's plans and you just need the shape of
@@ -202,12 +202,12 @@ async def get_today_overview() -> str:
     """
     idx = datetime.now(SGT).weekday()
     summary = await get_day_summary(idx)
-    return _render_overview(idx, summary, f"Overview of Rachel's today ({DAY_NAMES[idx]}):")
+    return _render_overview(idx, summary, f"Overview of Bryan's today ({DAY_NAMES[idx]}):")
 
 
 @tool
 async def get_activity_now() -> str:
-    """Get what Rachel is doing RIGHT NOW, based on the current Singapore time.
+    """Get what Bryan is doing RIGHT NOW, based on the current Singapore time.
 
     Takes no arguments. Use this when someone asks what she's up to / whether
     she's busy at this moment (e.g. "you free now?", "wyd?"). Returns the single
@@ -216,9 +216,9 @@ async def get_activity_now() -> str:
     now = datetime.now(SGT)
     a = await get_current_activity(now.weekday(), now.hour)
     if a is None:
-        return "Rachel has nothing scheduled right now."
+        return "Bryan has nothing scheduled right now."
     return (
-        f"Right now ({DAY_NAMES[now.weekday()]} {now.strftime('%H:%M')}) Rachel is: "
+        f"Right now ({DAY_NAMES[now.weekday()]} {now.strftime('%H:%M')}) Bryan is: "
         f"{a['name']} @ {a['location']} ({a['start_hour']:02d}:00–{a['ends_at']}, "
         f"with {a['companions']}): {a['description']} "
         f"[reason: {a['reason']}; event: {a['interesting_event']}]"
@@ -227,7 +227,7 @@ async def get_activity_now() -> str:
 
 @tool
 async def get_activity_at(day: str, hour: int) -> str:
-    """Get the single activity Rachel is doing at a specific day and hour.
+    """Get the single activity Bryan is doing at a specific day and hour.
 
     Use this to answer "what are you doing on <day> at <hour>?" — it returns
     the one activity covering that time slot (handling activities that run past
@@ -244,9 +244,9 @@ async def get_activity_at(day: str, hour: int) -> str:
         return "hour must be an integer between 0 and 23."
     a = await get_current_activity(idx, hour)
     if a is None:
-        return f"Rachel has nothing scheduled on {DAY_NAMES[idx]} at {hour:02d}:00."
+        return f"Bryan has nothing scheduled on {DAY_NAMES[idx]} at {hour:02d}:00."
     return (
-        f"On {DAY_NAMES[idx]} at {hour:02d}:00 Rachel is: {a['name']} @ {a['location']} "
+        f"On {DAY_NAMES[idx]} at {hour:02d}:00 Bryan is: {a['name']} @ {a['location']} "
         f"({a['start_hour']:02d}:00–{a['ends_at']}, with {a['companions']}): "
         f"{a['description']} [reason: {a['reason']}; event: {a['interesting_event']}]"
     )

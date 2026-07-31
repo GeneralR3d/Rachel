@@ -1,4 +1,4 @@
-# Rachel
+# Bryan
 
 > A Telegram agent that texts like a real person — a 22-year-old Singaporean university student with moods, memory, a weekly schedule, and a tunable personality — not like a chatbot.
 
@@ -9,27 +9,27 @@
 ![LangGraph](https://img.shields.io/badge/LangGraph-stateful%20agents-orange)
 ![OpenRouter](https://img.shields.io/badge/LLM-OpenRouter-black)
 
-## Who is Rachel?
+## Who is Bryan?
 
 Most chatbots forget who you are between conversations, and answer every single message whether or not it was meant for them. Drop one into a group chat and it becomes a nuisance within minutes.
 
-Rachel is the opposite. She's a conversational persona — "Rachel," a 22-year-old marketing student at NTU in Singapore, with a backstory, insecurities, a church youth group, a bubble-tea order, and a weekly timetable. She buffers incoming messages and waits a beat before replying, types at a human speed, splits longer thoughts across several messages, and only chimes in when she's actually being addressed. Over time she builds up a **temporal knowledge graph** of the world and of each person she talks to, retrieves from it selectively per conversation, and her tone shifts with the emotional read of the room.
+Bryan is the opposite. He's a conversational persona — "Bryan," a 22-year-old Finance student at NTU in Singapore, with a backstory, a nonchalant streak, a love of football and the gym, a taste for the nightlife, and a weekly timetable. He buffers incoming messages and waits a beat before replying, types at a human speed, splits longer thoughts across several messages, and only chimes in when he's actually being addressed. Over time he builds up a **temporal knowledge graph** of the world and of each person he talks to, retrieves from it selectively per conversation, and his tone shifts with the emotional read of the room.
 
-Technically, Rachel is a FastAPI service that runs two Telethon (Telegram) clients on the same asyncio event loop, backed by **Postgres** (history, summaries, profiles, personality, schedule) and **Neo4j via [Graphiti](https://github.com/getzep/graphiti)** (long-term memory as a temporal knowledge graph), with all the language work driven by a set of **LangGraph** state machines over **OpenRouter**. The interesting part isn't that it calls an LLM — it's the machinery around the LLM that makes the output feel like a person texting you back. The longer-term vision is a persona engine: a reusable substrate for believable, stateful AI characters that live inside the messaging apps people already use.
+Technically, Bryan is a FastAPI service that runs two Telethon (Telegram) clients on the same asyncio event loop, backed by **Postgres** (history, summaries, profiles, personality, schedule) and **Neo4j via [Graphiti](https://github.com/getzep/graphiti)** (long-term memory as a temporal knowledge graph), with all the language work driven by a set of **LangGraph** state machines over **OpenRouter**. The interesting part isn't that it calls an LLM — it's the machinery around the LLM that makes the output feel like a person texting you back. The longer-term vision is a persona engine: a reusable substrate for believable, stateful AI characters that live inside the messaging apps people already use.
 
 ## Key Innovations
 
 ### Human-cadence messaging loop
-Rachel never replies on the raw message-arrival event. Each incoming message **cancels and reschedules** two asyncio timers per chat: a reply timer (`REPLY_DELAY = 7s` after the last message) and a flush timer (`CHAT_BLACKOUT_TIME = 60s` of silence = "conversation over"). This debounce means that if you fire off five texts in a row, Rachel reads all five and answers once — the way a human who was mid-typing would. Replies are then split on blank lines into separate Telegram messages and sent with a simulated typing delay, so a long answer arrives as a believable burst of texts rather than one instant wall. The loop is also race-hardened: the LLM call is `asyncio.shield`-ed so a racing new message can't cancel an in-flight response, a per-chat reply lock stops a queued reply from reading context before the previous one finishes sending, and Rachel's own reply is inserted back into the buffer **at its send-order position by message id** — messages that arrived during a slow multi-message send already sit at the tail.
+Bryan never replies on the raw message-arrival event. Each incoming message **cancels and reschedules** two asyncio timers per chat: a reply timer (`REPLY_DELAY = 7s` after the last message) and a flush timer (`CHAT_BLACKOUT_TIME = 60s` of silence = "conversation over"). This debounce means that if you fire off five texts in a row, Bryan reads all five and answers once — the way a human who was mid-typing would. Replies are then split on blank lines into separate Telegram messages and sent with a simulated typing delay, so a long answer arrives as a believable burst of texts rather than one instant wall. The loop is also race-hardened: the LLM call is `asyncio.shield`-ed so a racing new message can't cancel an in-flight response, a per-chat reply lock stops a queued reply from reading context before the previous one finishes sending, and Bryan's own reply is inserted back into the buffer **at its send-order position by message id** — messages that arrived during a slow multi-message send already sit at the tail.
 
 ### Cheap-gate → LLM-router reply suppression
-Sitting in a busy group chat without being annoying is a genuinely hard product problem. Rachel solves it in two tiers. First a **no-LLM `checker_node`**: if the message is a 1-on-1 DM or Rachel was @-mentioned/replied-to, she's definitely meant to respond — skip straight to generating. Otherwise a lightweight **`router_node`** makes an LLM judgement call on whether a reply is even warranted (it fails *open* on LLM errors), and short-circuits the whole graph to `END` if not — no summary, no context retrieval, no response, no cost. She still *reads and remembers* every message either way — she just doesn't talk over the room. A buffer cap (`MAX_BUFFER_LEN = 150`) is enforced on every incoming message, so a busy group she never replies in still flushes and feeds the memory pipelines instead of growing unbounded.
+Sitting in a busy group chat without being annoying is a genuinely hard product problem. Bryan solves it in two tiers. First a **no-LLM `checker_node`**: if the message is a 1-on-1 DM or Bryan was @-mentioned/replied-to, he's definitely meant to respond — skip straight to generating. Otherwise a lightweight **`router_node`** makes an LLM judgement call on whether a reply is even warranted (it fails *open* on LLM errors), and short-circuits the whole graph to `END` if not — no summary, no context retrieval, no response, no cost. He still *reads and remembers* every message either way — he just doesn't talk over the room. A buffer cap (`MAX_BUFFER_LEN = 150`) is enforced on every incoming message, so a busy group he never replies in still flushes and feeds the memory pipelines instead of growing unbounded.
 
 ### An agentic context fetcher that runs in parallel with the summarizer
-Instead of stuffing every prompt with Rachel's full schedule, world knowledge, and everyone's profile, a dedicated **`context_fetcher_node`** — the only node in the reply graph with tool-calling — decides *per message* what's worth looking up. It has the calendar tools, a `search_world_view` tool over the knowledge graph, and a unified `search_user_info(user_id, query)` tool that fetches both a participant's free-form fact memories and their structured profile in one call. It's a deliberate **single pass** (one tool-selection call, all tools run once, outputs routed into typed state slots — no agent loop), runs **in parallel with the summarizer** so retrieval adds no latency to the critical path, and is wrapped in a 30-second timeout that **fails open to empty context** — memory can enrich a reply but can never stall or break one.
+Instead of stuffing every prompt with Bryan's full schedule, world knowledge, and everyone's profile, a dedicated **`context_fetcher_node`** — the only node in the reply graph with tool-calling — decides *per message* what's worth looking up. It has the calendar tools, a `search_world_view` tool over the knowledge graph, and a unified `search_user_info(user_id, query)` tool that fetches both a participant's free-form fact memories and their structured profile in one call. It's a deliberate **single pass** (one tool-selection call, all tools run once, outputs routed into typed state slots — no agent loop), runs **in parallel with the summarizer** so retrieval adds no latency to the critical path, and is wrapped in a 30-second timeout that **fails open to empty context** — memory can enrich a reply but can never stall or break one.
 
 ### Divider partitioning: anti-duplication without deleting context
-Because the history slice includes Rachel's own past replies, she'd sometimes re-answer messages she'd already handled. The fix is a *divider*: each reply-graph node inserts one synthetic message into the transcript at the point just past Rachel's last reply — "everything above is context you already responded to; act on what's below." Nothing is ever removed, so the model keeps full conversational context, but the actionable region is explicit. The memory pipelines use the same insert-a-divider-remove-nothing shape but partition on a **persisted per-chat watermark** instead (see below) — two deliberately separate mechanisms for two different notions of "already handled."
+Because the history slice includes Bryan's own past replies, he'd sometimes re-answer messages he'd already handled. The fix is a *divider*: each reply-graph node inserts one synthetic message into the transcript at the point just past Bryan's last reply — "everything above is context you already responded to; act on what's below." Nothing is ever removed, so the model keeps full conversational context, but the actionable region is explicit. The memory pipelines use the same insert-a-divider-remove-nothing shape but partition on a **persisted per-chat watermark** instead (see below) — two deliberately separate mechanisms for two different notions of "already handled."
 
 ### Temporal knowledge-graph memory (Graphiti on Neo4j)
 When a conversation finishes, two memory pipelines extract durable facts — *general* world facts and *personal* per-user facts — and ingest each one as an episode into **Graphiti**, a temporal knowledge graph on Neo4j. This replaces an earlier design where flat stores (a markdown file, per-user text rows) were re-read and re-written wholesale by an LLM "consolidation" pass on every update. With a graph, **deduplication is structural** (entities resolve to the same node; conflicting edges are reconciled temporally, newer facts superseding older ones) and **retrieval is selective** — the context fetcher runs a hybrid semantic + BM25 + graph search (reciprocal rank fusion) scoped to the relevant partition, pulling only the subgraph that touches the current conversation instead of dumping the whole store into every prompt. World facts live under one `worldview` partition; each user's personal memories live under their own `user-facts-<id>` partition — one graph, cleanly namespaced by Graphiti group ids. Retrieval harvests relationship **edges** and verbatim ingested **episodes**, deliberately dropping Graphiti's node summaries (a lossy, truncated restatement of the same facts).
@@ -50,7 +50,7 @@ The profile slot list (`USER_PROFILE_FIELDS`) and the mood list (`MOOD_LABELS`) 
 Graphiti assumes a provider with native constrained decoding; OpenRouter silently downgrades `json_schema` mode to a plain JSON object for models without it, so field names stop being enforced and Graphiti's internal validation fails. Two load-bearing workarounds fix this: the LLM client runs in `json_object` mode (which embeds the schema, field names included, into the prompt), and a `_RetryingOpenAIGenericClient` subclass re-rolls the call with a corrective note whenever the model returns valid JSON whose *shape* doesn't match the expected response model — a failure class Graphiti's built-in transport-level retries never see. Small, unglamorous, and the difference between a demo and a system that ingests memory reliably on a budget model.
 
 ### Personality as tunable sliders + a lived-in schedule
-Rachel's character isn't a frozen prompt. Twelve personality traits (Extraversion, Neuroticism, Humor/Irony, Patience, …) are stored as `low`/`medium`/`high` sliders, each with its own prompt fragment, assembled live into the responder prompt and tunable at runtime over Telegram, REST, or the dashboard. Trait *definitions* re-seed from code on every startup while admin-tuned levels survive. A seeded **weekly schedule** (rows keyed by day + start hour, with durations that span midnight) gives her a current activity and day overview, surfaced to the LLM through the calendar tools — so "what are you up to?" gets an answer consistent with the time of day.
+Bryan's character isn't a frozen prompt. Twelve personality traits (Extraversion, Neuroticism, Humor/Irony, Patience, …) are stored as `low`/`medium`/`high` sliders, each with its own prompt fragment, assembled live into the responder prompt and tunable at runtime over Telegram, REST, or the dashboard. Trait *definitions* re-seed from code on every startup while admin-tuned levels survive. A seeded **weekly schedule** (rows keyed by day + start hour, with durations that span midnight) gives him a current activity and day overview, surfaced to the LLM through the calendar tools — so "what are you up to?" gets an answer consistent with the time of day.
 
 ## Architecture
 
@@ -62,7 +62,7 @@ flowchart TB
     end
 
     subgraph APP[FastAPI app · single asyncio loop]
-        RC[Rachel client<br/>Telethon · anon.session]
+        RC[Bryan client<br/>Telethon · anon.session]
         BOT[Admin bot<br/>Telethon · bot.session]
         API[Admin HTTP API + dashboard<br/>single-file SPA at /]
         BUF[(Per-chat in-memory<br/>message buffers + timers)]
@@ -95,8 +95,8 @@ flowchart TB
     API <--> DB
 ```
 
-- **Rachel client** (`app/telegram/client.py`) — the account your friends talk to. Owns the per-chat message buffers and the reply/flush timers; seeds context from the DB on first contact and flushes back on conversation end.
-- **Admin bot** (`app/telegram/bot.py`) — a second Telegram bot only you can talk to, for inspecting and tuning Rachel's prompts, traits, memory, and history live.
+- **Bryan client** (`app/telegram/client.py`) — the account your friends talk to. Owns the per-chat message buffers and the reply/flush timers; seeds context from the DB on first contact and flushes back on conversation end.
+- **Admin bot** (`app/telegram/bot.py`) — a second Telegram bot only you can talk to, for inspecting and tuning Bryan's prompts, traits, memory, and history live.
 - **Admin HTTP API + dashboard** (`app/routers/admin.py`, `app/static/index.html`) — the same controls over REST, plus a self-contained single-file dashboard SPA (vanilla JS, no build step) served at `/`, designed to sit behind nginx basic auth.
 - **LLM service** (`app/services/llm.py`) — the reply pipeline: gating, mood detection, agentic context retrieval, and response generation as one compiled LangGraph graph.
 - **Memory services** (`app/services/worldview.py`, `app/services/userfacts.py`, `app/services/memory.py`) — the post-conversation memory pipelines, orchestrated by a single `update_memories` entry point.
@@ -157,13 +157,13 @@ When a conversation ends (or the buffer fills), `update_memories` divides the tr
 
 - Human-like texting: debounced replies, simulated typing speed, multi-message bursts, race-safe send ordering
 - Group-chat-aware: reads everything, only speaks when DM'd, @-mentioned, or replied to — and a router can still decline to reply
-- Never re-answers a message she already handled (divider partitioning), never re-extracts memory from old messages (persisted watermark)
+- Never re-answers a message he already handled (divider partitioning), never re-extracts memory from old messages (persisted watermark)
 - Seven conversational moods with matching tone exemplars, applied with a deliberate one-turn lag
 - Persistent two-tier memory in a temporal knowledge graph: general world facts + per-person facts, plus a 16-slot structured profile in Postgres
 - Selective recall: an agentic context fetcher searches the graph and schedule per message instead of dumping all memory into every prompt
 - Self-maintaining memory with structural dedup and newer-fact-wins conflict resolution, run automatically when a conversation ends
 - Twelve runtime-tunable personality traits (low/medium/high sliders)
-- A seeded weekly schedule that gives Rachel a believable "current activity", exposed to the LLM as tools
+- A seeded weekly schedule that gives Bryan a believable "current activity", exposed to the LLM as tools
 - Admin control plane over Telegram, REST, **and** a web dashboard: prompts, traits, memory, profiles, history, summaries
 - Bulk world-knowledge seeding scripts (single fact or whole markdown files)
 - Every reply stores a one-sentence `reason` for debugging and traceability
@@ -171,7 +171,7 @@ When a conversation ends (or the buffer fills), `update_memories` divides the tr
 
 ## Future Potential
 
-The next frontier is richer memory *generation*, splitting what Rachel remembers into the two kinds of long-term memory humans have. **Temporal (episodic) memories** capture events as they happen — "Sarah's job interview is on Thursday" — with lifecycles: they're born mid-conversation rather than only at conversation end, they expire or get invalidated as reality moves on (the interview happened; the plan was cancelled), and Graphiti's temporal edge invalidation is the natural substrate for tracking that decay. **Semantic memories** are the timeless residue distilled from those episodes — "Sarah works in finance" — which is what the current extractors approximate today. Layered on top is an **evolving user impressions** feature: rather than just accumulating facts about a person, Rachel forms an *opinion* of them — warm, guarded, amused, worried — that drifts gradually as interactions accumulate, the way real impressions do, and colours her tone with each person independently of the conversation's mood.
+The next frontier is richer memory *generation*, splitting what Bryan remembers into the two kinds of long-term memory humans have. **Temporal (episodic) memories** capture events as they happen — "Sarah's job interview is on Thursday" — with lifecycles: they're born mid-conversation rather than only at conversation end, they expire or get invalidated as reality moves on (the interview happened; the plan was cancelled), and Graphiti's temporal edge invalidation is the natural substrate for tracking that decay. **Semantic memories** are the timeless residue distilled from those episodes — "Sarah works in finance" — which is what the current extractors approximate today. Layered on top is an **evolving user impressions** feature: rather than just accumulating facts about a person, Bryan forms an *opinion* of them — warm, guarded, amused, worried — that drifts gradually as interactions accumulate, the way real impressions do, and colours his tone with each person independently of the conversation's mood.
 
 The architecture generalizes cleanly beyond one character. The persona is data — system prompts, trait sliders, schedule, moods — not code, so the same engine could host a roster of distinct characters, or be offered as a "believable NPC" backend for game studios and interactive-fiction platforms. Swapping Telethon for the Discord or WhatsApp Business APIs is a client-layer change, not an architectural one, since the reply/memory pipelines are transport-agnostic. OpenRouter already makes the underlying model a config value, so cost/quality can be tuned per deployment without touching the graphs.
 
@@ -237,7 +237,7 @@ What it does: logs in the separate **admin** bot — the one only you talk to.
 Where to get it: message [@BotFather](https://t.me/botfather) → `/newbot` → copy the token it gives you.
 Example: `TELEGRAM_BOT_TOKEN=123456:ABC-DEF...`
 
-> Rachel's *own* credentials are **not** stored in `.env`. They're entered once, interactively, in step 6.
+> Bryan's *own* credentials are **not** stored in `.env`. They're entered once, interactively, in step 6.
 
 **`ADMIN_ID`** *(required)*
 What it does: the only Telegram user ID allowed to issue admin commands.
@@ -247,7 +247,7 @@ Example: `ADMIN_ID=987654321`
 #### LLM
 
 **`OPENROUTER_API_KEY`** *(required)*
-What it does: authenticates Rachel's own model calls (router, summarizer, context fetcher, responder).
+What it does: authenticates Bryan's own model calls (router, summarizer, context fetcher, responder).
 Where to get it: sign in at [openrouter.ai](https://openrouter.ai/keys) → **Keys** → create a key.
 Example: `OPENROUTER_API_KEY=sk-or-v1-...`
 
@@ -278,7 +278,7 @@ What they do: credentials for the Neo4j container (Compose sets `NEO4J_AUTH` fro
 What it does: bolt connection string for Graphiti.
 Value: `bolt://localhost:7687` locally; `bolt://neo4j:7687` when the app runs inside Compose.
 
-**`BOT_NAME`** *(optional)* — display name used in summaries/labelling. Default: `Rachel`.
+**`BOT_NAME`** *(optional)* — display name used in summaries/labelling. Default: `Bryan`.
 **`USER_NAME`** *(optional)* — your name, used for labelling. Default: unset.
 
 ### 5. Initialize the database
@@ -288,13 +288,13 @@ uv run alembic upgrade head
 ```
 *This creates all the Postgres tables the app needs. You only need to run it once (and again whenever you pull new migrations). Neo4j needs no schema setup — Graphiti builds its indices on first use.*
 
-### 6. Log Rachel in (one time)
+### 6. Log Bryan in (one time)
 
-Uvicorn runs non-interactively, so Rachel's session must be created first. This writes `anon.session`:
+Uvicorn runs non-interactively, so Bryan's session must be created first. This writes `anon.session`:
 ```bash
 uv run python -m scripts.login
 ```
-*Follow the interactive prompts to log in the account Rachel will speak as.*
+*Follow the interactive prompts to log in the account Bryan will speak as.*
 
 ### 7. Run the app
 
@@ -312,11 +312,11 @@ Expected response:
 ```json
 { "status": "ok" }
 ```
-Then message Rachel from another Telegram account — after a few seconds' pause she should reply, typing it out in real time.
+Then message Bryan from another Telegram account — after a few seconds' pause he should reply, typing it out in real time.
 
-### (Optional) Seed Rachel's world knowledge
+### (Optional) Seed Bryan's world knowledge
 
-Give her things to "know" before anyone talks to her (Neo4j must be up; each fact is several LLM round-trips, so bulk ingestion takes a while):
+Give him things to "know" before anyone talks to him (Neo4j must be up; each fact is several LLM round-trips, so bulk ingestion takes a while):
 
 ```bash
 uv run python -m scripts.add_worldview_fact "Chagee is a bubble tea brand"   # one fact
@@ -334,7 +334,7 @@ Over Telegram (only `ADMIN_ID` is honoured):
 
 | Command | Description |
 |---|---|
-| `/get_responder_system_prompt` · `/set_responder_system_prompt <text>` | View / set Rachel's main persona prompt |
+| `/get_responder_system_prompt` · `/set_responder_system_prompt <text>` | View / set Bryan's main persona prompt |
 | `/get_summarizer_system_prompt` · `/set_summarizer_system_prompt <text>` | View / set the summarizer prompt |
 | `/list_user_names` · `/list_chats` | Enumerate known users / chats |
 | `/get_history <chat_id>` · `/clear_history <chat_id>` | Inspect / clear a chat's stored messages (incl. `reason`) |

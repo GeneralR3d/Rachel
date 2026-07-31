@@ -5,7 +5,7 @@ process-wide client, the structured-output workaround, and the
 generic ingest / search / episode-listing helpers. The memory pipelines build
 on top of this module:
 
-- app/services/worldview.py — Rachel's general facts (group_id "worldview").
+- app/services/worldview.py — Bryan's general facts (group_id "worldview").
 - app/services/userfacts.py — per-user personal facts (one group_id per user).
 
 Each partition is just a Graphiti group_id inside the single ``neo4j`` database
@@ -353,7 +353,7 @@ async def list_episodes(group_id: str) -> List[str]:
 
     This is the raw ingested sentences (not the derived edges/nodes), read
     straight off the episodic layer — used by the admin surfaces to dump
-    everything Rachel has stored for a partition. Raises on driver errors so
+    everything Bryan has stored for a partition. Raises on driver errors so
     admin callers can surface the failure.
     """
     graphiti = await get_graphiti()

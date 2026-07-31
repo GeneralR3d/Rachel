@@ -1,4 +1,4 @@
-"""Admin HTTP API for managing Rachel without touching Telegram.
+"""Admin HTTP API for managing Bryan without touching Telegram.
 
 These endpoints reuse the same repository functions the Telethon handlers use,
 so the HTTP API and the in-Telegram admin bot stay in sync.

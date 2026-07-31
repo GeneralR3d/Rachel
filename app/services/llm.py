@@ -10,7 +10,7 @@ context_fetcher_node fan out in parallel before the responder joins them:
                END
 
 checker_node:        cheap, no-LLM gate. If MUST_REPLY is set (1-on-1 chat or
-                     Rachel was tagged), skip the router entirely and go straight
+                     Bryan was tagged), skip the router entirely and go straight
                      to the summarizer/context_fetcher. Otherwise defer to the
                      router.
 router_node:         decides whether a reply is even warranted. If not, the
@@ -21,13 +21,13 @@ summarizer_node:     detects conversation mood; result is stored in _chat_mood
                      with context_fetcher_node.
 context_fetcher_node: a single-pass tool-calling step whose sole job is to
                      decide which tools to call to gather extra context for the
-                     responder: the calendar tools (Rachel's schedule), the
+                     responder: the calendar tools (Bryan's schedule), the
                      world-view search, and the per-user facts search (both
                      Graphiti). One LLM call picks the tools, they run once, and
                      the gathered context is written to state["schedule_context"]
                      / state["world_view"] / state["user_facts"] and injected
                      into the responder.
-responder_node:      generates Rachel's reply using the mood detected in the
+responder_node:      generates Bryan's reply using the mood detected in the
                      previous call (defaults to "default" on first contact) plus
                      whatever context_fetcher_node gathered this call.
 """
@@ -90,7 +90,7 @@ ROUTER_CONTEXT_MSGS = 15
 _chat_mood: Dict[int, str] = {}
 DEFAULT_MOOD = "default"
 
-# Rachel's own replies sit in the history we feed the graph (sender == BOT_NAME).
+# Bryan's own replies sit in the history we feed the graph (sender == BOT_NAME).
 # To stop her re-answering messages she already handled, we partition the history
 # at her *last* message: everything up to & including it is settled context, and
 # only the messages after it are "new" and to be acted on. A divider message is
@@ -121,15 +121,15 @@ def _partition_index(
 ) -> int:
     """First 'new' (not-yet-responded-to) index in ``history``.
 
-    With a ``watermark`` (the highest telegram_message_id Rachel has already
+    With a ``watermark`` (the highest telegram_message_id Bryan has already
     responded to) the boundary is the first *non-bot* message whose id exceeds
-    it. This is more robust than keying off Rachel's last reply position: when a
-    message arrives while Rachel is still generating a reply, her eventual reply
+    it. This is more robust than keying off Bryan's last reply position: when a
+    message arrives while Bryan is still generating a reply, her eventual reply
     gets a *higher* send-time id and so sorts to the buffer tail, hiding that
-    newer-arrived (lower-id) message behind it — "one past Rachel's last message"
+    newer-arrived (lower-id) message behind it — "one past Bryan's last message"
     would then wrongly treat the unanswered message as settled context.
 
-    Without a watermark it falls back to one past Rachel's last message; 0 if she
+    Without a watermark it falls back to one past Bryan's last message; 0 if she
     has none here. (The watermark path no longer uses a single index — see
     ``_is_new_message`` / ``_build_history_messages`` — because a message that is
     "new" by id but a bot turn must still render as context, which a single
@@ -144,7 +144,7 @@ def _partition_index(
 
 def _is_new_message(entry: Dict[str, Any], watermark: int) -> bool:
     """True when ``entry`` is an unanswered *user* message (a non-bot turn whose
-    id exceeds the watermark). Rachel's own turns are never "new" — they're always
+    id exceeds the watermark). Bryan's own turns are never "new" — they're always
     already-said context, even when their send-time id sorts them past the
     watermark (which happens when the message that triggered them arrived mid-send)."""
     return entry.get("sender") != BOT_NAME and entry.get("telegram_message_id", 0) > watermark
@@ -165,10 +165,10 @@ def _build_history_messages(
     already-handled context and the new messages to act on. With a ``watermark``,
     "new" means *unanswered user messages* (``_is_new_message``): every bot turn is
     rendered as context above the divider regardless of its send-time id, so
-    Rachel's own last reply — which sorts to the tail when the triggering message
+    Bryan's own last reply — which sorts to the tail when the triggering message
     arrived while she was still sending — can't slip below the divider and get
     re-generated. Without a watermark it falls back to the positional split at
-    ``_partition_index`` (one past Rachel's last message).
+    ``_partition_index`` (one past Bryan's last message).
     """
     def render(entry: Dict[str, Any]) -> Any:
         text = f"{entry['sender']}: {entry['content']}"
@@ -274,7 +274,7 @@ class RouterOutput(BaseModel):
     # writing the (cosmetic) justification — it sometimes drops trailing fields.
     should_reply: bool = Field(
         ...,
-        description="True if Rachel should send a reply to the latest messages, False if she should stay silent.",
+        description="True if Bryan should send a reply to the latest messages, False if she should stay silent.",
     )
     reason: str = Field(
         ...,
@@ -301,7 +301,7 @@ class ResponseOutput(BaseModel):
     )
     content: str = Field(
         ...,
-        description="Rachel's reply as plain text in her natural Singlish voice. Use \\n\\n to separate message bursts. Do NOT include her name or any prefix.",
+        description="Bryan's reply as plain text in her natural Singlish voice. Use \\n\\n to separate message bursts. Do NOT include her name or any prefix.",
     )
 
 
@@ -310,9 +310,9 @@ class GraphState(TypedDict):
     current_summary: str | None
     mood: str
     senders: Dict[int, str]  # sender_user_id -> display name
-    must_reply: bool  # set by caller: Rachel was tagged/replied-to in a group
+    must_reply: bool  # set by caller: Bryan was tagged/replied-to in a group
     is_private: bool  # set by caller: 1-on-1 DM (selects the PM router prompt)
-    # Highest telegram_message_id Rachel has already responded to; drives the
+    # Highest telegram_message_id Bryan has already responded to; drives the
     # "already handled vs. new" divider (see _partition_index). None on first contact.
     responded_watermark: Optional[int]
     should_reply: bool
@@ -393,7 +393,7 @@ async def _get_responder_llm():
 # context, so a hang/error can never stall the pipeline.) CONTEXT_TOOLS is the
 # single source of truth: it drives both the bound tools and the prompt's {tools}
 # listing (via format_tools). It combines the calendar tools with the world-view
-# search tool (Rachel's general learned facts).
+# search tool (Bryan's general learned facts).
 CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool]
 
 
@@ -469,7 +469,7 @@ def _has_new_messages(state: GraphState) -> bool:
 
 
 def _route_after_checker(state: GraphState):
-    """Conditional edge: if the caller forced a reply (1-on-1 chat or Rachel was
+    """Conditional edge: if the caller forced a reply (1-on-1 chat or Bryan was
     tagged), skip the router and fan out to the summarizer + context_fetcher.
     Otherwise let the router decide whether a reply is warranted."""
     # "Nothing new" overrides everything, including must_reply: if there is nothing
@@ -484,7 +484,7 @@ def _route_after_checker(state: GraphState):
 
 
 async def router_node(state: GraphState) -> Dict:
-    """Decide whether Rachel should reply at all. On failure, default to replying
+    """Decide whether Bryan should reply at all. On failure, default to replying
     (fail-open) so a flaky router never silences her."""
     # Only show the router the most recent messages — it just needs the latest
     # context to judge whether a reply is warranted, not the whole buffer.
@@ -495,7 +495,7 @@ async def router_node(state: GraphState) -> Dict:
 
     # In a 1-on-1 DM use the PM-specific gate (filters out low-information
     # acknowledgements and already-answered messages); in groups use the default
-    # gate (filters out chatter that doesn't concern Rachel).
+    # gate (filters out chatter that doesn't concern Bryan).
     router_prompt = ROUTER_PM_SYSTEM_PROMPT if state.get("is_private") else ROUTER_SYSTEM_PROMPT
     system_msgs = ChatPromptTemplate.from_messages(
         [("system", router_prompt)]
@@ -794,7 +794,7 @@ async def responder_node(state: GraphState) -> Dict:
             f"the current day of week is {now.strftime('%A')}, "
             f"the current time is {now.strftime('%H:%M')}"
         )
-        # Rachel's schedule (right now / today / other days) is no longer
+        # Bryan's schedule (right now / today / other days) is no longer
         # injected here — context_fetcher_node fetches it via tools and it
         # arrives through {schedule_context}.
 
@@ -827,7 +827,7 @@ async def responder_node(state: GraphState) -> Dict:
         try:
             result: ResponseOutput | None = await (await _get_responder_llm()).ainvoke(msgs)
         except OutputParserException as e:
-            # The model sometimes ignores json_mode and returns Rachel's reply as
+            # The model sometimes ignores json_mode and returns Bryan's reply as
             # plain prose. The raw text is still a usable reply, so salvage it from
             # the exception rather than crashing the whole reply task.
             raw = (e.llm_output or "").strip()
@@ -915,7 +915,7 @@ async def get_response(
 ) -> Tuple[str, str, str | None, float]:
     """Run the LangGraph pipeline and return ``(response_text, reason, new_summary, elapsed_seconds)``.
 
-    When ``must_reply`` is True (Rachel was tagged/replied-to in a group) the
+    When ``must_reply`` is True (Bryan was tagged/replied-to in a group) the
     checker skips the router and a reply is always produced. Otherwise the router
     decides whether a reply is warranted — using the PM-specific gate when
     ``is_private`` is True (1-on-1 DM) or the default group gate otherwise. If no

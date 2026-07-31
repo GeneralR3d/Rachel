@@ -1,6 +1,6 @@
 """FastAPI application entry point.
 
-Runs both Telethon clients (Rachel + admin bot) inside the app lifespan, on the
+Runs both Telethon clients (Bryan + admin bot) inside the app lifespan, on the
 same event loop as uvicorn, and exposes the admin HTTP API. There is no webhook:
 Telethon keeps a persistent connection to Telegram and processes pushed events.
 """
@@ -20,7 +20,7 @@ from app.routers import admin
 from app.telegram.bot import bot
 from app.telegram.client import client, flush_all_buffers
 
-logger = logging.getLogger("rachel")
+logger = logging.getLogger("Bryan")
 settings = get_settings()
 
 
@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     await ensure_models_seeded()
 
     logger.info("Starting Telethon clients...")
-    # Rachel's user-facing client. Requires anon.session to already exist
+    # Bryan's user-facing client. Requires anon.session to already exist
     # (uvicorn is non-interactive — run `python -m scripts.login` once first).
     await client.start(bot_token=settings.telegram_bot_token)
     await bot.start(bot_token=settings.telegram_bot_token)
@@ -59,12 +59,12 @@ async def lifespan(app: FastAPI):
         await dispose_engine()
 
 
-app = FastAPI(title="Rachel", lifespan=lifespan)
+app = FastAPI(title="Bryan", lifespan=lifespan)
 app.include_router(admin.router)
 
 # Prometheus scrape target. Same-origin with the dashboard, so it sits behind the
 # same nginx basic auth on the VPS — point Prometheus at it with basic_auth creds.
-# Exposes rachel_llm_calls_total / rachel_llm_errors_total (see app.services.metrics).
+# Exposes Bryan_llm_calls_total / Bryan_llm_errors_total (see app.services.metrics).
 app.mount("/metrics", make_asgi_app())
 
 _DASHBOARD = Path(__file__).parent / "static" / "index.html"

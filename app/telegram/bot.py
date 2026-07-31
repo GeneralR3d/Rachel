@@ -1,4 +1,4 @@
-"""Admin Telethon bot — manage Rachel's system prompt from within Telegram.
+"""Admin Telethon bot — manage Bryan's system prompt from within Telegram.
 
 Ported from Reference/app/bot.py. Repository calls are now awaited, and the bot
 is started/stopped by app.main's lifespan rather than here.

@@ -4,7 +4,7 @@ Entries are keyed by day_of_week (0=Mon..6=Sun) and start_hour (0-23).
 duration_hours lets one entry span multiple hour-chunks — e.g. a
 start_hour=23, duration_hours=8 entry covers 23:00 through 06:59.
 
-Rachel's week: Mon/Tue/Thu have classes (BM3509, BM2507, BM2508, CS2056,
+Bryan's week: Mon/Tue/Thu have classes (BM3509, BM2507, BM2508, CS2056,
 CC0015). She stays at Hall 16 during the school week, takes the 677 bus
 home to Punggol Friday afternoon, and takes the 677 bus back to Hall 16
 on Sunday evening to prep for the week ahead — so weekday locations are
@@ -414,7 +414,7 @@ DEFAULT_SCHEDULE = [
         "duration_hours": 1,
         "companions": "Faith (over text)",
         "reason": "Likes ending her day by checking in with her best friend.",
-        "interesting_event": "Faith sent a ten-minute voice note ranting about her own group project drama and Rachel couldn't stop laughing.",
+        "interesting_event": "Faith sent a ten-minute voice note ranting about her own group project drama and Bryan couldn't stop laughing.",
     },
     # ------------------------------------------------------------------
     # Thursday (early hours carry over from Wednesday night's wind-down)

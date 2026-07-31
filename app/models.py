@@ -33,7 +33,7 @@ class ChatState(Base):
 
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     # server_default="" so a row can be inserted watermark-first (before any
-    # summary exists) — e.g. a busy group Rachel never replies in still runs the
+    # summary exists) — e.g. a busy group Bryan never replies in still runs the
     # memory pipelines and advances the watermark without ever writing a summary.
     summary: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     # Last conversational mood detected for this chat (one of MOOD_LABELS).

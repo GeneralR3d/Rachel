@@ -1,11 +1,11 @@
-"""One-time interactive login to create Rachel's ``anon.session``.
+"""One-time interactive login to create Bryan's ``anon.session``.
 
-uvicorn is non-interactive, so Telethon's first-run prompt for Rachel's bot
+uvicorn is non-interactive, so Telethon's first-run prompt for Bryan's bot
 token must be done here, once, before serving:
 
     uv run python -m scripts.login
 
-When prompted "Please enter your phone number (or bot token):", paste Rachel's
+When prompted "Please enter your phone number (or bot token):", paste Bryan's
 bot token (the bot your friends talk to, created via @BotFather). This is saved
 to anon.session and never asked again.
 """

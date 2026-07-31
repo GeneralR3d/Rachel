@@ -1,4 +1,4 @@
-"""Rachel's persistent "world view" — durable, general facts she has learned.
+"""Bryan's persistent "world view" — durable, general facts she has learned.
 
 This is a self-contained LangGraph pipeline that runs once per conversation,
 after the CHAT_BLACKOUT_TIME flush (see app/telegram/client.py::finalize_conversation).
@@ -49,7 +49,7 @@ settings = get_settings()
 BOT_NAME = settings.bot_name
 _WORLDVIEW_PATH = Path(settings.worldview_path)
 
-# Graphiti partition for Rachel's general world-view memory. All world-view
+# Graphiti partition for Bryan's general world-view memory. All world-view
 # episodes are written under this group_id and searches are scoped to it, so
 # that the per-user memory partitions (see userfacts.user_facts_group_id) never
 # clash with it or each other.
@@ -134,11 +134,11 @@ async def search_worldview(query: str | None = None) -> str:
 
 @tool
 async def search_world_view(query: str) -> str:
-    """Search Rachel's world-view knowledge base of general facts.
+    """Search Bryan's world-view knowledge base of general facts.
 
-    The world-view database stores short, single-sentence general facts Rachel has
+    The world-view database stores short, single-sentence general facts Bryan has
     learned about the world from past conversations (about brands, places, people,
-    events. Use this to look up what Rachel already knows about whatever the conversation is touching on, so the
+    events. Use this to look up what Bryan already knows about whatever the conversation is touching on, so the
     responder can reply accurately instead of guessing.
 
     Args:
@@ -165,7 +165,7 @@ async def add_worldview_facts(facts: List[str]) -> None:
     await ingest_facts(
         facts,
         group_id=_WORLDVIEW_GROUP_ID,
-        source_description="Rachel worldview fact",
+        source_description="Bryan worldview fact",
         name_prefix="worldview",
     )
 

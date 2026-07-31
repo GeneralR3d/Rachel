@@ -1,4 +1,4 @@
-"""Per-user facts & preferences — Rachel's personal memory of each individual.
+"""Per-user facts & preferences — Bryan's personal memory of each individual.
 
 This is a self-contained LangGraph pipeline that runs once per conversation,
 after the CHAT_BLACKOUT_TIME flush (see app/telegram/client.py::finalize_conversation).
@@ -131,7 +131,7 @@ async def add_user_facts(user_id: int, facts: List[str]) -> None:
     await ingest_facts(
         facts,
         group_id=user_facts_group_id(user_id),
-        source_description="Rachel user fact",
+        source_description="Bryan user fact",
         name_prefix=f"user-facts-{user_id}",
     )
 
@@ -148,7 +148,7 @@ async def get_user_facts(user_id: int) -> List[str]:
 
 
 async def search_user_info(user_id: int, query: str | None = None) -> tuple[str, dict]:
-    """Fetch BOTH halves of Rachel's memory about one participant in one shot.
+    """Fetch BOTH halves of Bryan's memory about one participant in one shot.
 
     Wraps ``search_user_facts`` (the free-form Graphiti facts) and, in addition,
     pulls that user's fixed-slot structured profile via the responder's per-user
@@ -170,11 +170,11 @@ async def search_user_info(user_id: int, query: str | None = None) -> tuple[str,
 
 @tool("search_user_info")
 async def search_user_info_tool(name: str, query: str) -> str:
-    """Recall what Rachel remembers about ONE conversation participant.
+    """Recall what Bryan remembers about ONE conversation participant.
 
     Each participant has their own memory: durable personal facts and preferences
     learned from past conversations (relationships, plans, likes/dislikes, ongoing situations) plus a structured profile of core attributes.
-    Use this to recall what Rachel already knows about a person so the responder can reply personally,
+    Use this to recall what Bryan already knows about a person so the responder can reply personally,
     e.g. when they mention something about their own life or when personal context would clearly help.
 
     Args:
@@ -406,7 +406,7 @@ async def fact_extractor_node(state: UserFactsState) -> Dict:
             continue
         user_id = name_to_id.get(entry.sender)
         if user_id is None:
-            # Model returned a name we don't recognise (e.g. Rachel herself or a
+            # Model returned a name we don't recognise (e.g. Bryan herself or a
             # hallucinated name) — drop it rather than guess an id.
             print(
                 f"{tag} skipping unknown sender {entry.sender!r} "
@@ -617,7 +617,7 @@ async def update_user_facts(
 
     # Build a sender-name -> user_id map so the model only ever has to produce
     # the (low-hallucination) name; we resolve the id ourselves. The bot's own
-    # turns are excluded — we never store facts about Rachel.
+    # turns are excluded — we never store facts about Bryan.
     name_to_id = {
         entry["sender"]: entry["sender_user_id"]
         for entry in conversation

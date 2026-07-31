@@ -74,13 +74,13 @@ class Settings(BaseSettings):
     admin_id: int = 0
 
     # Names used mainly for summarisation / history labelling
-    bot_name: str = "Rachel"
+    bot_name: str = "Bryan"
     user_name: str | None = None
 
     # Async SQLAlchemy connection string (asyncpg driver)
     database_url: str = "postgresql+asyncpg://rachel:rachel@localhost:5432/rachel"
 
-    # Markdown file holding Rachel's persistent "world view" (learned facts)
+    # Markdown file holding Bryan's persistent "world view" (learned facts)
     worldview_path: str = "worldview.md"
 
     @property

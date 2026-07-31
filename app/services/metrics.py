@@ -3,9 +3,9 @@
 Exposes two counters, scraped from the FastAPI ``/metrics`` endpoint mounted in
 ``app.main``:
 
-- ``rachel_llm_calls_total{node}`` — every LLM attempt, per graph node. The
+- ``bryan_llm_calls_total{node}`` — every LLM attempt, per graph node. The
   denominator for an error-rate panel in Grafana.
-- ``rachel_llm_errors_total{node,kind}`` — LLM failures, classified by cause.
+- ``bryan_llm_errors_total{node,kind}`` — LLM failures, classified by cause.
   ``kind`` is a bounded set (see ``classify_llm_error``) so label cardinality
   stays small: e.g. ``upstream_504``, ``rate_limit_429``, ``upstream_5xx``,
   ``response_validation`` (the pydantic ``.../v/missing`` shape), ``timeout``,
@@ -21,13 +21,13 @@ import re
 from prometheus_client import Counter
 
 LLM_CALLS = Counter(
-    "rachel_llm_calls_total",
+    "bryan_llm_calls_total",
     "LLM invocations attempted, per graph node",
     ["node"],
 )
 
 LLM_ERRORS = Counter(
-    "rachel_llm_errors_total",
+    "bryan_llm_errors_total",
     "LLM invocation failures, per graph node and classified cause",
     ["node", "kind"],
 )
@@ -87,7 +87,7 @@ def classify_llm_error(exc: BaseException) -> str:
 
 
 def record_llm_error(node: str, exc: BaseException) -> str:
-    """Increment ``rachel_llm_errors_total`` for ``exc`` at ``node`` and return
+    """Increment ``bryan_llm_errors_total`` for ``exc`` at ``node`` and return
     the classified ``kind`` (so callers can fold it into their log line)."""
     kind = classify_llm_error(exc)
     LLM_ERRORS.labels(node=node, kind=kind).inc()
