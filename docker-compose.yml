@@ -1,13 +1,13 @@
 services:
   db:
     image: postgres:16
-    container_name: rachel-db
+    container_name: bryan-db
     environment:
-      POSTGRES_USER: rachel
+      POSTGRES_USER: bryan
       # Must match the password embedded in DATABASE_URL (.env). Falls back to
       # "rachel" if DB_PASSWORD is unset, preserving the old dev default.
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-rachel}
-      POSTGRES_DB: rachel
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-bryan}
+      POSTGRES_DB: bryan
     ports:
       # Bind to loopback only — the DB never needs to be reachable from off-host.
       - "127.0.0.1:5433:5432"
@@ -15,14 +15,14 @@ services:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rachel -d rachel"]
+      test: ["CMD-SHELL", "pg_isready -U bryan -d bryan"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   neo4j:
     image: neo4j:5.26-community
-    container_name: rachel-neo4j
+    container_name: bryan-neo4j
     environment:
       # neo4j/<password>. Falls back to "password" if NEO4J_PASSWORD is unset.
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-password}
@@ -44,8 +44,8 @@ services:
   # start the app locally with uv (see README). Uncomment to use.
   app:
     build: .
-    image: rachel-app:latest
-    container_name: rachel
+    image: bryan-app:latest
+    container_name: bryan
     depends_on:
       db:
         condition: service_healthy
@@ -53,7 +53,7 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://rachel:${DB_PASSWORD:-rachel}@db:5432/rachel
+      DATABASE_URL: postgresql+asyncpg://bryan:${DB_PASSWORD:-bryan}@db:5432/bryan
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-password}
       PYTHONUNBUFFERED: 1
