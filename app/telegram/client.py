@@ -10,6 +10,7 @@ Ported from Reference/app/client.py. Behaviour is unchanged; the only edits are:
 import asyncio
 import bisect
 import random
+import re
 import time
 from pprint import pprint
 from typing import Any, Dict, List, Optional
@@ -48,6 +49,7 @@ N_PAST_MSG_REQUIRED = 40         # messages pre-loaded on first contact and fed 
 MAX_BUFFER_LEN = 150             # flush to DB immediately if buffer hits this length
 SPONTANEOUS_REPLY_CHANCE = 0.05  # chance an untagged message still forces a reply (skips the router)
 TYPING_SPEED = 22                # characters per second
+SILENT_MODE_DURATION = 15 * 60   # seconds a group stays silenced after "Rachel shush" (default 15 min)
 
 # only used for summarisation
 USER_NAME = settings.user_name
@@ -106,6 +108,12 @@ responded_watermark: Dict[int, int] = {}
 # lost (and the router wrongly consulted) if an untagged message follows within
 # REPLY_DELAY. Latching it here keeps must_reply true across the whole burst.
 pending_mention: Dict[int, bool] = {}
+# Per-group silent-mode expiry: monotonic-clock deadline (time.monotonic()) until
+# which Rachel stays muted in that group chat. A group is silenced when someone
+# says "Rachel shush"/"shut up"/"quiet"/… ; while silenced, incoming group
+# messages are still buffered/flushed but never schedule a reply. Cleared as soon
+# as Rachel is @-mentioned/replied-to (the one override) — see new_message.
+silent_until: Dict[int, float] = {}
 
 
 # helper functions
@@ -158,6 +166,36 @@ def _message_content(event) -> str:
     if event.document is not None:
         return "[file]"
     return ""
+
+
+# Matches a "shush Rachel" command: her name (BOT_NAME) plus a quiet-word,
+# case-insensitive, in either order, anywhere in the message. Built once at
+# import; BOT_NAME is escaped in case it contains regex metacharacters.
+_SILENCE_KEYWORDS = r"shush|shut\s*up|shutup|be\s*quiet|quiet|silence|stop\s*talkings"
+_SILENCE_PATTERN = re.compile(
+    rf"(?:\b{re.escape(BOT_NAME)}\b.*(?:{_SILENCE_KEYWORDS})"
+    rf"|(?:{_SILENCE_KEYWORDS}).*\b{re.escape(BOT_NAME)}\b)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _is_silence_trigger(text: str) -> bool:
+    """True if ``text`` tells Rachel to be quiet (name + a quiet-word)."""
+    return bool(_SILENCE_PATTERN.search(text))
+
+
+def _is_silenced(chat_id: int) -> bool:
+    """True if this group is currently muted (silent-mode deadline not yet passed).
+
+    Clears the entry when it has expired so the dict doesn't grow unbounded.
+    """
+    deadline = silent_until.get(chat_id)
+    if deadline is None:
+        return False
+    if time.monotonic() >= deadline:
+        silent_until.pop(chat_id, None)
+        return False
+    return True
 
 
 async def reply(event):
@@ -564,14 +602,37 @@ async def new_message(event):
     if event.mentioned:
         pending_mention[chat_id] = True
 
-    # Rachel considers replying to every message — private or group, tagged or
-    # not. Whether a reply is actually warranted is decided downstream by the
-    # router node in the LLM pipeline (it can short-circuit to no reply), so we
-    # no longer gate on event.mentioned here.
-    # Always reset the reply timer: respond REPLY_DELAY s after the last message
-    if chat_id in wait_tasks and not wait_tasks[chat_id].done():
-        wait_tasks[chat_id].cancel()
-    wait_tasks[chat_id] = asyncio.create_task(wait_before_reply(event, REPLY_DELAY))
+    # --- Silent mode (groups only) --------------------------------------------
+    # An @mention/reply-to is the one override: it both warrants a reply and lifts
+    # any active mute, so clear the deadline before the silence checks below.
+    if event.is_group and event.mentioned and chat_id in silent_until:
+        silent_until.pop(chat_id, None)
+        print(f"[{chat_id}] Silent mode lifted (Rachel was tagged)")
+
+    # "Rachel shush"/"quiet"/… in a group arms silent mode for SILENT_MODE_DURATION.
+    # The trigger message is still buffered above (kept as conversation context);
+    # we just mute and confirm, and fall through so it's flushed like any message.
+    if event.is_group and not event.mentioned and _is_silence_trigger(content):
+        silent_until[chat_id] = time.monotonic() + SILENT_MODE_DURATION
+        minutes = SILENT_MODE_DURATION // 60
+        print(f"[{chat_id}] Silent mode armed for {minutes} min")
+        await event.respond(f"Rachel has been silenced for {minutes} minutes")
+
+    # While a group is muted, don't schedule a reply (the reply pipeline never
+    # triggers). Messages are still buffered/flushed and the memory pipelines
+    # still run — only the reply timer is skipped. A tagged message cleared the
+    # deadline above, so it falls through and replies as normal.
+    if event.is_group and _is_silenced(chat_id):
+        print(f"[{chat_id}] Silenced — skipping reply scheduling")
+    else:
+        # Rachel considers replying to every message — private or group, tagged or
+        # not. Whether a reply is actually warranted is decided downstream by the
+        # router node in the LLM pipeline (it can short-circuit to no reply), so we
+        # no longer gate on event.mentioned here.
+        # Always reset the reply timer: respond REPLY_DELAY s after the last message
+        if chat_id in wait_tasks and not wait_tasks[chat_id].done():
+            wait_tasks[chat_id].cancel()
+        wait_tasks[chat_id] = asyncio.create_task(wait_before_reply(event, REPLY_DELAY))
 
     # Always reset the flush timer: persist buffer 60 s after the last message
     if chat_id in flush_tasks and not flush_tasks[chat_id].done():
