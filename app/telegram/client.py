@@ -1,4 +1,4 @@
-"""Bryan's user-facing Telethon client and event handlers.
+"""Rachel's user-facing Telethon client and event handlers.
 
 Ported from Reference/app/client.py. Behaviour is unchanged; the only edits are:
   - the client is built from app.config settings,
@@ -49,7 +49,7 @@ N_PAST_MSG_REQUIRED = 40         # messages pre-loaded on first contact and fed 
 MAX_BUFFER_LEN = 150             # flush to DB immediately if buffer hits this length
 SPONTANEOUS_REPLY_CHANCE = 0.05  # chance an untagged message still forces a reply (skips the router)
 TYPING_SPEED = 22                # characters per second
-SILENT_MODE_DURATION = 15 * 60   # seconds a group stays silenced after "Bryan shush" (default 15 min)
+SILENT_MODE_DURATION = 15 * 60   # seconds a group stays silenced after "Rachel shush" (default 15 min)
 
 # only used for summarisation
 USER_NAME = settings.user_name
@@ -71,7 +71,7 @@ class BufferedMessage(BaseModel):
             "content": self.content,
             # Carried so the responder's divider can partition on a causal
             # watermark (highest id already responded to) rather than on
-            # Bryan's last-reply position — see llm._partition_index.
+            # Rachel's last-reply position — see llm._partition_index.
             "telegram_message_id": self.telegram_message_id,
         }
     def to_llm_dict_full(self) -> Dict[str, Any]:
@@ -93,26 +93,26 @@ last_message_time: Dict[int, float] = {}
 # previous one for the same chat is still sending waits for it to finish sending
 # *and* append its bot message to the buffer before reading context. This
 # prevents two replies from interleaving their sends and from reading stale
-# context (Bryan not "seeing" what she just said). Created lazily per chat_id.
+# context (Rachel not "seeing" what she just said). Created lazily per chat_id.
 reply_locks: Dict[int, asyncio.Lock] = {}
-# Per-chat causal watermark: the highest telegram_message_id Bryan has already
+# Per-chat causal watermark: the highest telegram_message_id Rachel has already
 # responded to (max id of the context she last replied against). Passed to
 # get_response so the divider partitions on "what's new since I last replied"
-# instead of on Bryan's last-reply *position* in the buffer — which is unreliable
+# instead of on Rachel's last-reply *position* in the buffer — which is unreliable
 # because a message arriving mid-generation sorts (by send-time id) *behind* her
 # later reply, hiding it. Monotonic; never rewound.
 responded_watermark: Dict[int, int] = {}
 # Per-chat sticky mention flag: set whenever an incoming message tags/replies-to
-# Bryan, consumed when she actually replies. Needed because the reply task fires
+# Rachel, consumed when she actually replies. Needed because the reply task fires
 # on the *latest* event, so a mention in an earlier message of a burst would be
 # lost (and the router wrongly consulted) if an untagged message follows within
 # REPLY_DELAY. Latching it here keeps must_reply true across the whole burst.
 pending_mention: Dict[int, bool] = {}
 # Per-group silent-mode expiry: monotonic-clock deadline (time.monotonic()) until
-# which Bryan stays muted in that group chat. A group is silenced when someone
-# says "Bryan shush"/"shut up"/"quiet"/… ; while silenced, incoming group
+# which Rachel stays muted in that group chat. A group is silenced when someone
+# says "Rachel shush"/"shut up"/"quiet"/… ; while silenced, incoming group
 # messages are still buffered/flushed but never schedule a reply. Cleared as soon
-# as Bryan is @-mentioned/replied-to (the one override) — see new_message.
+# as Rachel is @-mentioned/replied-to (the one override) — see new_message.
 silent_until: Dict[int, float] = {}
 
 
@@ -122,7 +122,7 @@ silent_until: Dict[int, float] = {}
 def _insert_by_message_id(buffer: List[BufferedMessage], msg: BufferedMessage) -> None:
     """Insert ``msg`` into ``buffer`` keeping it ordered by telegram_message_id.
 
-    Bryan's reply is appended only after its (slow, multi-burst) send finishes,
+    Rachel's reply is appended only after its (slow, multi-burst) send finishes,
     by which time messages from others that arrived during the send already sit at
     the tail of the buffer with *higher* ids. A plain append would leave her reply
     behind them, even though by send order (its first-burst id) it belongs earlier.
@@ -168,7 +168,7 @@ def _message_content(event) -> str:
     return ""
 
 
-# Matches a "shush Bryan" command: her name (BOT_NAME) plus a quiet-word,
+# Matches a "shush Rachel" command: her name (BOT_NAME) plus a quiet-word,
 # case-insensitive, in either order, anywhere in the message. Built once at
 # import; BOT_NAME is escaped in case it contains regex metacharacters.
 _SILENCE_KEYWORDS = r"shush|shut\s*up|shutup|be\s*quiet|quiet|silence|stop\s*talkings"
@@ -180,7 +180,7 @@ _SILENCE_PATTERN = re.compile(
 
 
 def _is_silence_trigger(text: str) -> bool:
-    """True if ``text`` tells Bryan to be quiet (name + a quiet-word)."""
+    """True if ``text`` tells Rachel to be quiet (name + a quiet-word)."""
     return bool(_SILENCE_PATTERN.search(text))
 
 
@@ -196,6 +196,17 @@ def _is_silenced(chat_id: int) -> bool:
         silent_until.pop(chat_id, None)
         return False
     return True
+
+
+async def _send_silence_confirmation(event, chat_id: int, minutes: int):
+    """Send the "silenced" confirmation behind the chat's reply lock.
+
+    Awaiting ``reply_locks[chat_id]`` (FIFO) orders this behind any in-flight
+    reply, so the confirmation can't jump ahead of a reply Rachel is mid-way
+    through delivering. If no reply holds the lock, it sends immediately.
+    """
+    async with reply_locks.setdefault(chat_id, asyncio.Lock()):
+        await event.respond(f"Rachel has been silenced for {minutes} minutes")
 
 
 async def reply(event):
@@ -243,7 +254,7 @@ async def _reply(event):
             
         context_msgs = buffer[-N_PAST_MSG_REQUIRED:]
         context = [m.to_llm_dict() for m in context_msgs]
-        # Causal watermark for the divider: the highest id in the context Bryan
+        # Causal watermark for the divider: the highest id in the context Rachel
         # is about to respond against. Anything that arrives later (even mid-send,
         # which by send-time id sorts behind her reply) counts as new next time.
         # Advance it now, before generation, so a message that lands during this
@@ -252,7 +263,7 @@ async def _reply(event):
         if context_msgs:
             new_watermark = max(m.telegram_message_id for m in context_msgs)
             responded_watermark[chat_id] = max(watermark or 0, new_watermark)
-        # Unique senders in the context (excluding Bryan herself) as an
+        # Unique senders in the context (excluding Rachel herself) as an
         # id -> name map, so the responder can pull each participant's stored
         # facts/preferences and render them by name. Later messages win on name
         # collisions, which is fine — we just need a human-readable label.
@@ -262,7 +273,7 @@ async def _reply(event):
             if m.sender_user_id and m.sender_user_id != me.id
         }
 
-        # Force a reply (skip the router entirely) only when Bryan was directly
+        # Force a reply (skip the router entirely) only when Rachel was directly
         # tagged/replied-to in a group. In a 1-on-1 DM (not is_group) she still
         # runs the router, but with the PM-specific gate that only suppresses
         # low-information acknowledgements and already-answered messages.
@@ -274,7 +285,7 @@ async def _reply(event):
         must_reply = pending_mention.pop(chat_id, False) or bool(event.mentioned)
 
         # Spontaneity: even when untagged, force a reply (skipping the router) with
-        # a small fixed probability, so Bryan occasionally chimes into a group
+        # a small fixed probability, so Rachel occasionally chimes into a group
         # unprompted. Guarded by has_new below, so this can only fire on genuinely
         # new content — never re-answer an already-handled message.
         if not must_reply and random.random() < SPONTANEOUS_REPLY_CHANCE:
@@ -286,7 +297,7 @@ async def _reply(event):
         # get_response) gets both absorbed into that reply's context AND scheduled
         # its own wait_task. When that task fires, everything in the slice is either
         # a bot turn or already <= the watermark the earlier reply advanced, so
-        # there is genuinely nothing new to answer. Replying anyway makes Bryan
+        # there is genuinely nothing new to answer. Replying anyway makes Rachel
         # re-answer the last user turn (the divider collapses to a flat transcript
         # in _build_history_messages) — i.e. she repeats herself. Bail before we
         # spend an LLM call or send. "Nothing new" overrides must_reply: an @mention
@@ -539,7 +550,7 @@ async def new_message(event):
     # On first contact for this chat, pre-load recent history into the buffer
     if chat_id not in current_messages_buffer:
         current_messages_buffer[chat_id] = []
-        # Tag Bryan's own past messages by id, not by resolved name: get_history
+        # Tag Rachel's own past messages by id, not by resolved name: get_history
         # resolves her turns to her Telegram first name (via COALESCE), which need
         # not equal BOT_NAME. The downstream partition/AIMessage logic keys off
         # sender == BOT_NAME, so normalize her seeded turns to BOT_NAME here.
@@ -607,16 +618,45 @@ async def new_message(event):
     # any active mute, so clear the deadline before the silence checks below.
     if event.is_group and event.mentioned and chat_id in silent_until:
         silent_until.pop(chat_id, None)
-        print(f"[{chat_id}] Silent mode lifted (Bryan was tagged)")
+        print(f"[{chat_id}] Silent mode lifted (Rachel was tagged)")
 
-    # "Bryan shush"/"quiet"/… in a group arms silent mode for SILENT_MODE_DURATION.
+    # "Rachel shush"/"quiet"/… in a group arms silent mode for SILENT_MODE_DURATION.
     # The trigger message is still buffered above (kept as conversation context);
     # we just mute and confirm, and fall through so it's flushed like any message.
-    if event.is_group and not event.mentioned and _is_silence_trigger(content):
+    # --- DIAGNOSTIC: log each of the 4 shush-branch conditions -----------------
+    _c_is_group = bool(event.is_group)
+    _c_not_mentioned = not event.mentioned
+    _c_trigger = _is_silence_trigger(content)
+    _c_not_silenced = not _is_silenced(chat_id)
+    print(
+        f"[{chat_id}] shush-check: is_group={_c_is_group} "
+        f"not_mentioned={_c_not_mentioned} trigger={_c_trigger} "
+        f"not_silenced={_c_not_silenced} content={content!r}"
+    )
+
+    if (
+        event.is_group
+        and not event.mentioned
+        and _is_silence_trigger(content)
+        and not _is_silenced(chat_id)  # already muted: don't re-arm or re-confirm
+    ):
+        # Cancel a reply still in its REPLY_DELAY sleep so Rachel goes quiet at
+        # once. A reply already past the sleep is asyncio.shield-ed and keeps
+        # sending — that's correct; the confirmation orders behind it via the lock.
+        if chat_id in wait_tasks and not wait_tasks[chat_id].done():
+            wait_tasks[chat_id].cancel()
+
         silent_until[chat_id] = time.monotonic() + SILENT_MODE_DURATION
         minutes = SILENT_MODE_DURATION // 60
         print(f"[{chat_id}] Silent mode armed for {minutes} min")
-        await event.respond(f"Bryan has been silenced for {minutes} minutes")
+
+        # Queue the confirmation behind the reply lock instead of sending inline,
+        # so it can't jump ahead of an in-flight reply. Known limitation: a
+        # sub-millisecond window exists where a reply has passed its REPLY_DELAY
+        # sleep and entered shielded reply() but not yet acquired the lock — the
+        # confirmation could still win the lock and send first. Rare and not worth
+        # heavier machinery.
+        asyncio.create_task(_send_silence_confirmation(event, chat_id, minutes))
 
     # While a group is muted, don't schedule a reply (the reply pipeline never
     # triggers). Messages are still buffered/flushed and the memory pipelines
@@ -625,7 +665,7 @@ async def new_message(event):
     if event.is_group and _is_silenced(chat_id):
         print(f"[{chat_id}] Silenced — skipping reply scheduling")
     else:
-        # Bryan considers replying to every message — private or group, tagged or
+        # Rachel considers replying to every message — private or group, tagged or
         # not. Whether a reply is actually warranted is decided downstream by the
         # router node in the LLM pipeline (it can short-circuit to no reply), so we
         # no longer gate on event.mentioned here.
@@ -639,7 +679,7 @@ async def new_message(event):
         flush_tasks[chat_id].cancel()
     flush_tasks[chat_id] = asyncio.create_task(finalize_conversation(chat_id, CHAT_BLACKOUT_TIME))
 
-    # Hard cap, enforced on every incoming message (not just when Bryan
+    # Hard cap, enforced on every incoming message (not just when Rachel
     # replies): a busy group where she is never tagged would otherwise keep
     # resetting the 60 s flush timer forever and grow the buffer unbounded.
     # Override the timer with an immediate finalize (delay 0) so the buffer is
@@ -658,4 +698,4 @@ async def say_hi_added(event):
         me = await client.get_me()
         if event.user_id == me.id:
             print(f"Bot added to group: {event.chat_id}")
-            await event.respond("Hi Im Bryan! Nice to meet you!")
+            await event.respond("Hi Im Rachel! Nice to meet you!")
