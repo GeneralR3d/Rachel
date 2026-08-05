@@ -623,6 +623,17 @@ async def new_message(event):
     # "Rachel shush"/"quiet"/… in a group arms silent mode for SILENT_MODE_DURATION.
     # The trigger message is still buffered above (kept as conversation context);
     # we just mute and confirm, and fall through so it's flushed like any message.
+    # --- DIAGNOSTIC: log each of the 4 shush-branch conditions -----------------
+    _c_is_group = bool(event.is_group)
+    _c_not_mentioned = not event.mentioned
+    _c_trigger = _is_silence_trigger(content)
+    _c_not_silenced = not _is_silenced(chat_id)
+    print(
+        f"[{chat_id}] shush-check: is_group={_c_is_group} "
+        f"not_mentioned={_c_not_mentioned} trigger={_c_trigger} "
+        f"not_silenced={_c_not_silenced} content={content!r}"
+    )
+
     if (
         event.is_group
         and not event.mentioned
