@@ -198,6 +198,17 @@ def _is_silenced(chat_id: int) -> bool:
     return True
 
 
+async def _send_silence_confirmation(event, chat_id: int, minutes: int):
+    """Send the "silenced" confirmation behind the chat's reply lock.
+
+    Awaiting ``reply_locks[chat_id]`` (FIFO) orders this behind any in-flight
+    reply, so the confirmation can't jump ahead of a reply Rachel is mid-way
+    through delivering. If no reply holds the lock, it sends immediately.
+    """
+    async with reply_locks.setdefault(chat_id, asyncio.Lock()):
+        await event.respond(f"Rachel has been silenced for {minutes} minutes")
+
+
 async def reply(event):
     """Serialise replies per chat (see ``reply_locks``), then run ``_reply``.
 
@@ -612,11 +623,29 @@ async def new_message(event):
     # "Rachel shush"/"quiet"/… in a group arms silent mode for SILENT_MODE_DURATION.
     # The trigger message is still buffered above (kept as conversation context);
     # we just mute and confirm, and fall through so it's flushed like any message.
-    if event.is_group and not event.mentioned and _is_silence_trigger(content):
+    if (
+        event.is_group
+        and not event.mentioned
+        and _is_silence_trigger(content)
+        and not _is_silenced(chat_id)  # already muted: don't re-arm or re-confirm
+    ):
+        # Cancel a reply still in its REPLY_DELAY sleep so Rachel goes quiet at
+        # once. A reply already past the sleep is asyncio.shield-ed and keeps
+        # sending — that's correct; the confirmation orders behind it via the lock.
+        if chat_id in wait_tasks and not wait_tasks[chat_id].done():
+            wait_tasks[chat_id].cancel()
+
         silent_until[chat_id] = time.monotonic() + SILENT_MODE_DURATION
         minutes = SILENT_MODE_DURATION // 60
         print(f"[{chat_id}] Silent mode armed for {minutes} min")
-        await event.respond(f"Rachel has been silenced for {minutes} minutes")
+
+        # Queue the confirmation behind the reply lock instead of sending inline,
+        # so it can't jump ahead of an in-flight reply. Known limitation: a
+        # sub-millisecond window exists where a reply has passed its REPLY_DELAY
+        # sleep and entered shielded reply() but not yet acquired the lock — the
+        # confirmation could still win the lock and send first. Rare and not worth
+        # heavier machinery.
+        asyncio.create_task(_send_silence_confirmation(event, chat_id, minutes))
 
     # While a group is muted, don't schedule a reply (the reply pipeline never
     # triggers). Messages are still buffered/flushed and the memory pipelines
