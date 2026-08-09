@@ -168,19 +168,18 @@ def _message_content(event) -> str:
     return ""
 
 
-# Matches a "shush Rachel" command: her name (BOT_NAME) plus a quiet-word,
-# case-insensitive, in either order, anywhere in the message. Built once at
-# import; BOT_NAME is escaped in case it contains regex metacharacters.
-_SILENCE_KEYWORDS = r"shush|shut\s*up|shutup|be\s*quiet|quiet|silence|stop\s*talkings"
+# Matches only a direct "BOT_NAME <quiet-word>" command (exact order),
+# case-insensitive. Built once at import; BOT_NAME is escaped in case it
+# contains regex metacharacters.
+_SILENCE_KEYWORDS = r"shush|shut\s*up|shutup|be\s*quiet|quiet|silence|stop\s*talking"
 _SILENCE_PATTERN = re.compile(
-    rf"(?:\b{re.escape(BOT_NAME)}\b.*(?:{_SILENCE_KEYWORDS})"
-    rf"|(?:{_SILENCE_KEYWORDS}).*\b{re.escape(BOT_NAME)}\b)",
-    re.IGNORECASE | re.DOTALL,
+    rf"^\s*{re.escape(BOT_NAME)}[\s,.:;!?-]+(?:{_SILENCE_KEYWORDS})\b[.!?]*\s*$",
+    re.IGNORECASE,
 )
 
 
 def _is_silence_trigger(text: str) -> bool:
-    """True if ``text`` tells Rachel to be quiet (name + a quiet-word)."""
+    """True if ``text`` is a strict ``BOT_NAME`` + quiet-word command."""
     return bool(_SILENCE_PATTERN.search(text))
 
 
