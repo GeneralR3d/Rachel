@@ -205,7 +205,7 @@ async def _send_silence_confirmation(event, chat_id: int, minutes: int):
     through delivering. If no reply holds the lock, it sends immediately.
     """
     async with reply_locks.setdefault(chat_id, asyncio.Lock()):
-        await event.respond(f"Rachel has been silenced for {minutes} minutes")
+        await event.respond(f"{BOT_NAME} has been silenced for {minutes} minutes")
 
 
 async def reply(event):
