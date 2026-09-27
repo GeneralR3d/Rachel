@@ -27,6 +27,7 @@ dependencies = [
     "arize-phoenix-otel==0.17.2",
     "openinference-instrumentation-openai==0.1.65",
     "openinference-instrumentation-langchain>=0.1.79",
+    "apscheduler>=3.11,<4",
 ]
 
 [tool.uv]

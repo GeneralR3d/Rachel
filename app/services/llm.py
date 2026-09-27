@@ -275,6 +275,7 @@ class ResponseOutput(BaseModel):
 
 class GraphState(TypedDict):
     history: List[Dict[str, Any]]
+    intent: str
     current_summary: str | None
     mood: str
     senders: Dict[int, str]  # sender_user_id -> display name
@@ -295,8 +296,22 @@ class GraphState(TypedDict):
     response_reason: str
 
 
-# The summarizer uses function calling for broad model compatibility. The
-# responder uses json_schema so it can request reasoning without tool calls.
+
+
+def _intent_prompt(intent: str) -> str:
+    """Render proactive-only instructions without leaking them into reactive calls."""
+    intent = (intent or "").strip()
+    if not intent:
+        return ""
+    return f"""<INTENT>
+This invocation is a cron-triggered proactive outreach. Every visible chat-history item is prior context only; the outreach intent below is the sole instruction describing what to do now. Follow it very closely. Tailor tool selection and the final response primarily to this intent; use chat history only as secondary personalization/context, and never let it override or distract from the intent.
+
+Outreach intent:
+{intent}
+
+For the responder: initiate a fresh outgoing message. Never imply or pretend that the recipient asked for this outreach, and always return message content.
+</INTENT>"""
+
 #
 # The chat clients are built lazily and cached keyed on the active
 # "main" model string (from the DB, via repository.get_active_models), so an admin
@@ -580,8 +595,11 @@ def _context_category(name: str) -> str:
 async def _run_context_fetcher(state: GraphState, observations: List[ToolObservation]) -> None:
     """Append each raw observation immediately, preserving partial work on timeout."""
     senders = state.get("senders") or {}
+    proactive = bool((state.get("intent") or "").strip())
     history_msgs = _build_history_messages(
-        state["history"], divider_text=CONTEXT_NODE_DIVIDER, watermark=state.get("responded_watermark")
+        state["history"],
+        divider_text=None if proactive else CONTEXT_NODE_DIVIDER,
+        watermark=None if proactive else state.get("responded_watermark"),
     )
     now = datetime.now(SGT)
     formatted_datetime = (
@@ -756,8 +774,15 @@ async def responder_node(state: GraphState) -> Dict:
             f"the current day of week is {now.strftime('%A')}, "
             f"the current time is {now.strftime('%H:%M')}"
         )
+        # Rachel's schedule (right now / today / other days) is no longer
+        # injected here — context_fetcher_node fetches it via tools and it
+        # arrives through {schedule_context}.
+
+        proactive = bool((state.get("intent") or "").strip())
         history_msgs = _build_history_messages(
-            state["history"], divider_text=RESPONDER_NODE_DIVIDER, watermark=state.get("responded_watermark")
+            state["history"],
+            divider_text=None if proactive else RESPONDER_NODE_DIVIDER,
+            watermark=None if proactive else state.get("responded_watermark"),
         )
         history_tokens = sum(_count_tokens(f"{m.type}: {m.content}") for m in history_msgs)
         print(f"[responder] history fetched (count={len(history_msgs)}, tokens={history_tokens})")
@@ -851,7 +876,31 @@ def _build_graph():
     return graph.compile()
 
 
+def _build_proactive_graph():
+    """Build the outreach-only graph: no checker, router, or summarizer."""
+    graph: StateGraph = StateGraph(GraphState)
+    graph.add_node("context_fetcher_node", context_fetcher_node)
+    graph.add_node("responder_node", responder_node)
+    graph.add_edge(START, "context_fetcher_node")
+    graph.add_edge("context_fetcher_node", "responder_node")
+    graph.add_conditional_edges("responder_node", _route_after_responder,
+                                {"context_fetcher_node": "context_fetcher_node", END: END})
+    return graph.compile()
+
+
+def _build_proactive_graph():
+    """Build the outreach-only graph: no checker, router, or summarizer."""
+    graph: StateGraph = StateGraph(GraphState)
+    graph.add_node("context_fetcher_node", context_fetcher_node)
+    graph.add_node("responder_node", responder_node)
+    graph.add_edge(START, "context_fetcher_node")
+    graph.add_edge("context_fetcher_node", "responder_node")
+    graph.add_edge("responder_node", END)
+    return graph.compile()
+
+
 _graph = _build_graph()
+_proactive_graph = _build_proactive_graph()
 
 
 async def get_response(
@@ -880,6 +929,7 @@ async def get_response(
 
     initial_state: GraphState = {
         "history": history,
+        "intent": "",
         "current_summary": current_summary,
         "mood": current_mood,
         "senders": senders or {},
@@ -918,3 +968,34 @@ async def get_response(
 
     new_summary = result["current_summary"] if result["current_summary"] != current_summary else None
     return result["response_text"], result["response_reason"], new_summary, time.time() - start
+
+
+async def get_proactive_response(
+    history: List[Dict[str, str]],
+    intent: str,
+    current_summary: str | None = None,
+    chat_id: int | None = None,
+    senders: Dict[int, str] | None = None,
+) -> Tuple[str, str, float]:
+    """Generate an unconditional outreach without routing, summarizing, or mood writes."""
+    start = time.time()
+    current_mood = _chat_mood.get(chat_id, DEFAULT_MOOD) if chat_id is not None else DEFAULT_MOOD
+    initial_state: GraphState = {
+        "history": history,
+        "intent": intent,
+        "current_summary": current_summary,
+        "mood": current_mood,
+        "senders": senders or {},
+        "must_reply": True,
+        "is_private": False,
+        "responded_watermark": None,
+        "should_reply": True,
+        "schedule_context": "",
+        "world_view": "",
+        "user_facts": "",
+        "user_profiles": "",
+        "response_text": "",
+        "response_reason": "",
+    }
+    result = await _proactive_graph.ainvoke(initial_state)
+    return result["response_text"], result["response_reason"], time.time() - start
