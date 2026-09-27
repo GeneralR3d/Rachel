@@ -1,181 +1,182 @@
 # Rachel
 
-> A Telegram agent that texts like a real person — a 22-year-old Singaporean university student with moods, memory, a weekly schedule, and a tunable personality — not like a chatbot.
+> A stateful Telegram persona that remembers people, reads the room, and texts with human timing instead of behaving like a command-driven chatbot.
 
-![Python](https://img.shields.io/badge/python-%E2%89%A53.11-blue)
-![FastAPI](https://img.shields.io/badge/FastAPI-async-009688)
-![Postgres](https://img.shields.io/badge/Postgres-16-336791)
-![Neo4j](https://img.shields.io/badge/Neo4j-Graphiti%20knowledge%20graph-018bff)
-![LangGraph](https://img.shields.io/badge/LangGraph-stateful%20agents-orange)
-![OpenRouter](https://img.shields.io/badge/LLM-OpenRouter-black)
+![Python](https://img.shields.io/badge/Python-%E2%89%A53.11-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Neo4j](https://img.shields.io/badge/Neo4j-Graphiti-4581C3?logo=neo4j&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-stateful%20workflows-F97316)
+![Merge Gateway](https://img.shields.io/badge/LLM-Merge%20Gateway-111827)
 
-## Who is Rachel?
+## What is Rachel?
 
-Most chatbots forget who you are between conversations, and answer every single message whether or not it was meant for them. Drop one into a group chat and it becomes a nuisance within minutes.
+Most chatbots forget who they are talking to, answer every message immediately, and become noisy the moment they enter a group chat. Rachel is designed around the opposite goal: feel like a believable participant who knows when to speak, remembers what matters, and carries context across conversations.
 
-Rachel is the opposite. She's a conversational persona — "Rachel," a 22-year-old marketing student at NTU in Singapore, with a backstory, insecurities, a church youth group, a bubble-tea order, and a weekly timetable. She buffers incoming messages and waits a beat before replying, types at a human speed, splits longer thoughts across several messages, and only chimes in when she's actually being addressed. Over time she builds up a **temporal knowledge graph** of the world and of each person she talks to, retrieves from it selectively per conversation, and her tone shifts with the emotional read of the room.
+The shipped persona is Rachel, a 22-year-old NTU marketing student in Singapore with a backstory, seven conversational moods, twelve tunable personality traits, and a weekly schedule. She waits for a burst of messages to finish, types at a human pace, can stay quiet when a conversation does not concern her, and recalls both general world knowledge and personal facts about the people she meets.
 
-Technically, Rachel is a FastAPI service that runs two Telethon (Telegram) clients on the same asyncio event loop, backed by **Postgres** (history, summaries, profiles, personality, schedule) and **Neo4j via [Graphiti](https://github.com/getzep/graphiti)** (long-term memory as a temporal knowledge graph), with all the language work driven by a set of **LangGraph** state machines over **OpenRouter**. The interesting part isn't that it calls an LLM — it's the machinery around the LLM that makes the output feel like a person texting you back. The longer-term vision is a persona engine: a reusable substrate for believable, stateful AI characters that live inside the messaging apps people already use.
+Underneath the character is an asynchronous persona engine: FastAPI hosts two Telethon clients, LangGraph coordinates reply and memory workflows, PostgreSQL stores operational state, and Graphiti on Neo4j provides temporal long-term memory. All model and embedding traffic is routed through Merge Gateway. The architecture is reusable beyond one character—the persona, tone, schedule, prompts, memories, and active models are data rather than hard-coded application flow.
 
 ## Key Innovations
 
-### Human-cadence messaging loop
-Rachel never replies on the raw message-arrival event. Each incoming message **cancels and reschedules** two asyncio timers per chat: a reply timer (`REPLY_DELAY = 7s` after the last message) and a flush timer (`CHAT_BLACKOUT_TIME = 60s` of silence = "conversation over"). This debounce means that if you fire off five texts in a row, Rachel reads all five and answers once — the way a human who was mid-typing would. Replies are then split on blank lines into separate Telegram messages and sent with a simulated typing delay, so a long answer arrives as a believable burst of texts rather than one instant wall. The loop is also race-hardened: the LLM call is `asyncio.shield`-ed so a racing new message can't cancel an in-flight response, a per-chat reply lock stops a queued reply from reading context before the previous one finishes sending, and Rachel's own reply is inserted back into the buffer **at its send-order position by message id** — messages that arrived during a slow multi-message send already sit at the tail.
+### 1. Human cadence with race-safe delivery
 
-### Cheap-gate → LLM-router reply suppression
-Sitting in a busy group chat without being annoying is a genuinely hard product problem. Rachel solves it in two tiers. First a **no-LLM `checker_node`**: if the message is a 1-on-1 DM or Rachel was @-mentioned/replied-to, she's definitely meant to respond — skip straight to generating. Otherwise a lightweight **`router_node`** makes an LLM judgement call on whether a reply is even warranted (it fails *open* on LLM errors), and short-circuits the whole graph to `END` if not — no summary, no context retrieval, no response, no cost. She still *reads and remembers* every message either way — she just doesn't talk over the room. A buffer cap (`MAX_BUFFER_LEN = 150`) is enforced on every incoming message, so a busy group she never replies in still flushes and feeds the memory pipelines instead of growing unbounded.
+Rachel does not answer directly inside Telegram's message-arrival event. Every new message resets a seven-second reply debounce and a three-minute conversation-finalization timer, allowing a burst of texts to become one coherent turn. Multi-paragraph answers are emitted as separate Telegram messages with simulated typing time, while per-chat locks, shielded in-flight replies, causal watermarks, and message-ID-ordered buffer insertion prevent overlapping or repeated responses when new messages arrive mid-generation.
 
-### An agentic context fetcher that runs in parallel with the summarizer
-Instead of stuffing every prompt with Rachel's full schedule, world knowledge, and everyone's profile, a dedicated **`context_fetcher_node`** — the only node in the reply graph with tool-calling — decides *per message* what's worth looking up. It has the calendar tools, a `search_world_view` tool over the knowledge graph, and a unified `search_user_info(user_id, query)` tool that fetches both a participant's free-form fact memories and their structured profile in one call. It's a deliberate **single pass** (one tool-selection call, all tools run once, outputs routed into typed state slots — no agent loop), runs **in parallel with the summarizer** so retrieval adds no latency to the critical path, and is wrapped in a 30-second timeout that **fails open to empty context** — memory can enrich a reply but can never stall or break one.
+### 2. Layered participation instead of “always reply”
 
-### Divider partitioning: anti-duplication without deleting context
-Because the history slice includes Rachel's own past replies, she'd sometimes re-answer messages she'd already handled. The fix is a *divider*: each reply-graph node inserts one synthetic message into the transcript at the point just past Rachel's last reply — "everything above is context you already responded to; act on what's below." Nothing is ever removed, so the model keeps full conversational context, but the actionable region is explicit. The memory pipelines use the same insert-a-divider-remove-nothing shape but partition on a **persisted per-chat watermark** instead (see below) — two deliberately separate mechanisms for two different notions of "already handled."
+Direct mentions and replies can bypass the LLM gate, while ordinary group messages and DMs pass through purpose-specific router prompts that decide whether a response adds value. Untagged conversations also have a small spontaneity path, so Rachel can occasionally join naturally without dominating the room. Operators can issue strict natural-language controls—`Rachel shush` for a 15-minute silence, `Rachel mute` for indefinite silence, and `Rachel speak` to resume—without stopping persistence or memory extraction.
 
-### Temporal knowledge-graph memory (Graphiti on Neo4j)
-When a conversation finishes, two memory pipelines extract durable facts — *general* world facts and *personal* per-user facts — and ingest each one as an episode into **Graphiti**, a temporal knowledge graph on Neo4j. This replaces an earlier design where flat stores (a markdown file, per-user text rows) were re-read and re-written wholesale by an LLM "consolidation" pass on every update. With a graph, **deduplication is structural** (entities resolve to the same node; conflicting edges are reconciled temporally, newer facts superseding older ones) and **retrieval is selective** — the context fetcher runs a hybrid semantic + BM25 + graph search (reciprocal rank fusion) scoped to the relevant partition, pulling only the subgraph that touches the current conversation instead of dumping the whole store into every prompt. World facts live under one `worldview` partition; each user's personal memories live under their own `user-facts-<id>` partition — one graph, cleanly namespaced by Graphiti group ids. Retrieval harvests relationship **edges** and verbatim ingested **episodes**, deliberately dropping Graphiti's node summaries (a lossy, truncated restatement of the same facts).
+### 3. Selective retrieval in parallel with summarization
 
-### A persisted memory watermark so nothing is extracted twice
-Chat context is re-seeded from the DB whenever a buffer is flushed, so naive extraction would re-mine the same old messages every time a conversation ends. Each chat keeps a persisted high-water mark (`last_processed_message_id`) of the newest message already handed to the extractors. The extraction transcript is divided at the watermark ("only extract from below this line"), all extractor prompts are told about the divider, and the watermark advances only after the pipelines are launched — so facts are mined from each message exactly once across restarts, re-seeds, and buffer flushes.
+The responder never receives the entire schedule or memory store by default. A single-pass tool-calling node decides whether the current turn needs calendar context, world knowledge, or a particular participant's memories; all requested tools run once, and their results are routed into typed state fields. This retrieval branch runs in parallel with mood/summary generation and has a 30-second fail-open timeout, so useful memory improves a reply without becoming a reliability bottleneck.
 
-### One-call-lagged mood system
-A `summarizer_node` reads the conversation and classifies its emotional register into one of seven moods (`default`, `formal`, `sad_frustration`, `excited_happy`, `casual_rant`, `drama_sharing`, `flirt`). That mood is stored per-chat and injected into the **next** call's responder, which picks a matching set of tone exemplars from `CONVERSATION_STYLE`. The one-message lag is deliberate: it lets the responder run without waiting on the summarizer, and mirrors how a person's tone catches up to the vibe of a conversation a beat late rather than instantly.
+### 4. Two causal boundaries for two different jobs
 
-### Hybrid memory writes: graph ingestion where facts accumulate, deterministic merge where they don't
-Each user has two kinds of memory: free-form **facts** (open-ended, accumulating — "her sister has an exam next week") and a fixed-slot **profile** of 16 standing attributes (life stage, food vibe, sense of humour, …) stored as one Postgres JSONB blob. Facts go through Graphiti, which earns its LLM cost by doing real entity resolution and temporal conflict handling. Profile slots are single standing values, so they're merged by **deterministic code-level field overwrite** — newer non-empty value wins, no LLM call, guarded by per-user locks against concurrent conversation finalizations. The profile extractor is even shown each user's *current* profile as context so it skips already-known slots. Using a model only where the merge is genuinely ambiguous keeps the pipeline cheap and predictable.
+Reply generation and memory extraction use separate notions of “already handled.” The reply graph partitions history with an in-memory responded watermark so a message received during an earlier reply cannot be accidentally answered twice. The memory workflows use a persisted PostgreSQL high-water mark, insert a divider into the full transcript, and extract only from messages below it—preserving old context while ensuring facts are not mined again after a flush or restart.
 
-### Schema-as-single-source-of-truth structured output
-The profile slot list (`USER_PROFILE_FIELDS`) and the mood list (`MOOD_LABELS`) are each defined once in code. The LLM's structured-output Pydantic models are built **dynamically** from those lists (`pydantic.create_model`, JSON-schema enums), and the same lists drive prompt rendering, the responder's profile display, and the admin dashboard (which fetches the slot schema over REST rather than hardcoding it). Adding a profile slot or a mood needs no database migration — and the model can never emit a value the rest of the system doesn't understand. The same principle covers tools: `CALENDAR_TOOLS` both binds the tools to the LLM *and* renders their descriptions into the context fetcher's prompt, so adding a tool is a one-line change.
+### 5. Temporal knowledge-graph memory with hybrid retrieval
 
-### Making Graphiti reliable over OpenRouter
-Graphiti assumes a provider with native constrained decoding; OpenRouter silently downgrades `json_schema` mode to a plain JSON object for models without it, so field names stop being enforced and Graphiti's internal validation fails. Two load-bearing workarounds fix this: the LLM client runs in `json_object` mode (which embeds the schema, field names included, into the prompt), and a `_RetryingOpenAIGenericClient` subclass re-rolls the call with a corrective note whenever the model returns valid JSON whose *shape* doesn't match the expected response model — a failure class Graphiti's built-in transport-level retries never see. Small, unglamorous, and the difference between a demo and a system that ingests memory reliably on a budget model.
+Finished conversations produce general world facts and per-user personal facts, each ingested as a Graphiti episode under a scoped group ID. Graphiti performs entity resolution, structural deduplication, and temporal edge invalidation so newer contradictory facts can supersede older ones. Retrieval combines semantic, BM25, and graph signals with reciprocal-rank fusion, then returns atomic relationship edges and verbatim episodes rather than injecting a whole memory store into every prompt.
 
-### Personality as tunable sliders + a lived-in schedule
-Rachel's character isn't a frozen prompt. Twelve personality traits (Extraversion, Neuroticism, Humor/Irony, Patience, …) are stored as `low`/`medium`/`high` sliders, each with its own prompt fragment, assembled live into the responder prompt and tunable at runtime over Telegram, REST, or the dashboard. Trait *definitions* re-seed from code on every startup while admin-tuned levels survive. A seeded **weekly schedule** (rows keyed by day + start hour, with durations that span midnight) gives her a current activity and day overview, surfaced to the LLM through the calendar tools — so "what are you up to?" gets an answer consistent with the time of day.
+### 6. Different memory types get different merge strategies
+
+Open-ended facts benefit from Graphiti's LLM-assisted entity and conflict resolution. A user's 16 fixed profile slots do not: those values live in one PostgreSQL JSONB document and merge deterministically under a per-user lock, where newer non-empty values win. The slot schema is defined once and reused to construct Pydantic output models, render prompts, validate extracted data, and drive the admin UI—adding a profile field does not require a database migration.
+
+### 7. Runtime model control plus gateway-specific reliability
+
+The main, small, and embedding model roles are stored in PostgreSQL and can be switched at runtime from Telegram, REST, or the dashboard. Cache invalidation rebuilds the LangChain clients and Graphiti singleton on the next call, so no process restart is required. Graphiti also uses a custom retrying OpenAI-compatible client and `json_object` structured output to recover from valid JSON whose shape does not match Graphiti's Pydantic schemas—a common failure mode that transport retries alone cannot fix.
+
+### 8. Failure-aware observability that matches product behavior
+
+LLM calls and final failures are counted at the same fail-open boundaries used by the product. Prometheus counters label calls by workflow node and classify errors into a bounded vocabulary such as `timeout`, `rate_limit_429`, `upstream_504`, `output_parse`, and `response_validation`. That makes it possible to compare model reliability and cost by pipeline stage without exploding metric cardinality or counting recovered retries as incidents.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
     subgraph TG[Telegram]
-        U[Users / group chats]
-        A[Admin]
+        U[People and group chats]
+        A[Administrator]
     end
 
-    subgraph APP[FastAPI app · single asyncio loop]
-        RC[Rachel client<br/>Telethon · anon.session]
-        BOT[Admin bot<br/>Telethon · bot.session]
-        API[Admin HTTP API + dashboard<br/>single-file SPA at /]
-        BUF[(Per-chat in-memory<br/>message buffers + timers)]
+    subgraph APP[FastAPI · one asyncio event loop]
+        RC[Rachel Telethon client]
+        BOT[Admin Telethon bot]
+        API[REST API · dashboard · metrics]
+        BUF[(Per-chat buffers · timers · locks)]
     end
 
-    subgraph LLM[LangGraph pipelines · OpenRouter]
-        REPLY[reply graph:<br/>checker → router →<br/>summarizer ∥ context_fetcher → responder]
-        WV[worldview:<br/>extract → ingest]
-        UF[userfacts:<br/>facts + profile branches]
+    subgraph AI[LangGraph workflows]
+        REPLY[Reply gate · summary · retrieval · response]
+        MEM[World-view and user-memory extraction]
     end
 
-    DB[(Postgres<br/>history · summaries · profiles<br/>traits · schedule · watermarks)]
-    KG[(Neo4j · Graphiti<br/>worldview + per-user<br/>knowledge graph)]
+    GW[Merge Gateway<br/>chat · embeddings · reranking]
+    PG[(PostgreSQL<br/>history · state · profiles · models)]
+    N4J[(Neo4j + Graphiti<br/>temporal memories)]
 
-    U -->|messages| RC
-    RC -->|buffer + debounce| BUF
-    BUF -->|reply timer fires| REPLY
-    REPLY -->|typed, split reply| U
-    BUF -->|conversation ends / buffer full| WV
-    BUF -->|conversation ends / buffer full| UF
-    REPLY <-->|summary · profile reads| DB
-    REPLY <-->|hybrid search| KG
-    WV -->|episodes| KG
-    UF -->|episodes| KG
-    UF -->|profile JSONB| DB
-    BUF <-->|seed / flush| DB
-    A <-->|commands| BOT
-    A <-->|REST / dashboard| API
-    BOT <--> DB
-    API <--> DB
+    U -->|Telegram events| RC
+    RC -->|debounced turns| BUF
+    BUF -->|unanswered messages| REPLY
+    REPLY -->|typed message bursts| U
+    BUF -->|finalized transcript| MEM
+    A <-->|admin commands| BOT
+    A <-->|dashboard and REST| API
+    REPLY <-->|prompts · summaries · profiles| PG
+    BUF <-->|seed and flush history| PG
+    MEM -->|profiles · watermark| PG
+    REPLY <-->|hybrid memory search| N4J
+    MEM -->|fact episodes| N4J
+    REPLY <-->|model calls| GW
+    MEM <-->|model and embedding calls| GW
+    BOT <-->|configuration| PG
+    API <-->|configuration and history| PG
 ```
 
-- **Rachel client** (`app/telegram/client.py`) — the account your friends talk to. Owns the per-chat message buffers and the reply/flush timers; seeds context from the DB on first contact and flushes back on conversation end.
-- **Admin bot** (`app/telegram/bot.py`) — a second Telegram bot only you can talk to, for inspecting and tuning Rachel's prompts, traits, memory, and history live.
-- **Admin HTTP API + dashboard** (`app/routers/admin.py`, `app/static/index.html`) — the same controls over REST, plus a self-contained single-file dashboard SPA (vanilla JS, no build step) served at `/`, designed to sit behind nginx basic auth.
-- **LLM service** (`app/services/llm.py`) — the reply pipeline: gating, mood detection, agentic context retrieval, and response generation as one compiled LangGraph graph.
-- **Memory services** (`app/services/worldview.py`, `app/services/userfacts.py`, `app/services/memory.py`) — the post-conversation memory pipelines, orchestrated by a single `update_memories` entry point.
-- **Graphiti layer** (`app/services/graphiti.py`) — the shared knowledge-graph client, episode ingestion, hybrid search, and the OpenRouter compatibility workarounds.
-- **Data layer** (`app/models.py`, `app/repository.py`, `app/database.py`) — async SQLAlchemy over Postgres, with hot reads cached in module globals.
+- **Telegram client** (`app/telegram/client.py`) owns message normalization, per-chat buffers, reply/flush timers, group silence controls, typing simulation, and graceful persistence.
+- **Reply workflow** (`app/services/llm.py`) gates participation, summarizes the conversation, retrieves only relevant context, and generates a structured response plus a traceable reason.
+- **Memory workflows** (`app/services/memory.py`, `worldview.py`, `userfacts.py`) partition finalized transcripts once, then update general knowledge, personal facts, and structured profiles concurrently.
+- **Graphiti adapter** (`app/services/graphiti.py`) initializes Neo4j indices, serializes graph writes, performs hybrid retrieval, and adds schema-aware retry behavior around Graphiti's LLM client.
+- **Data layer** (`app/models.py`, `app/repository.py`, `app/database.py`) uses async SQLAlchemy sessions and PostgreSQL upserts for durable chat and control-plane state.
+- **Admin plane** (`app/telegram/bot.py`, `app/routers/admin.py`, `app/static/index.html`) exposes Telegram commands, REST endpoints, a zero-build dashboard, live architecture diagrams, and Prometheus metrics.
 
-### The reply pipeline
+### Reply workflow
 
 ```mermaid
 flowchart LR
-    START((start)) --> CHK[checker_node<br/>cheap no-LLM gate]
-    CHK -->|must reply| SUM[summarizer_node<br/>detect mood + summary]
-    CHK -->|must reply| CTX[context_fetcher_node<br/>tools: calendar · world view · user info]
-    CHK -->|maybe| RT[router_node<br/>reply warranted?]
-    RT -->|no| E((end))
-    RT -->|yes| SUM
-    RT -->|yes| CTX
-    SUM --> RESP[responder_node<br/>generate reply]
+    S((start)) --> C[cheap checker]
+    C -->|forced reply| SUM[summarizer]
+    C -->|forced reply| CTX[context fetcher]
+    C -->|ordinary turn| R[LLM router]
+    R -->|stay silent| E((end))
+    R -->|reply| SUM
+    R -->|reply| CTX
+    SUM --> RESP[responder]
     CTX --> RESP
     RESP --> E
 ```
 
-Once the gate passes, `summarizer_node` and `context_fetcher_node` run **in parallel** and the responder joins them. `responder_node` injects the fresh summary, personality traits, conversation mood, formatted date/time, and whatever the context fetcher retrieved — schedule context, world-view search results, and per-participant facts + fixed-slot profiles — and returns the reply plus a one-sentence `reason` that's persisted with the message for traceability.
+After the gate passes, the summarizer and context fetcher run in parallel. The responder joins both branches and receives the previous mood, fresh summary, active personality traits, current Singapore time, and only the schedule or memory context selected for this turn. Every sent reply includes a one-sentence reason stored with its history row for debugging.
 
-The compiled LangGraph graph, rendered:
+The compiled graph is checked into the repository:
 
-![Reply pipeline graph](graph_llm.png)
+![Reply workflow](graph_llm.png)
 
-### The memory pipelines
+### Memory workflows
 
-When a conversation ends (or the buffer fills), `update_memories` divides the transcript **once** at the chat's watermark, then runs both pipelines concurrently. Both short-circuit when nothing new has arrived since the watermark, and both never raise — memory upkeep can't crash the message loop.
+When a conversation is idle for three minutes—or its buffer reaches 150 messages—the transcript is persisted and both memory workflows start in the background.
 
-**Worldview** — extract durable *general* facts from below the divider, then ingest each as a Graphiti episode into the `worldview` partition (Graphiti handles dedup and temporal conflict resolution on ingest, so there is no hand-rolled consolidation step):
+- **World view:** extract durable, non-personal knowledge, then ingest each fact as a Graphiti episode in the `worldview` partition.
+- **User memory:** fan out into free-form personal facts stored in `user-facts-<user_id>` Graphiti partitions and fixed profile slots merged into PostgreSQL JSONB.
 
-![Worldview pipeline graph](graph_worldview.png)
+![World-view workflow](graph_worldview.png)
 
-**User-facts** — two branches fan out from `START` in parallel: a free-form facts branch (extract per-sender → ingest into that user's Graphiti partition) and a structured-profile branch (extract + deterministic locked write in one node). Extractors see only sender *names* — less hallucination-prone than numeric ids — which are resolved back to ids in code, with unknown names dropped:
-
-![User-facts pipeline graph](graph_userfacts.png)
+![User-memory workflow](graph_userfacts.png)
 
 ## Tech Stack
 
 | Layer | Technology | Purpose |
 |---|---|---|
-| Backend | FastAPI + Uvicorn | Async HTTP app and lifespan that hosts both Telegram clients |
-| Messaging | Telethon (MTProto) | Two persistent Telegram client connections — no webhook |
-| LLM orchestration | LangGraph + langchain-openrouter | Stateful multi-node graphs for reply, worldview, and user-facts |
-| LLM provider | OpenRouter (default `deepseek/deepseek-v4-flash`) | Model-agnostic inference via an OpenAI-compatible API; separate billable key for memory ingestion |
-| Long-term memory | Graphiti + Neo4j 5 | Temporal knowledge graph: entity resolution, temporal edge invalidation, hybrid RRF search |
-| Database | PostgreSQL 16 (async SQLAlchemy 2.0 + asyncpg) | Conversation history, summaries, users, traits, schedule, JSONB profiles, memory watermarks |
-| Migrations | Alembic | Versioned schema management |
-| Admin UI | Single-file vanilla-JS SPA | Zero-build dashboard served by FastAPI, auth delegated to nginx |
-| Config | pydantic-settings | `.env`-driven, cached settings |
-| Tooling | uv | Dependency management and runner |
-| Infrastructure | Docker Compose | Local Postgres + Neo4j (and optional containerized app) |
+| Runtime | Python 3.11+ · asyncio | One event loop for HTTP, Telegram, and workflow tasks |
+| HTTP service | FastAPI · Uvicorn | Lifespan management, admin API, dashboard, health, and metrics |
+| Messaging | Telethon / MTProto | Persistent Rachel and admin-bot Telegram clients without webhooks |
+| Orchestration | LangGraph · LangChain OpenAI | Stateful reply and memory workflows over an OpenAI-compatible endpoint |
+| Model gateway | Merge Gateway | Routes chat, embedding, and reranking requests by `provider/model` ID |
+| Long-term memory | Graphiti · Neo4j 5.26 | Temporal entity graph, conflict handling, and hybrid RRF search |
+| Operational data | PostgreSQL 16 · SQLAlchemy 2 · asyncpg | Histories, summaries, moods, watermarks, profiles, prompts, traits, schedule, and active models |
+| Schema changes | Alembic | Versioned PostgreSQL migrations |
+| Structured data | Pydantic 2 · pydantic-settings | Validated model output, API bodies, and environment configuration |
+| Observability | Prometheus client | Per-node LLM call and classified error counters at `/metrics` |
+| Admin UI | Vanilla HTML/CSS/JavaScript | Single-file dashboard with no frontend build step |
+| Packaging | uv · `pyproject.toml` · `uv.lock` | Reproducible dependency installation and command execution |
+| Infrastructure | Docker · Docker Compose | Local/production PostgreSQL, Neo4j, and optional app container |
 
 ## Features
 
-- Human-like texting: debounced replies, simulated typing speed, multi-message bursts, race-safe send ordering
-- Group-chat-aware: reads everything, only speaks when DM'd, @-mentioned, or replied to — and a router can still decline to reply
-- Never re-answers a message she already handled (divider partitioning), never re-extracts memory from old messages (persisted watermark)
-- Seven conversational moods with matching tone exemplars, applied with a deliberate one-turn lag
-- Persistent two-tier memory in a temporal knowledge graph: general world facts + per-person facts, plus a 16-slot structured profile in Postgres
-- Selective recall: an agentic context fetcher searches the graph and schedule per message instead of dumping all memory into every prompt
-- Self-maintaining memory with structural dedup and newer-fact-wins conflict resolution, run automatically when a conversation ends
-- Twelve runtime-tunable personality traits (low/medium/high sliders)
-- A seeded weekly schedule that gives Rachel a believable "current activity", exposed to the LLM as tools
-- Admin control plane over Telegram, REST, **and** a web dashboard: prompts, traits, memory, profiles, history, summaries
-- Bulk world-knowledge seeding scripts (single fact or whole markdown files)
-- Every reply stores a one-sentence `reason` for debugging and traceability
-- Buffers flushed to Postgres on shutdown and on conversation end, surviving restarts
+- Human-like reply timing, typing indicators, and multi-message bursts
+- Group-aware reply routing, 5% spontaneous participation, timed silence, and indefinite mute controls
+- Media placeholders for stickers, GIFs, photos, videos, voice messages, audio, and files
+- Seven persistent conversation moods applied with a deliberate one-call lag
+- Twelve live-tunable personality sliders and a seeded weekly schedule in Singapore time
+- Selective calendar, world-view, user-fact, and user-profile retrieval per turn
+- Temporal world and per-user knowledge graphs with scoped Graphiti group IDs
+- Sixteen-slot structured user profiles with deterministic conflict-free merging
+- Runtime model catalog and independent main/small/embedding model roles
+- Admin control through Telegram, REST, and a browser dashboard
+- Read-only workflow prompt inspection and on-demand LangGraph diagram rendering
+- Per-reply reasoning stored beside the Telegram message history
+- Prometheus metrics with low-cardinality error classification
+- Graceful shutdown that flushes in-memory conversation buffers
+- One-off scripts for graph seeding, visualization, login, and destructive graph reset
 
 ## Future Potential
 
-The next frontier is richer memory *generation*, splitting what Rachel remembers into the two kinds of long-term memory humans have. **Temporal (episodic) memories** capture events as they happen — "Sarah's job interview is on Thursday" — with lifecycles: they're born mid-conversation rather than only at conversation end, they expire or get invalidated as reality moves on (the interview happened; the plan was cancelled), and Graphiti's temporal edge invalidation is the natural substrate for tracking that decay. **Semantic memories** are the timeless residue distilled from those episodes — "Sarah works in finance" — which is what the current extractors approximate today. Layered on top is an **evolving user impressions** feature: rather than just accumulating facts about a person, Rachel forms an *opinion* of them — warm, guarded, amused, worried — that drifts gradually as interactions accumulate, the way real impressions do, and colours her tone with each person independently of the conversation's mood.
+The next memory layer could separate short-lived episodic facts—“Sarah's interview is on Thursday”—from semantic memories such as “Sarah works in finance.” Graphiti's temporal edge invalidation provides a natural base for expiry, cancellation, and event completion, while a slower impression model could track how Rachel's stance toward each person evolves over time.
 
-The architecture generalizes cleanly beyond one character. The persona is data — system prompts, trait sliders, schedule, moods — not code, so the same engine could host a roster of distinct characters, or be offered as a "believable NPC" backend for game studios and interactive-fiction platforms. Swapping Telethon for the Discord or WhatsApp Business APIs is a client-layer change, not an architectural one, since the reply/memory pipelines are transport-agnostic. OpenRouter already makes the underlying model a config value, so cost/quality can be tuned per deployment without touching the graphs.
+The engine can also support multiple characters or transports. Moving to Discord or WhatsApp Business mainly changes the messaging adapter; the reply and memory workflows remain transport-independent. Persona packages could define prompts, traits, schedules, profile schemas, and memory policies for game characters, interactive fiction, education, or community assistants.
 
-There's also a clear research and tooling angle: the structured per-user profiles, the temporal fact graph, and the stored `reason` on every reply make this a natural testbed for studying long-horizon persona consistency, memory drift, and tone steering — the kind of evaluation harness that companionship, education, and customer-experience products increasingly need.
+Runtime model roles make this a useful evaluation platform as well. A deployment can compare main-model quality, cheaper helper models, and embedding choices without changing workflow code, while stored response reasons and per-node metrics provide the raw material for long-horizon persona-consistency and memory-drift evaluations.
 
 ---
 
@@ -183,214 +184,323 @@ There's also a clear research and tooling angle: the structured per-user profile
 
 ### Prerequisites
 
+Install these tools before cloning the repository:
+
 | Tool | Version | Install |
 |---|---|---|
-| Python | ≥ 3.11 | [python.org](https://www.python.org/downloads/) (uv can also install it) |
-| uv | latest | [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/) |
-| Docker Desktop | latest | [docker.com](https://www.docker.com/products/docker-desktop/) (for Postgres and Neo4j) |
+| Git | Any maintained release | [git-scm.com](https://git-scm.com/downloads) |
+| Python | 3.11 or newer | [python.org](https://www.python.org/downloads/) |
+| uv | Current stable | [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/) |
+| Docker Desktop / Docker Engine | Compose v2 capable | [docs.docker.com](https://docs.docker.com/get-docker/) |
+| Telegram account | Able to receive a login code | Used to create Rachel's persistent Telethon session |
 
-Docker Desktop must be running before you start the databases. You can verify by running `docker ps` — if it returns a list (even an empty one) instead of an error, Docker is running. You will also need two Telegram bots and a Telegram developer app (details in step 4).
+Docker must be running before PostgreSQL or Neo4j can start. Verify it with `docker ps`; a table—even an empty one—means the daemon is reachable.
 
 ### 1. Clone the repository
 
+Clone the GitHub repository and enter its root directory:
+
 ```bash
-git clone https://github.com/GeneralR3d/Rachel.git
-cd Rachel
+git clone https://github.com/GeneralR3d/Rachael.git
+cd Rachael
 ```
 
-*(Navigate into the project folder — this is required for all following commands.)*
+All following commands assume the current directory is the repository root.
 
-### 2. Install dependencies
+### 2. Install Python dependencies
 
-**Python libraries the app needs** (FastAPI, Telethon, LangGraph, Graphiti, SQLAlchemy, …):
+Let uv create `.venv` and install the exact dependency set recorded in `uv.lock`:
+
 ```bash
-uv sync
+uv sync --frozen
 ```
-*uv reads `pyproject.toml`/`uv.lock`, creates a virtual environment, and installs everything. You should see it resolve and install the dependency set.*
 
-### 3. Start infrastructure
+You should see uv resolve the project without changing the lockfile. If Python 3.11+ is missing, run `uv python install 3.11` and repeat the command.
 
-Here "infrastructure" means two containers: **PostgreSQL** (conversation state) and **Neo4j** (the Graphiti knowledge graph). Compose runs both with the credentials the app expects:
-```bash
-docker compose up -d db neo4j
-```
-*You should see `Container rachel-db Started` and `Container rachel-neo4j Started`. If you get an error about Docker not running, open Docker Desktop and wait for it to finish starting, then re-run. Postgres is exposed on host port **5433** (mapped to internal 5432); Neo4j exposes bolt on **7687** and its browser UI on **7474** — both bound to loopback only. You can inspect the graph anytime at `http://localhost:7474`.*
+### 3. Configure the environment
 
-### 4. Configure environment variables
+Copy the committed template to the local file read by `pydantic-settings` and Docker Compose:
 
-Copy the example file:
 ```bash
 cp template.env .env
 ```
 
-Now open `.env` in a text editor and fill in the following values.
+Never commit `.env`; it contains Telegram and gateway credentials.
 
-#### Telegram
+#### Telegram credentials
 
-**`TELEGRAM_API_ID`** / **`TELEGRAM_API_HASH`** *(required)*
-What they do: identify *your developer app* to Telegram's MTProto API (used by both clients).
-Where to get them: log in at [my.telegram.org](https://my.telegram.org) → **API development tools** → create an app → copy the `api_id` and `api_hash`.
-Example: `TELEGRAM_API_ID=1234567` / `TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef`
+**`TELEGRAM_API_ID`** and **`TELEGRAM_API_HASH`** *(required)*
+Identify your Telegram developer application to MTProto. Create an application at [my.telegram.org](https://my.telegram.org) under **API development tools**.
+Example: `TELEGRAM_API_ID=1234567` and `TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef`
 
 **`TELEGRAM_BOT_TOKEN`** *(required)*
-What it does: logs in the separate **admin** bot — the one only you talk to.
-Where to get it: message [@BotFather](https://t.me/botfather) → `/newbot` → copy the token it gives you.
-Example: `TELEGRAM_BOT_TOKEN=123456:ABC-DEF...`
-
-> Rachel's *own* credentials are **not** stored in `.env`. They're entered once, interactively, in step 6.
+Authenticates the separate admin bot. Create it with [@BotFather](https://t.me/botfather) using `/newbot`.
+Example: `TELEGRAM_BOT_TOKEN=123456789:AAExampleToken`
 
 **`ADMIN_ID`** *(required)*
-What it does: the only Telegram user ID allowed to issue admin commands.
-Where to get it: message [@userinfobot](https://t.me/userinfobot) — it replies with your numeric ID.
+Whitelists the only Telegram user allowed to operate the admin bot. Obtain your numeric user ID from [@userinfobot](https://t.me/userinfobot); leaving the template value blank prevents the integer setting from validating at startup.
 Example: `ADMIN_ID=987654321`
 
-#### LLM
+Rachel's own Telegram login is intentionally not stored in `.env`; step 6 creates `anon.session` interactively.
 
-**`OPENROUTER_API_KEY`** *(required)*
-What it does: authenticates Rachel's own model calls (router, summarizer, context fetcher, responder).
-Where to get it: sign in at [openrouter.ai](https://openrouter.ai/keys) → **Keys** → create a key.
-Example: `OPENROUTER_API_KEY=sk-or-v1-...`
+#### Merge Gateway and model roles
 
-**`OPENROUTER_GRAPHITI_API_KEY`** *(optional)*
-What it does: a **separate** key billed for everything memory-related — the fact extractors and all of Graphiti's internal LLM, embedding, and reranker calls (memory ingestion is several LLM round-trips per fact, so it's useful to meter it separately). Leave blank to reuse `OPENROUTER_API_KEY`.
+**`MERGE_GATEWAY_API_KEY`** *(required)*
+Authenticates reply routing, summarization, context selection, user-fact extraction, and profile extraction. Create a Gateway credential at [gateway.merge.dev](https://gateway.merge.dev).
+Example: `MERGE_GATEWAY_API_KEY=mg_...`
 
-**`OPENROUTER_MODEL`** *(optional)*
-What it does: which model to route requests to.
-Default: `deepseek/deepseek-v4-flash`. Any OpenRouter model slug works.
+**`MERGE_GATEWAY_GRAPHITI_API_KEY`** *(optional)*
+Separately meters the world-view extractor and Graphiti's internal LLM, embedding, and reranking calls. Leave it blank to reuse `MERGE_GATEWAY_API_KEY`.
+Example: `MERGE_GATEWAY_GRAPHITI_API_KEY=mg_...`
 
-**`OPENROUTER_EMBEDDING_MODEL`** *(optional)*
-What it does: the embedding model Graphiti uses for semantic search over the knowledge graph, also routed through OpenRouter (no separate embeddings provider or key needed).
-Default: `openai/text-embedding-3-small`.
+**`MERGE_GATEWAY_BASE_URL`** *(optional)*
+Gateway-native base URL used by Graphiti embeddings. Keep the default unless you operate a custom endpoint.
+Default: `https://api-gateway.merge.dev/v1`
 
-#### Databases & naming
+**`MERGE_GATEWAY_OPENAI_BASE_URL`** *(optional)*
+OpenAI-compatible base URL used by chat completions and reranking. The `/v1/openai` suffix is required for the hosted Gateway.
+Default: `https://api-gateway.merge.dev/v1/openai`
 
-**`DB_PASSWORD`** *(optional, default `rachel`)*
-What it does: the dockerized Postgres password. Compose reads it for `POSTGRES_PASSWORD` and `DATABASE_URL` interpolates it, so it lives in exactly one place. Keep it above `DATABASE_URL` in the file (dotenv resolves top-down).
+**`LLM_MODEL`** *(optional)*
+Initial model for the reply workflows, extractors, and Graphiti's main role. The value must use Gateway's `provider/model` format.
+Default: `deepseek/deepseek-v4-flash`
 
-**`DATABASE_URL`** *(required)*
-What it does: async SQLAlchemy connection string.
-Value: use `postgresql+asyncpg://rachel:${DB_PASSWORD}@localhost:5433/rachel` when running the app locally against the Dockerized DB (note port **5433**). If you run the app *inside* Docker Compose instead, use host `db` and port `5432` (kept literal — Compose env injection doesn't expand `${...}`).
+**`LLM_SMALL_MODEL`** *(optional; supported by the code but not currently listed in `template.env`)*
+Initial smaller model for Graphiti helper and reranker calls.
+Default: `deepseek/deepseek-v4-flash`
 
-**`NEO4J_PASSWORD`** *(required)* / **`NEO4J_USER`** *(default `neo4j`)*
-What they do: credentials for the Neo4j container (Compose sets `NEO4J_AUTH` from the same value, so app and DB always agree).
+**`LLM_EMBEDDING_MODEL`** *(optional)*
+Initial embedding model for Graphiti's semantic search.
+Default: `openai/text-embedding-3-small`
 
-**`NEO4J_URI`** *(required)*
-What it does: bolt connection string for Graphiti.
-Value: `bolt://localhost:7687` locally; `bolt://neo4j:7687` when the app runs inside Compose.
+The database-backed model selector can override these three values at runtime. Legacy `OPENROUTER_MODEL`, `OPENROUTER_SMALL_MODEL`, and `OPENROUTER_EMBEDDING_MODEL` names are accepted only as compatibility aliases for the model IDs; the old OpenRouter connection-key settings are no longer used.
 
-**`BOT_NAME`** *(optional)* — display name used in summaries/labelling. Default: `Rachel`.
-**`USER_NAME`** *(optional)* — your name, used for labelling. Default: unset.
+#### Persona labels
 
-### 5. Initialize the database
+**`BOT_NAME`** *(optional)*
+Controls Rachel's display label in prompts and the exact name accepted by natural-language silence commands.
+Default: `Rachel`
+
+**`USER_NAME`** *(optional)*
+Provides an owner/user label for summaries inherited from the original implementation. It may be left blank.
+
+#### PostgreSQL
+
+**`DB_PASSWORD`** *(optional locally; change in production)*
+Sets the password used by the Compose PostgreSQL container. Keep it above `DATABASE_URL` because dotenv interpolation is top-down. URL-encode characters such as `@`, `:`, `/`, or `#` inside the URL.
+Local default: `rachel`
+
+**`DATABASE_URL`** *(required to match the chosen run mode)*
+Async SQLAlchemy connection string. For a host-run app talking to the Compose database, use port `5433`:
+`DATABASE_URL=postgresql+asyncpg://rachel:${DB_PASSWORD}@localhost:5433/rachel`
+
+For the Compose `app` service, the compose file overrides this with the internal host `db:5432` automatically.
+
+#### Neo4j
+
+**`NEO4J_PASSWORD`** *(required)*
+Must match the password used in `NEO4J_AUTH`. Set a non-default value, especially outside local development.
+Example: `NEO4J_PASSWORD=replace-with-a-long-random-password`
+
+**`NEO4J_USER`** *(optional)*
+Neo4j account name.
+Default: `neo4j`
+
+**`NEO4J_URI`** *(required to match the chosen run mode)*
+Use `bolt://localhost:7687` when the app runs on the host. The Compose `app` service overrides it with `bolt://neo4j:7687`.
+
+`WORLDVIEW_PATH` still exists as a legacy setting but is not used for active storage; world knowledge now lives in Neo4j.
+
+### 4. Start PostgreSQL and Neo4j
+
+Start only the two local infrastructure services while running the Python app on the host:
+
+```bash
+docker compose up -d db neo4j
+```
+
+Check that both containers reach a healthy state:
+
+```bash
+docker compose ps
+```
+
+You should see `rachel-db` and `rachel-neo4j` as healthy. PostgreSQL is available only on `127.0.0.1:5433`; Neo4j Bolt is on `127.0.0.1:7687`, and the Neo4j browser is at [http://localhost:7474](http://localhost:7474). First-time Neo4j startup can take 20–40 seconds.
+
+If a container stays unhealthy, inspect it with `docker compose logs db` or `docker compose logs neo4j` and confirm the passwords in `.env` match the compose configuration.
+
+### 5. Initialize PostgreSQL
+
+Apply every Alembic migration to create or upgrade the application schema:
 
 ```bash
 uv run alembic upgrade head
 ```
-*This creates all the Postgres tables the app needs. You only need to run it once (and again whenever you pull new migrations). Neo4j needs no schema setup — Graphiti builds its indices on first use.*
 
-### 6. Log Rachel in (one time)
+Alembic should report each revision and finish without an error. Run this again after pulling migrations. Neo4j does not use Alembic; Graphiti creates its indices and constraints on first access.
 
-Uvicorn runs non-interactively, so Rachel's session must be created first. This writes `anon.session`:
+### 6. Create Rachel's Telegram session
+
+Run the one-time interactive login that writes the gitignored `anon.session` file:
+
 ```bash
 uv run python -m scripts.login
 ```
-*Follow the interactive prompts to log in the account Rachel will speak as.*
 
-### 7. Run the app
+Enter the phone number or bot token for the Telegram identity that should speak as Rachel, then complete Telegram's login challenge. A successful run prints `Logged in as: ... Session saved to anon.session.` If Uvicorn is started without an authorized session, startup may try to authenticate `anon.session` with the admin bot token, so complete this step first.
+
+### 7. Run Rachel
+
+Start FastAPI with hot reload for local development:
 
 ```bash
 uv run uvicorn app.main:app --reload
 ```
-*On startup the app seeds the system prompts, personality traits, and weekly schedule into Postgres, starts both Telegram clients, and serves the API at `http://localhost:8000`. You should see "Telethon clients started." in the logs.* The admin dashboard is at `http://localhost:8000/` and interactive API docs at `http://localhost:8000/docs`.
 
-### Verify everything is working
+Startup seeds prompts, traits, the schedule, and the model catalog; starts both Telegram clients; and serves:
+
+- Dashboard: [http://localhost:8000/](http://localhost:8000/)
+- Interactive API docs: [http://localhost:8000/docs](http://localhost:8000/docs)
+- Prometheus metrics: [http://localhost:8000/metrics](http://localhost:8000/metrics)
+
+You should see `Telethon clients started.` in the logs. If startup fails before that line, first verify PostgreSQL, Neo4j, `.env`, and both Telethon session files.
+
+### Verify the service
+
+Call the lightweight health endpoint:
 
 ```bash
 curl http://localhost:8000/health
 ```
+
 Expected response:
+
 ```json
-{ "status": "ok" }
+{"status":"ok"}
 ```
-Then message Rachel from another Telegram account — after a few seconds' pause she should reply, typing it out in real time.
 
-### (Optional) Seed Rachel's world knowledge
-
-Give her things to "know" before anyone talks to her (Neo4j must be up; each fact is several LLM round-trips, so bulk ingestion takes a while):
+Confirm the LLM counters are exposed:
 
 ```bash
-uv run python -m scripts.add_worldview_fact "Chagee is a bubble tea brand"   # one fact
-uv run python -m scripts.ingest_worldview_md path/to/facts.md                # a whole markdown file
-uv run python -m scripts.clear_graph                                         # WIPE the graph (typed confirmation)
+curl -s http://localhost:8000/metrics | grep rachel_llm
 ```
 
----
+The command should print the metric descriptions; labeled samples appear after model calls occur. Finally, message Rachel from another Telegram account and wait for the reply debounce.
 
-## Admin controls
+### Optional: seed long-term memory
 
-Three interfaces expose the same state: the Telegram admin bot, the REST API, and the web dashboard at `/` (a single-file SPA meant to sit behind nginx basic auth in production — it has no auth of its own).
+Add one curated general fact through the same Graphiti ingestion path used in production:
 
-Over Telegram (only `ADMIN_ID` is honoured):
+```bash
+uv run python -m scripts.add_worldview_fact "Chagee is a bubble tea brand"
+```
 
-| Command | Description |
+Bulk-ingest `- ` bullet lines from a repository-root `worldview.md` file:
+
+```bash
+uv run python -m scripts.ingest_worldview_md
+```
+
+Bulk-ingest `- ` bullet lines from `user_fact_<user_id>.md` into one user's partition:
+
+```bash
+uv run python -m scripts.ingest_user_facts_md 123456789
+```
+
+Ingestion is intentionally sequential and may take several model round-trips per fact. Re-running a bulk script creates additional raw episodes even when Graphiti deduplicates the derived entities and edges.
+
+## Group-Chat Behavior
+
+Rachel considers each non-empty incoming turn, but speaking behavior depends on context:
+
+- A direct @mention or reply forces the reply workflow past the router and also clears active silence.
+- Ordinary group messages use the group router; DMs use a separate private-message router that can suppress acknowledgements or already-handled content.
+- Untagged turns have a 5% chance to skip the router for spontaneous participation.
+- `Rachel shush`, `Rachel quiet`, `Rachel silence`, `Rachel shut up`, or `Rachel stop talking` silences a group for 15 minutes.
+- `Rachel mute` silences a group indefinitely; `Rachel speak` resumes normal scheduling.
+- Silence state is process-local and does not survive an application restart. Messages still persist and feed memory while Rachel is silent.
+
+## Admin and Operations
+
+### Browser dashboard
+
+The single-file dashboard at `/` exposes prompts, personality traits, the model catalog, active model roles, chats, histories, user profiles and facts, world-view facts, and freshly rendered LangGraph diagrams. It has no application-level authentication; keep it on loopback locally and place an authenticated reverse proxy in front of it in production.
+
+### Telegram admin bot
+
+Only `ADMIN_ID` can use these command groups:
+
+| Area | Commands |
 |---|---|
-| `/get_responder_system_prompt` · `/set_responder_system_prompt <text>` | View / set Rachel's main persona prompt |
-| `/get_summarizer_system_prompt` · `/set_summarizer_system_prompt <text>` | View / set the summarizer prompt |
-| `/list_user_names` · `/list_chats` | Enumerate known users / chats |
-| `/get_history <chat_id>` · `/clear_history <chat_id>` | Inspect / clear a chat's stored messages (incl. `reason`) |
-| `/get_summary <chat_id>` · `/delete_summary <chat_id>` | Inspect / delete a chat's running summary |
-| `/list_traits` · `/set_trait <id> <low\|medium\|high>` · `/reset_traits` | Tune personality sliders |
-| `/get_user_facts <user_id>` | Dump every fact episode in a user's knowledge-graph partition |
-| `/add_user_facts <user_id> <fact>` | Ingest a new fact episode (slow — several LLM round-trips; the bot acks first) |
-| `/get_user_profile <user_id>` · `/delete_user_profile <user_id>` | Inspect / delete a user's structured profile slots |
+| Prompts | `/get_responder_system_prompt`, `/set_responder_system_prompt <text>`, `/get_summarizer_system_prompt`, `/set_summarizer_system_prompt <text>` |
+| Chats | `/list_user_names`, `/list_chats`, `/get_history <chat_id>`, `/clear_history <chat_id>`, `/get_summary <chat_id>`, `/delete_summary <chat_id>` |
+| User memory | `/get_user_facts <user_id>`, `/add_user_facts <user_id> <fact>`, `/get_user_profile <user_id>`, `/delete_user_profile <user_id>` |
+| Personality | `/list_traits`, `/set_trait <id> <low\|medium\|high>`, `/reset_traits` |
+| Models | `/list_models`, `/list_active_models`, `/add_model <provider/model>`, `/delete_model <provider/model>`, `/set_active_model <main\|small\|embedding> <provider/model>` |
 
-There is deliberately no edit/delete for individual facts: Graphiti's dedup and temporal conflict resolution supersede old facts on ingest — to "correct" a fact, ingest the corrected version.
+### REST API
 
-Over REST (`app/routers/admin.py`): `GET/PUT /responder-system-prompt`, `GET/PUT /summarizer-system-prompt`, `GET /users/names`, `GET /list-chats`, `GET/DELETE /history/{chat_id}`, `GET/DELETE /summary/{chat_id}`, `GET/PUT/DELETE /user-profile/{user_id}`, `GET/POST /user-facts/{user_id}`, `GET /user-profile-fields`, `GET /personality`, `PATCH /personality/{trait_id}`, `POST /personality/reset`, `GET /health`.
+The API mirrors the control plane with endpoints for prompts, workflow prompt inspection, chats, summaries, user facts, profiles, world-view facts, personality traits, model catalog and active roles, architecture diagrams, health, and metrics. Open [http://localhost:8000/docs](http://localhost:8000/docs) for the generated OpenAPI interface.
 
-To scope the admin bot's command menu to just your chat, use the Bot API directly instead of BotFather — send a `setMyCommands` request with the scope field:
+### Prometheus metrics
 
-```
-  curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setMyCommands" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "commands": [
-        {"command": "get_responder_system_prompt", "description": "Get the current responder system prompt"},
-        {"command": "set_responder_system_prompt", "description": "Set a new responder system prompt"},
-        {"command": "get_summarizer_system_prompt", "description": "Get the current summarizer system prompt"},
-        {"command": "set_summarizer_system_prompt", "description": "Set a new summarizer system prompt"},
-        {"command": "list_chats", "description": "List all chats with message counts"},
-        {"command": "get_history", "description": "Get message history for a chat"},
-        {"command": "clear_history", "description": "Clear message history for a chat"},
-        {"command": "get_summary", "description": "Get the conversation summary for a chat"},
-        {"command": "delete_summary", "description": "Delete the conversation summary for a chat"},
-        {"command": "list_user_names", "description": "List all usernames and names and telegram_user_id"},
-        {"command": "get_user_facts", "description": "Dump all fact episodes for a user: /get_user_facts <user_id>"},
-        {"command": "add_user_facts", "description": "Ingest a new fact for a user: /add_user_facts <user_id> <fact text>"},
-        {"command": "get_user_profile", "description": "Get the structured profile for a user: /get_user_profile <user_id>"},
-        {"command": "delete_user_profile", "description": "Delete the structured profile for a user: /delete_user_profile <user_id>"},
-        {"command": "list_traits", "description": "List all personality trait sliders and current values"},
-        {"command": "set_trait", "description": "Set a trait value: /set_trait <id> <low|medium|high>"},
-        {"command": "reset_traits", "description": "Reset all personality traits to medium"}
-      ],
-      "scope": {
-        "type": "chat",
-        "chat_id": <YOUR_ADMIN_ID>
-      }
-    }'
-```
+- `rachel_llm_calls_total{node}` counts logical model calls by workflow node.
+- `rachel_llm_errors_total{node,kind}` counts final failures by node and bounded error class.
+
+The current counters are process-local. Multiple Uvicorn workers require Prometheus client multiprocess configuration, which is not included in this repository.
 
 ## Development
 
+Run the server with source reload:
+
 ```bash
-uv run uvicorn app.main:app --reload      # run with hot reload
-uv run alembic upgrade head               # apply all migrations
-uv run alembic downgrade -1               # roll back one migration
-uv run alembic revision -m "msg"          # generate a new migration after a schema change
-uv run python -m scripts.draw_graphs      # render the LangGraph pipelines to PNG
-docker compose up -d db neo4j             # start just Postgres + Neo4j
+uv run uvicorn app.main:app --reload
 ```
 
-There is no test suite or lint config in this repo yet. The original Telethon/SQLite implementation is preserved under [`Reference/`](Reference/) as the porting reference, and deployment notes live in [`DEPLOY.md`](DEPLOY.md) and [`DEPLOY_DOCKER.md`](DEPLOY_DOCKER.md).
+Apply all pending migrations:
 
-> **Known gap:** there's a race in `_flush_chat` (`app/telegram/client.py`) where a message arriving between the flush write and the buffer clear can be dropped. It's marked with a `#TODO` in the source.
+```bash
+uv run alembic upgrade head
+```
+
+Create a blank migration after changing SQLAlchemy models, then edit the generated revision explicitly:
+
+```bash
+uv run alembic revision -m "describe the schema change"
+```
+
+Render the three compiled LangGraph workflows to PNG files. The renderer may require internet access for Mermaid rendering:
+
+```bash
+uv run python -m scripts.draw_graphs
+```
+
+Run a lightweight Python syntax check without starting databases or Telegram:
+
+```bash
+uv run python -m compileall -q app scripts alembic
+```
+
+There is currently no automated test suite, lint configuration, or CI workflow in the repository. The original Telethon/SQLite implementation remains under [`Reference/`](Reference/) as a porting reference.
+
+## Deployment
+
+Two deployment guides are included:
+
+- [`DEPLOY.md`](DEPLOY.md) runs PostgreSQL and Neo4j in Docker while the app runs on the host under systemd.
+- [`DEPLOY_DOCKER.md`](DEPLOY_DOCKER.md) runs the app and both datastores with Docker Compose.
+
+The guides contain some pre-Merge-Gateway environment names; use the `MERGE_GATEWAY_*` and `LLM_*` configuration documented in this README. In either topology, bind Uvicorn to loopback and protect the unauthenticated dashboard/API with nginx basic authentication or an equivalent access layer.
+
+## Known Limitations
+
+- A documented race in `_flush_chat` can drop a message that arrives between the persistence write and buffer removal.
+- A multi-burst reply is persisted as one history row keyed to the first Telegram message ID, so an interleaved user message can be ordered differently after a database re-seed.
+- Timed silence, indefinite mute state, and reply watermarks are process-local; the durable memory-extraction watermark is persisted.
+- Switching to an embedding model with a different vector dimensionality does not automatically re-embed existing Neo4j data.
+- The admin HTTP surface does not implement its own authentication.
+- Tests, linting, CI, and a ready-made Prometheus/Grafana deployment are not yet included.
+
+## License
+
+No license file is currently included. Contact the maintainer before redistributing the code or creating derivative works.
