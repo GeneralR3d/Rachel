@@ -114,6 +114,13 @@ pending_mention: Dict[int, bool] = {}
 # messages are still buffered/flushed but never schedule a reply. Cleared as soon
 # as Rachel is @-mentioned/replied-to (the one override) — see new_message.
 silent_until: Dict[int, float] = {}
+# Per-group indefinite mute state. Unlike silent_until, these entries have no
+# deadline: "BOT_NAME mute" adds the chat and it remains muted until
+# "BOT_NAME speak" or a direct @mention/reply-to removes it. Each value is a
+# unique token for that mute transition, used to suppress a queued confirmation
+# if the group is unmuted (or muted again) before the reply lock becomes free.
+# This state is intentionally process-local, matching the timed silent mode.
+muted_chats: Dict[int, object] = {}
 
 
 # helper functions
@@ -171,7 +178,7 @@ def _message_content(event) -> str:
 # Matches only a direct "BOT_NAME <quiet-word>" command (exact order),
 # case-insensitive. Built once at import; BOT_NAME is escaped in case it
 # contains regex metacharacters.
-_SILENCE_KEYWORDS = r"shush|shut\s*up|shutup|be\s*quiet|quiet|silence|stop\s*talking"
+_SILENCE_KEYWORDS = r"shush|shut\s*up|shutup|quiet|silence|stop\s*talking"
 _SILENCE_PATTERN = re.compile(
     rf"^\s*{re.escape(BOT_NAME)}[\s,.:;!?-]+(?:{_SILENCE_KEYWORDS})\b[.!?]*\s*$",
     re.IGNORECASE,
@@ -181,6 +188,29 @@ _SILENCE_PATTERN = re.compile(
 def _is_silence_trigger(text: str) -> bool:
     """True if ``text`` is a strict ``BOT_NAME`` + quiet-word command."""
     return bool(_SILENCE_PATTERN.search(text))
+
+
+# Indefinite mute commands deliberately accept only these two exact actions.
+# Keep their grammar aligned with the strict silence command above: Rachel's
+# name first, a separator, then the action, with optional trailing punctuation.
+_MUTE_PATTERN = re.compile(
+    rf"^\s*{re.escape(BOT_NAME)}[\s,.:;!?-]+mute\b[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_SPEAK_PATTERN = re.compile(
+    rf"^\s*{re.escape(BOT_NAME)}[\s,.:;!?-]+speak\b[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_mute_trigger(text: str) -> bool:
+    """True if ``text`` is a strict ``BOT_NAME mute`` command."""
+    return bool(_MUTE_PATTERN.search(text))
+
+
+def _is_speak_trigger(text: str) -> bool:
+    """True if ``text`` is a strict ``BOT_NAME speak`` command."""
+    return bool(_SPEAK_PATTERN.search(text))
 
 
 def _is_silenced(chat_id: int) -> bool:
@@ -206,6 +236,80 @@ async def _send_silence_confirmation(event, chat_id: int, minutes: int):
     """
     async with reply_locks.setdefault(chat_id, asyncio.Lock()):
         await event.respond(f"{BOT_NAME} has been silenced for {minutes} minutes")
+
+
+async def _send_mute_confirmation(event, chat_id: int, mute_token: object):
+    """Send a still-current mute confirmation behind the chat's reply lock."""
+    async with reply_locks.setdefault(chat_id, asyncio.Lock()):
+        if muted_chats.get(chat_id) is not mute_token:
+            return
+        await event.respond(f'{BOT_NAME} has been muted until someone misses me')
+
+
+def _clear_group_speech_suppression(chat_id: int, reason: str) -> None:
+    """Clear indefinite mute and timed silence."""
+    was_suppressed = chat_id in muted_chats or chat_id in silent_until
+    muted_chats.pop(chat_id, None)
+    silent_until.pop(chat_id, None)
+    if was_suppressed:
+        print(f"[{chat_id}] Mute/silent mode lifted ({reason})")
+
+
+def _handle_group_speech_control(event, content: str) -> Optional[str]:
+    """Apply group mute/silence commands and return the active suppression mode.
+
+    The return value is ``"Muted"`` or ``"Silenced"`` when reply scheduling
+    must be skipped, otherwise ``None``. Messages remain buffered and flushed by
+    ``new_message`` regardless of this result.
+    """
+    if not event.is_group:
+        return None
+
+    chat_id = event.chat_id
+
+    # A direct @mention/reply-to overrides either mode. "BOT_NAME speak" also
+    # clears both modes, but then relies on the normal router for any response.
+    if event.mentioned:
+        _clear_group_speech_suppression(chat_id, "Rachel was tagged")
+    elif _is_speak_trigger(content):
+        _clear_group_speech_suppression(chat_id, "speak command")
+
+    # Indefinite mute cancels a reply still in its delay and discards any mention
+    # latch belonging to that cancelled burst. Its confirmation is queued behind
+    # a committed reply and sent only if this mute transition is still current.
+    if not event.mentioned and _is_mute_trigger(content):
+        if chat_id in wait_tasks and not wait_tasks[chat_id].done():
+            wait_tasks[chat_id].cancel()
+        pending_mention.pop(chat_id, None)
+
+        if chat_id not in muted_chats:
+            mute_token = object()
+            muted_chats[chat_id] = mute_token
+            print(f"[{chat_id}] Indefinite mute armed")
+            asyncio.create_task(_send_mute_confirmation(event, chat_id, mute_token))
+
+    # Timed silence is lower precedence than indefinite mute. Repeating a silence
+    # command while either mode is active does not re-arm or re-confirm it.
+    if (
+        not event.mentioned
+        and _is_silence_trigger(content)
+        and chat_id not in muted_chats
+        and not _is_silenced(chat_id)
+    ):
+        if chat_id in wait_tasks and not wait_tasks[chat_id].done():
+            wait_tasks[chat_id].cancel()
+
+        silent_until[chat_id] = time.monotonic() + SILENT_MODE_DURATION
+        minutes = SILENT_MODE_DURATION // 60
+        print(f"[{chat_id}] Silent mode armed for {minutes} min")
+        asyncio.create_task(_send_silence_confirmation(event, chat_id, minutes))
+
+    is_silenced = _is_silenced(chat_id)
+    if chat_id in muted_chats:
+        return "Muted"
+    if is_silenced:
+        return "Silenced"
+    return None
 
 
 async def reply(event):
@@ -612,57 +716,9 @@ async def new_message(event):
     if event.mentioned:
         pending_mention[chat_id] = True
 
-    # --- Silent mode (groups only) --------------------------------------------
-    # An @mention/reply-to is the one override: it both warrants a reply and lifts
-    # any active mute, so clear the deadline before the silence checks below.
-    if event.is_group and event.mentioned and chat_id in silent_until:
-        silent_until.pop(chat_id, None)
-        print(f"[{chat_id}] Silent mode lifted (Rachel was tagged)")
-
-    # "Rachel shush"/"quiet"/… in a group arms silent mode for SILENT_MODE_DURATION.
-    # The trigger message is still buffered above (kept as conversation context);
-    # we just mute and confirm, and fall through so it's flushed like any message.
-    # --- DIAGNOSTIC: log each of the 4 shush-branch conditions -----------------
-    _c_is_group = bool(event.is_group)
-    _c_not_mentioned = not event.mentioned
-    _c_trigger = _is_silence_trigger(content)
-    _c_not_silenced = not _is_silenced(chat_id)
-    print(
-        f"[{chat_id}] shush-check: is_group={_c_is_group} "
-        f"not_mentioned={_c_not_mentioned} trigger={_c_trigger} "
-        f"not_silenced={_c_not_silenced} content={content!r}"
-    )
-
-    if (
-        event.is_group
-        and not event.mentioned
-        and _is_silence_trigger(content)
-        and not _is_silenced(chat_id)  # already muted: don't re-arm or re-confirm
-    ):
-        # Cancel a reply still in its REPLY_DELAY sleep so Rachel goes quiet at
-        # once. A reply already past the sleep is asyncio.shield-ed and keeps
-        # sending — that's correct; the confirmation orders behind it via the lock.
-        if chat_id in wait_tasks and not wait_tasks[chat_id].done():
-            wait_tasks[chat_id].cancel()
-
-        silent_until[chat_id] = time.monotonic() + SILENT_MODE_DURATION
-        minutes = SILENT_MODE_DURATION // 60
-        print(f"[{chat_id}] Silent mode armed for {minutes} min")
-
-        # Queue the confirmation behind the reply lock instead of sending inline,
-        # so it can't jump ahead of an in-flight reply. Known limitation: a
-        # sub-millisecond window exists where a reply has passed its REPLY_DELAY
-        # sleep and entered shielded reply() but not yet acquired the lock — the
-        # confirmation could still win the lock and send first. Rare and not worth
-        # heavier machinery.
-        asyncio.create_task(_send_silence_confirmation(event, chat_id, minutes))
-
-    # While a group is muted, don't schedule a reply (the reply pipeline never
-    # triggers). Messages are still buffered/flushed and the memory pipelines
-    # still run — only the reply timer is skipped. A tagged message cleared the
-    # deadline above, so it falls through and replies as normal.
-    if event.is_group and _is_silenced(chat_id):
-        print(f"[{chat_id}] Silenced — skipping reply scheduling")
+    suppression_mode = _handle_group_speech_control(event, content)
+    if suppression_mode is not None:
+        print(f"[{chat_id}] {suppression_mode} — skipping reply scheduling")
     else:
         # Rachel considers replying to every message — private or group, tagged or
         # not. Whether a reply is actually warranted is decided downstream by the
