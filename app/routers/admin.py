@@ -6,16 +6,21 @@ so the HTTP API and the in-Telegram admin bot stay in sync.
 
 import asyncio
 import base64
+from datetime import datetime
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from apscheduler.triggers.cron import CronTrigger
 
 from app import repository
 from app import prompts
 from app.prompts import USER_PROFILE_FIELDS
 from app.services import userfacts
 from app.services import worldview
+from app.services import proactive
+from app.telegram.client import client
 from scripts.draw_graphs import GRAPHS, render_graphs
 
 router = APIRouter()
@@ -28,6 +33,7 @@ router = APIRouter()
 # and have their own editable endpoints above.
 WORKFLOW_PROMPTS: list[tuple[str, str, str]] = [
     ("router", "Router / reply-gating", prompts.ROUTER_SYSTEM_PROMPT),
+    ("context_fetcher", "Context fetcher", prompts.CONTEXT_FETCHER_SYSTEM_PROMPT),
     ("worldview_fact_extractor", "World-view: fact extractor", prompts.FACT_EXTRACTOR_SYSTEM_PROMPT),
     ("worldview_consolidation", "World-view: consolidation", prompts.CONSOLIDATION_SYSTEM_PROMPT),
     ("userfacts_fact_extractor", "User facts: fact extractor", prompts.USER_FACT_EXTRACTOR_SYSTEM_PROMPT),
@@ -98,6 +104,11 @@ async def read_system_prompt() -> SystemPromptOut:
 
 @router.put("/responder-system-prompt", response_model=SystemPromptOut)
 async def update_system_prompt(body: SystemPromptIn) -> SystemPromptOut:
+    if "{intent}" not in body.prompt:
+        raise HTTPException(
+            status_code=422,
+            detail="Responder prompt must retain the {intent} placeholder; proactive outreach depends on it.",
+        )
     await repository.set_responder_system_prompt(body.prompt)
     return SystemPromptOut(prompt=body.prompt)
 
@@ -137,6 +148,135 @@ async def read_user_names() -> list[UserNameOut]:
 @router.get("/list-chats", response_model=list[AllChats])
 async def get_all_chat_ids() -> list[AllChats]:
     return [AllChats(**row) for row in await repository.get_all_chats()]
+
+
+# --- proactive outreach --------------------------------------------------
+
+
+class ProactiveScheduleIn(BaseModel):
+    name: str
+    chat_id: int
+    cron_expression: str
+    timezone: str = "Asia/Singapore"
+    intent: str
+    enabled: bool = True
+
+
+class ProactiveEnabledIn(BaseModel):
+    enabled: bool
+
+
+class ProactiveScheduleOut(ProactiveScheduleIn):
+    id: int
+    last_run_at: datetime | None = None
+    last_status: str | None = None
+    last_error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    next_run_at: datetime | None = None
+
+
+def _schedule_out(row: dict) -> ProactiveScheduleOut:
+    return ProactiveScheduleOut(
+        **row, next_run_at=proactive.next_run_at(row["id"])
+    )
+
+
+async def _validated_schedule_data(body: ProactiveScheduleIn) -> dict:
+    name = body.name.strip()
+    intent = body.intent.strip()
+    cron_expression = " ".join(body.cron_expression.split())
+    timezone_name = body.timezone.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="name must not be empty")
+    if not intent:
+        raise HTTPException(status_code=422, detail="intent must not be empty")
+    try:
+        zone = ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise HTTPException(status_code=422, detail=f"Invalid IANA timezone: {timezone_name!r}")
+    try:
+        CronTrigger.from_crontab(cron_expression, timezone=zone)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid five-field cron expression: {exc}")
+    try:
+        await client.get_entity(body.chat_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Rachel cannot access Telegram chat {body.chat_id}: {exc}",
+        )
+    return {
+        "name": name,
+        "chat_id": body.chat_id,
+        "cron_expression": cron_expression,
+        "timezone": timezone_name,
+        "intent": intent,
+        "enabled": body.enabled,
+    }
+
+
+@router.get("/proactive-schedules", response_model=list[ProactiveScheduleOut])
+async def list_proactive_schedules() -> list[ProactiveScheduleOut]:
+    return [_schedule_out(row) for row in await repository.get_proactive_schedules()]
+
+
+@router.post("/proactive-schedules", response_model=ProactiveScheduleOut, status_code=201)
+async def create_proactive_schedule(body: ProactiveScheduleIn) -> ProactiveScheduleOut:
+    row = await repository.create_proactive_schedule(await _validated_schedule_data(body))
+    proactive.sync_schedule_job(row)
+    return _schedule_out(row)
+
+
+@router.put("/proactive-schedules/{schedule_id}", response_model=ProactiveScheduleOut)
+async def update_proactive_schedule(
+    schedule_id: int, body: ProactiveScheduleIn
+) -> ProactiveScheduleOut:
+    row = await repository.update_proactive_schedule(
+        schedule_id, await _validated_schedule_data(body)
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Proactive schedule not found")
+    proactive.sync_schedule_job(row)
+    return _schedule_out(row)
+
+
+@router.delete("/proactive-schedules/{schedule_id}", status_code=204)
+async def delete_proactive_schedule(schedule_id: int) -> None:
+    if not await repository.delete_proactive_schedule(schedule_id):
+        raise HTTPException(status_code=404, detail="Proactive schedule not found")
+    proactive.remove_schedule_job(schedule_id)
+
+
+@router.patch(
+    "/proactive-schedules/{schedule_id}/enabled", response_model=ProactiveScheduleOut
+)
+async def set_proactive_schedule_enabled(
+    schedule_id: int, body: ProactiveEnabledIn
+) -> ProactiveScheduleOut:
+    row = await repository.update_proactive_schedule(
+        schedule_id, {"enabled": body.enabled}
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Proactive schedule not found")
+    proactive.sync_schedule_job(row)
+    return _schedule_out(row)
+
+
+@router.post("/proactive-schedules/{schedule_id}/run", response_model=ProactiveScheduleOut)
+async def run_proactive_schedule(schedule_id: int) -> ProactiveScheduleOut:
+    if await repository.get_proactive_schedule(schedule_id) is None:
+        raise HTTPException(status_code=404, detail="Proactive schedule not found")
+    if proactive.is_schedule_running(schedule_id):
+        raise HTTPException(status_code=409, detail="This schedule is already running")
+    if not await proactive.run_schedule(schedule_id):
+        if proactive.is_schedule_running(schedule_id):
+            raise HTTPException(status_code=409, detail="This schedule is already running")
+        raise HTTPException(status_code=503, detail="Proactive scheduler is not accepting runs")
+    row = await repository.get_proactive_schedule(schedule_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Proactive schedule was deleted while running")
+    return _schedule_out(row)
 
 
 @router.get("/history/{chat_id}", response_model=list[HistoryItem])

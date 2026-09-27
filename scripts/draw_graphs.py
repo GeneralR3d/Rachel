@@ -9,6 +9,7 @@ from app.services import llm, worldview, userfacts
 
 GRAPHS = {
     "graph_llm.png": ("Responder / summarizer", lambda: llm._graph),
+    "graph_proactive.png": ("Proactive outreach", lambda: llm._proactive_graph),
     "graph_worldview.png": ("World view", lambda: worldview._graph),
     "graph_userfacts.png": ("User facts / profile", lambda: userfacts._graph),
 }

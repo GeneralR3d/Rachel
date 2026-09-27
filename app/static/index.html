@@ -199,6 +199,7 @@
   <button data-tab="prompts">Prompts</button>
   <button data-tab="personality">Personality</button>
   <button data-tab="models">Models</button>
+  <button data-tab="proactive">Proactive</button>
   <button data-tab="chats">Chats</button>
   <button data-tab="users">Users</button>
   <button data-tab="worldview">World View</button>
@@ -279,6 +280,46 @@
           <div class="muted inline-note">Choose the active model for each role. Changes apply immediately (PUT).</div>
           <div class="spacer"></div>
           <div id="activeModels"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PROACTIVE OUTREACH -->
+    <section id="proactive">
+      <h2>Proactive Outreach</h2>
+      <div class="desc">Schedule intent-driven Telegram messages with five-field cron expressions. Times use the selected IANA timezone; missed runs are not replayed after downtime.</div>
+      <div class="userlayout">
+        <div class="userlist">
+          <div class="btns">
+            <button onclick="newProactiveSchedule()">New</button>
+            <button onclick="loadProactiveSchedules()" class="ghost">Reload</button>
+          </div>
+          <div id="proactiveList"></div>
+        </div>
+        <div class="userdetail">
+          <div class="detailhead">
+            <div>
+              <div class="detailname" id="proactiveFormTitle">New schedule</div>
+              <div class="muted mono" id="proactiveFormId"></div>
+            </div>
+          </div>
+          <div class="row">
+            <div><label>Name</label><input id="proactiveName" placeholder="Morning check-in"></div>
+            <div><label>Target chat</label><input id="proactiveChat" type="number" list="proactiveChatOptions" placeholder="Telegram chat ID"><datalist id="proactiveChatOptions"></datalist></div>
+          </div>
+          <div class="row">
+            <div><label>Cron (minute hour day month weekday)</label><input id="proactiveCron" class="mono" value="0 9 * * *"></div>
+            <div><label>IANA timezone</label><input id="proactiveTimezone" class="mono" value="Asia/Singapore"></div>
+          </div>
+          <label>Intent</label>
+          <textarea id="proactiveIntent" placeholder="Check in warmly about how their week is going and encourage them about their current goal."></textarea>
+          <label style="display:flex;align-items:center;gap:8px;color:var(--text)"><input id="proactiveEnabled" type="checkbox" checked style="width:auto"> Enabled</label>
+          <div class="btns">
+            <button onclick="saveProactiveSchedule()">Save</button>
+            <button id="proactiveRunBtn" onclick="runProactiveSchedule()" class="ghost" disabled>Run now</button>
+            <button id="proactiveDeleteBtn" onclick="deleteProactiveSchedule()" class="danger" disabled>Delete</button>
+          </div>
+          <div id="proactiveMeta" class="out"></div>
         </div>
       </div>
     </section>
@@ -605,12 +646,16 @@ async function resetTraits() {
 
 // --- chats (list + summary + history) -----------------------------------
 let selectedChat = null;   // currently selected chat id (string)
+let CHATS = [];
 
 async function loadChats() {
   const box = document.getElementById("chatTable");
   box.innerHTML = '<div class="muted spacer">Loading…</div>';
   try {
     const chats = await api("/list-chats");
+    CHATS = chats;
+    const options = document.getElementById("proactiveChatOptions");
+    if (options) options.innerHTML = chats.map(c => `<option value="${c.chat_id}">`).join("");
     if (!chats.length) { box.innerHTML = '<div class="muted spacer">No chats.</div>'; return; }
     let html = "<table><thead><tr><th>Chat ID</th><th>Msgs</th></tr></thead><tbody>";
     for (const c of chats) {
@@ -945,11 +990,148 @@ async function setActiveModel(role, model_string) {
   } catch (e) { toast(e.message, "err"); }
 }
 
+// --- proactive outreach -------------------------------------------------
+let PROACTIVE_SCHEDULES = [];
+let selectedProactiveSchedule = null;
+
+function formatTimestamp(value) {
+  if (!value) return "—";
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? value : d.toLocaleString();
+}
+
+async function loadProactiveSchedules() {
+  const box = document.getElementById("proactiveList");
+  box.innerHTML = '<div class="muted spacer">Loading…</div>';
+  try {
+    PROACTIVE_SCHEDULES = await api("/proactive-schedules");
+    if (!PROACTIVE_SCHEDULES.length) {
+      box.innerHTML = '<div class="muted spacer">No schedules.</div>';
+      return;
+    }
+    box.innerHTML = "";
+    for (const s of PROACTIVE_SCHEDULES) {
+      const row = document.createElement("div");
+      row.className = "traitrow" + (s.id === selectedProactiveSchedule ? " selected" : "");
+      row.dataset.sid = s.id;
+      row.onclick = () => selectProactiveSchedule(s.id);
+      row.innerHTML = `<div class="tname">${esc(s.name)}</div>
+        <div class="tval mono">${esc(s.cron_expression)} · ${esc(s.timezone)}</div>
+        <div class="tval">${s.enabled ? "enabled" : "disabled"} · next ${esc(formatTimestamp(s.next_run_at))}</div>`;
+      const toggle = document.createElement("button");
+      toggle.className = "ghost";
+      toggle.style.marginTop = "7px";
+      toggle.textContent = s.enabled ? "Disable" : "Enable";
+      toggle.onclick = event => { event.stopPropagation(); toggleProactiveSchedule(s.id, !s.enabled); };
+      row.appendChild(toggle);
+      box.appendChild(row);
+    }
+    if (selectedProactiveSchedule) {
+      const refreshed = PROACTIVE_SCHEDULES.find(s => s.id === selectedProactiveSchedule);
+      if (refreshed) renderProactiveSchedule(refreshed);
+    }
+  } catch (e) { box.innerHTML = ""; toast("Proactive: " + e.message, "err"); }
+}
+
+function newProactiveSchedule() {
+  selectedProactiveSchedule = null;
+  document.getElementById("proactiveFormTitle").textContent = "New schedule";
+  document.getElementById("proactiveFormId").textContent = "";
+  document.getElementById("proactiveName").value = "";
+  document.getElementById("proactiveChat").value = "";
+  document.getElementById("proactiveCron").value = "0 9 * * *";
+  document.getElementById("proactiveTimezone").value = "Asia/Singapore";
+  document.getElementById("proactiveIntent").value = "";
+  document.getElementById("proactiveEnabled").checked = true;
+  document.getElementById("proactiveRunBtn").disabled = true;
+  document.getElementById("proactiveDeleteBtn").disabled = true;
+  document.getElementById("proactiveMeta").textContent = "";
+  document.querySelectorAll("#proactiveList .traitrow").forEach(r => r.classList.remove("selected"));
+}
+
+function selectProactiveSchedule(id) {
+  selectedProactiveSchedule = id;
+  const schedule = PROACTIVE_SCHEDULES.find(s => s.id === id);
+  if (schedule) renderProactiveSchedule(schedule);
+  document.querySelectorAll("#proactiveList .traitrow").forEach(r =>
+    r.classList.toggle("selected", Number(r.dataset.sid) === id));
+}
+
+function renderProactiveSchedule(s) {
+  document.getElementById("proactiveFormTitle").textContent = s.name;
+  document.getElementById("proactiveFormId").textContent = "#" + s.id;
+  document.getElementById("proactiveName").value = s.name;
+  document.getElementById("proactiveChat").value = s.chat_id;
+  document.getElementById("proactiveCron").value = s.cron_expression;
+  document.getElementById("proactiveTimezone").value = s.timezone;
+  document.getElementById("proactiveIntent").value = s.intent;
+  document.getElementById("proactiveEnabled").checked = s.enabled;
+  document.getElementById("proactiveRunBtn").disabled = false;
+  document.getElementById("proactiveDeleteBtn").disabled = false;
+  document.getElementById("proactiveMeta").textContent =
+    `Next run: ${formatTimestamp(s.next_run_at)}\nLast run: ${formatTimestamp(s.last_run_at)}\nLatest result: ${s.last_status || "—"}` +
+    (s.last_error ? `\nError: ${s.last_error}` : "");
+}
+
+function proactiveFormBody() {
+  return {
+    name: document.getElementById("proactiveName").value,
+    chat_id: Number(document.getElementById("proactiveChat").value),
+    cron_expression: document.getElementById("proactiveCron").value,
+    timezone: document.getElementById("proactiveTimezone").value,
+    intent: document.getElementById("proactiveIntent").value,
+    enabled: document.getElementById("proactiveEnabled").checked,
+  };
+}
+
+async function saveProactiveSchedule() {
+  const body = proactiveFormBody();
+  if (!Number.isSafeInteger(body.chat_id)) { toast("Enter a valid numeric chat ID", "err"); return; }
+  try {
+    const path = selectedProactiveSchedule ? "/proactive-schedules/" + selectedProactiveSchedule : "/proactive-schedules";
+    const saved = await api(path, { method: selectedProactiveSchedule ? "PUT" : "POST", body });
+    selectedProactiveSchedule = saved.id;
+    toast("Schedule saved", "ok");
+    await loadProactiveSchedules();
+    selectProactiveSchedule(saved.id);
+  } catch (e) { toast("Save: " + e.message, "err"); }
+}
+
+async function toggleProactiveSchedule(id, enabled) {
+  try {
+    await api(`/proactive-schedules/${id}/enabled`, { method: "PATCH", body: { enabled } });
+    toast(enabled ? "Schedule enabled" : "Schedule disabled", "ok");
+    await loadProactiveSchedules();
+  } catch (e) { toast("Toggle: " + e.message, "err"); }
+}
+
+async function runProactiveSchedule() {
+  if (!selectedProactiveSchedule) return;
+  const btn = document.getElementById("proactiveRunBtn");
+  btn.disabled = true; btn.textContent = "Running…";
+  try {
+    const result = await api(`/proactive-schedules/${selectedProactiveSchedule}/run`, { method: "POST" });
+    toast(result.last_status === "succeeded" ? "Outreach sent" : "Outreach failed", result.last_status === "succeeded" ? "ok" : "err");
+    await loadProactiveSchedules();
+  } catch (e) { toast("Run now: " + e.message, "err"); }
+  finally { btn.disabled = false; btn.textContent = "Run now"; }
+}
+
+async function deleteProactiveSchedule() {
+  if (!selectedProactiveSchedule || !confirm("Delete this proactive schedule?")) return;
+  try {
+    await api("/proactive-schedules/" + selectedProactiveSchedule, { method: "DELETE" });
+    toast("Schedule deleted", "ok");
+    newProactiveSchedule();
+    await loadProactiveSchedules();
+  } catch (e) { toast("Delete: " + e.message, "err"); }
+}
+
 // --- tabs ---------------------------------------------------------------
 function showTab(name) {
   document.querySelectorAll("main > section").forEach(s =>
     s.classList.toggle("active", s.id === name));
-  document.querySelector("main").classList.toggle("wide", name === "prompts" || name === "chats" || name === "users" || name === "personality" || name === "architecture" || name === "models");
+  document.querySelector("main").classList.toggle("wide", name === "prompts" || name === "chats" || name === "users" || name === "personality" || name === "architecture" || name === "models" || name === "proactive");
   document.querySelectorAll("#tabs button").forEach(b =>
     b.classList.toggle("active", b.dataset.tab === name));
   if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name);
@@ -971,6 +1153,7 @@ loadPrompts();
 loadTraits();
 loadModels();
 loadChats();
+loadProactiveSchedules();
 loadProfileFields().then(loadUsers);
 </script>
 </body>

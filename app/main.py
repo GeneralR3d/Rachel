@@ -17,6 +17,7 @@ from app.config import get_settings
 from app.database import dispose_engine
 from app.repository import ensure_models_seeded, ensure_schedule_seeded, ensure_system_prompts_seeded, ensure_traits_seeded, upsert_user
 from app.routers import admin
+from app.services.proactive import start_proactive_scheduler, stop_proactive_scheduler
 from app.telegram.bot import bot
 from app.telegram.client import client, flush_all_buffers
 
@@ -46,11 +47,14 @@ async def lifespan(app: FastAPI):
         last_name=getattr(me, "last_name", None),
         username=getattr(me, "username", None),
     )
+    await start_proactive_scheduler()
 
     try:
         yield
     finally:
         # shutdown
+        logger.info("Stopping proactive scheduler...")
+        await stop_proactive_scheduler()
         logger.info("Flushing message buffers...")
         await flush_all_buffers()
         logger.info("Disconnecting Telethon clients...")

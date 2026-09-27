@@ -33,7 +33,7 @@ from app.repository import (
     set_summary,
     upsert_user,
 )
-from app.services.llm import get_chat_mood, get_response, set_chat_mood
+from app.services.llm import get_chat_mood, get_proactive_response, get_response, set_chat_mood
 from app.services.memory import update_memories
 from app.telegram.bot import ADMIN
 from app.utils import parse_history
@@ -95,6 +95,9 @@ last_message_time: Dict[int, float] = {}
 # prevents two replies from interleaving their sends and from reading stale
 # context (Rachel not "seeing" what she just said). Created lazily per chat_id.
 reply_locks: Dict[int, asyncio.Lock] = {}
+# Short-lived per-chat lock protecting buffer initialization, appends, snapshots,
+# flushes and pops. LLM generation remains under reply_locks, never this lock.
+buffer_locks: Dict[int, asyncio.Lock] = {}
 # Per-chat causal watermark: the highest telegram_message_id Rachel has already
 # responded to (max id of the context she last replied against). Passed to
 # get_response so the divider partitions on "what's new since I last replied"
@@ -140,6 +143,149 @@ def _insert_by_message_id(buffer: List[BufferedMessage], msg: BufferedMessage) -
     """
     ids = [m.telegram_message_id for m in buffer]
     buffer.insert(bisect.bisect_left(ids, msg.telegram_message_id), msg)
+
+
+async def _seed_chat_buffer_locked(chat_id: int, me_id: int) -> List[BufferedMessage]:
+    """Create a chat buffer from persisted history. Caller holds buffer_locks[chat_id]."""
+    buffer: List[BufferedMessage] = []
+    for h in await get_history(chat_id, N_PAST_MSG_REQUIRED):
+        is_bot = h["sender_user_id"] == me_id
+        buffer.append(
+            BufferedMessage(
+                telegram_message_id=h["telegram_message_id"],
+                sender_user_id=h["sender_user_id"],
+                sender_name=BOT_NAME if is_bot else h["sender"],
+                content=h["content"],
+                is_persisted=True,
+                reason=h.get("reason"),
+            )
+        )
+    current_messages_buffer[chat_id] = buffer
+    return buffer
+
+
+async def _append_to_buffer(chat_id: int, message: BufferedMessage, me_id: int) -> int:
+    """Atomically seed if needed, insert one message, and return buffer length.
+    Without it, this interleaving was possible:
+  1. An inbound message starts and sees no buffer.
+  2. It awaits get_history(...).
+  3. A flush or another inbound task runs while it is awaiting.
+  4. The other task creates, flushes, or changes the buffer.
+  5. The first task resumes and overwrites/replaces the buffer with its stale seeded list, potentially dropping the other message.
+
+    """
+    async with buffer_locks.setdefault(chat_id, asyncio.Lock()):
+        buffer = current_messages_buffer.get(chat_id)
+        if buffer is None:
+            buffer = await _seed_chat_buffer_locked(chat_id, me_id)
+        _insert_by_message_id(buffer, message)
+        return len(buffer)
+
+
+async def _load_summary_and_mood(chat_id: int) -> str:
+
+    if chat_id in pending_summaries:
+        return pending_summaries[chat_id]
+    # First contact for this chat since load — pull the persisted
+    # summary *and* mood, re-seeding the in-memory mood so it survives
+    # restarts (otherwise the responder would reset to the default mood).
+    current_summary, persisted_mood = await get_summary_mood(chat_id)
+    # Coerce a missing summary to "" — the chat_state.summary column is
+    # NOT NULL (with a "" server default), so a None seeded here would
+    # blow up set_summary() at flush time if the summarizer returns NIL.
+
+    current_summary = current_summary or ""
+    pending_summaries[chat_id] = current_summary
+    if persisted_mood:
+        set_chat_mood(chat_id, persisted_mood)
+        print(f"[{chat_id}] Restored mood from DB: {persisted_mood}")
+    return current_summary
+
+
+async def _snapshot_context(chat_id: int, me_id: int) -> tuple[List[BufferedMessage], List[dict], Dict[int, str]]:
+    """Return the latest context and participant map from an atomically seeded buffer."""
+    async with buffer_locks.setdefault(chat_id, asyncio.Lock()):
+        buffer = current_messages_buffer.get(chat_id)
+        if buffer is None:
+            buffer = await _seed_chat_buffer_locked(chat_id, me_id)
+        context_msgs = list(buffer[-N_PAST_MSG_REQUIRED:])
+    context = [m.to_llm_dict() for m in context_msgs]
+    # Unique senders in the context (excluding Rachel herself) as an
+    # id -> name map, so the responder can pull each participant's stored
+    # facts/preferences and render them by name. Later messages win on name
+    # collisions, which is fine — we just need a human-readable label.
+    senders = {
+        m.sender_user_id: m.sender_name
+        for m in context_msgs
+        if m.sender_user_id and m.sender_user_id != me_id
+    }
+    return context_msgs, context, senders
+
+
+async def _send_paragraphs(chat_id: int, response: str) -> int | None:
+    """Send a generated response as Telegram paragraph bursts; return first message id."""
+    first_message_id = None
+    for i, raw_text in enumerate(response.split("\n\n")):
+        if not raw_text:
+            continue
+        if i != 0:
+            async with client.action(chat_id, "typing"):
+                await asyncio.sleep(len(raw_text) / TYPING_SPEED)
+        sent = await client.send_message(chat_id, raw_text)
+        if first_message_id is None:
+            first_message_id = sent.id
+    return first_message_id
+
+
+async def _append_or_persist_bot_message(
+    chat_id: int,
+    me_id: int,
+    message_id: int,
+    response: str,
+    reason: str,
+) -> None:
+    """Append a sent reply, or persist it directly if a concurrent flush popped the buffer."""
+    async with buffer_locks.setdefault(chat_id, asyncio.Lock()):
+        buffer = current_messages_buffer.get(chat_id)
+        # Insert at the reply's send-order position, not the tail: messages
+        # that arrived during the slow send are already buffered with higher
+        # ids, and the reply belongs ahead of them (see _insert_by_message_id).
+        if buffer is not None:
+            _insert_by_message_id(
+                buffer,
+                BufferedMessage(
+                    telegram_message_id=message_id,
+                    sender_user_id=me_id,
+                    sender_name=BOT_NAME,
+                    content=response,
+                    is_persisted=False,
+                    reason=reason,
+                ),
+            )
+            return
+
+        # The buffer was flushed + popped (e.g. MAX_BUFFER_LEN or the blackout
+        # timer) while this shielded reply was still sending. Persist the reply
+        # directly so it isn't lost — it'll re-enter context on the next
+        # message's DB re-seed.
+
+        await add_history_batch(
+            chat_ids=[chat_id],
+            sender_user_ids=[me_id],
+            contents=[response],
+            telegram_message_ids=[message_id],
+            reasons=[reason],
+        )
+        print(f"[{chat_id}] Buffer flushed mid-generation; persisted reply directly to DB")
+
+
+def _reset_flush_timer(chat_id: int) -> None:
+    task = flush_tasks.get(chat_id)
+    if task is not None and not task.done():
+        task.cancel()
+    flush_tasks[chat_id] = asyncio.create_task(
+        finalize_conversation(chat_id, CHAT_BLACKOUT_TIME)
+    )
 
 
 def _message_content(event) -> str:
@@ -331,7 +477,6 @@ async def _reply(event):
     Persistence is handled by finalize_conversation().
     """
     chat_id = event.chat_id
-    buffer = current_messages_buffer[chat_id]
     me = await client.get_me()
 
     if not client.is_connected():
@@ -339,24 +484,8 @@ async def _reply(event):
         return
 
     async with client.action(event.chat_id, "typing"):  # pyright: ignore
-        if chat_id in pending_summaries:
-            current_summary = pending_summaries.get(chat_id)
-        else:
-            # First contact for this chat since load — pull the persisted
-            # summary *and* mood, re-seeding the in-memory mood so it survives
-            # restarts (otherwise the responder would reset to the default mood).
-            current_summary, persisted_mood = await get_summary_mood(chat_id)
-            # Coerce a missing summary to "" — the chat_state.summary column is
-            # NOT NULL (with a "" server default), so a None seeded here would
-            # blow up set_summary() at flush time if the summarizer returns NIL.
-            current_summary = current_summary or ""
-            pending_summaries[chat_id] = current_summary
-            if persisted_mood:
-                set_chat_mood(chat_id, persisted_mood)
-                print(f"[{chat_id}] Restored mood from DB: {persisted_mood}")
-            
-        context_msgs = buffer[-N_PAST_MSG_REQUIRED:]
-        context = [m.to_llm_dict() for m in context_msgs]
+        current_summary = await _load_summary_and_mood(chat_id)
+        context_msgs, context, senders = await _snapshot_context(chat_id, me.id)
         # Causal watermark for the divider: the highest id in the context Rachel
         # is about to respond against. Anything that arrives later (even mid-send,
         # which by send-time id sorts behind her reply) counts as new next time.
@@ -366,16 +495,6 @@ async def _reply(event):
         if context_msgs:
             new_watermark = max(m.telegram_message_id for m in context_msgs)
             responded_watermark[chat_id] = max(watermark or 0, new_watermark)
-        # Unique senders in the context (excluding Rachel herself) as an
-        # id -> name map, so the responder can pull each participant's stored
-        # facts/preferences and render them by name. Later messages win on name
-        # collisions, which is fine — we just need a human-readable label.
-        senders = {
-            m.sender_user_id: m.sender_name
-            for m in context_msgs
-            if m.sender_user_id and m.sender_user_id != me.id
-        }
-
         # Force a reply (skip the router entirely) only when Rachel was directly
         # tagged/replied-to in a group. In a 1-on-1 DM (not is_group) she still
         # runs the router, but with the PM-specific gate that only suppresses
@@ -450,47 +569,11 @@ async def _reply(event):
     # disagreeing with the live buffer's true append order. Low-impact (only
     # after a flush + re-seed). Proper fix: persist each paragraph as its own
     # row with its own sent.id.
-    bot_message_id = None
-    for i, raw_text in enumerate(response.split("\n\n")):
-        if raw_text == "":
-            continue
-        wait = len(raw_text) / TYPING_SPEED
-        if i != 0: #dont need to wait before sending very first msg
-            async with client.action(event.chat_id, "typing"):  # pyright: ignore
-                await asyncio.sleep(wait)
-        sent = await event.respond(raw_text)
-        if bot_message_id is None:
-            bot_message_id = sent.id
-
+    bot_message_id = await _send_paragraphs(chat_id, response)
     if bot_message_id is not None:
-        if chat_id in current_messages_buffer:
-            # Insert at the reply's send-order position, not the tail: messages
-            # that arrived during the slow send are already buffered with higher
-            # ids, and the reply belongs ahead of them (see _insert_by_message_id).
-            _insert_by_message_id(
-                current_messages_buffer[chat_id],
-                BufferedMessage(
-                    telegram_message_id=bot_message_id,
-                    sender_user_id=me.id,
-                    sender_name=BOT_NAME,
-                    content=response,
-                    is_persisted=False,
-                    reason=response_reason,
-                ),
-            )
-        else:
-            # The buffer was flushed + popped (e.g. MAX_BUFFER_LEN or the blackout
-            # timer) while this shielded reply was still sending. Persist the reply
-            # directly so it isn't lost — it'll re-enter context on the next
-            # message's DB re-seed.
-            await add_history_batch(
-                chat_ids=[chat_id],
-                sender_user_ids=[me.id],
-                contents=[response],
-                telegram_message_ids=[bot_message_id],
-                reasons=[response_reason],
-            )
-            print(f"[{chat_id}] Buffer flushed mid-reply; persisted reply directly to DB")
+        await _append_or_persist_bot_message(
+            chat_id, me.id, bot_message_id, response, response_reason
+        )
 
 
 async def wait_before_reply(event, delay: int):
@@ -507,28 +590,99 @@ async def wait_before_reply(event, delay: int):
         pass  # Outer task was cancelled but reply() continues shielded
 
 
-async def _flush_chat(chat_id: int) -> None:
-    """Persist all unpersisted buffer messages for one chat and clear its entry."""
-    to_persist = [m for m in current_messages_buffer.get(chat_id, []) if not m.is_persisted]
+async def _wait_for_reactive_and_silence(chat_id: int) -> None:
+    """Wait until no delayed reactive reply or group silent period is active."""
+    while True:
+        reactive = wait_tasks.get(chat_id)
+        if reactive is not None and reactive is not asyncio.current_task() and not reactive.done():
+            await asyncio.gather(asyncio.shield(reactive), return_exceptions=True)
+            continue
+        if _is_silenced(chat_id):
+            deadline = silent_until.get(chat_id, time.monotonic())
+            # Poll briefly so an @mention that lifts silent mode wakes outreach
+            # promptly instead of waiting out the original full mute duration.
+            await asyncio.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+            continue
+        return
 
-    if to_persist:
-        await add_history_batch(
-            chat_ids=[chat_id] * len(to_persist),
-            sender_user_ids=[m.sender_user_id for m in to_persist],
-            contents=[m.content for m in to_persist],
-            telegram_message_ids=[m.telegram_message_id for m in to_persist],
-            reasons=[m.reason for m in to_persist],
+
+async def send_proactive_message(chat_id: int, intent: str, schedule_id: int) -> None:
+    """Generate and send one scheduled outreach using the normal chat lifecycle."""
+    await _wait_for_reactive_and_silence(chat_id)
+    lock = reply_locks.setdefault(chat_id, asyncio.Lock())
+
+    # Conditions can change between the first check and lock acquisition. If a
+    # reactive task or silence appeared, release and defer before trying again.
+    while True:
+        await lock.acquire()
+        reactive = wait_tasks.get(chat_id)
+        if (
+            (reactive is not None and reactive is not asyncio.current_task() and not reactive.done())
+            or _is_silenced(chat_id)
+        ):
+            lock.release()
+            await _wait_for_reactive_and_silence(chat_id)
+            continue
+        break
+
+    try:
+        if not client.is_connected():
+            raise RuntimeError("Telegram client is disconnected")
+        me = await client.get_me()
+        current_summary = await _load_summary_and_mood(chat_id)
+        _context_msgs, context, senders = await _snapshot_context(chat_id, me.id)
+        async with client.action(chat_id, "typing"):
+            response, response_reason, _load_time = await get_proactive_response(
+                history=context,
+                intent=intent,
+                current_summary=current_summary,
+                chat_id=chat_id,
+                senders=senders,
+            )
+        if not response.strip():
+            raise RuntimeError("Proactive responder returned empty content")
+        message_id = await _send_paragraphs(chat_id, response)
+        if message_id is None:
+            raise RuntimeError("Proactive response contained no sendable content")
+        await _append_or_persist_bot_message(
+            chat_id, me.id, message_id, response, response_reason
         )
-        print(f"[{chat_id}] Flushed {len(to_persist)} messages to DB")
+        last_message_time[chat_id] = time.time()
+        _reset_flush_timer(chat_id)
+        print(f"[{chat_id}] Proactive schedule {schedule_id} sent")
+    finally:
+        lock.release()
 
-    if chat_id in pending_summaries:
-        await set_summary(chat_id, pending_summaries.pop(chat_id), get_chat_mood(chat_id))
-        print(f"[{chat_id}] Flushed summary + mood to DB")
 
-    #TODO: fix this gap. Any messages that arrive between these will be lost.
+async def _flush_chat(
+    chat_id: int, *, capture: bool = False
+) -> tuple[List[dict], str | None]:
+    """Atomically persist and pop one chat buffer, optionally returning its snapshot."""
+    async with buffer_locks.setdefault(chat_id, asyncio.Lock()):
+        buffer = current_messages_buffer.get(chat_id, [])
+        conversation = [m.to_llm_dict_full() for m in buffer] if capture else []
+        summary = pending_summaries.get(chat_id)
+        if capture and summary is None:
+            summary = await get_summary(chat_id)
+        to_persist = [m for m in buffer if not m.is_persisted]
 
-    current_messages_buffer.pop(chat_id, None)
-    last_message_time.pop(chat_id, None)
+        if to_persist:
+            await add_history_batch(
+                chat_ids=[chat_id] * len(to_persist),
+                sender_user_ids=[m.sender_user_id for m in to_persist],
+                contents=[m.content for m in to_persist],
+                telegram_message_ids=[m.telegram_message_id for m in to_persist],
+                reasons=[m.reason for m in to_persist],
+            )
+            print(f"[{chat_id}] Flushed {len(to_persist)} messages to DB")
+
+        if chat_id in pending_summaries:
+            await set_summary(chat_id, pending_summaries.pop(chat_id), get_chat_mood(chat_id))
+            print(f"[{chat_id}] Flushed summary + mood to DB")
+
+        current_messages_buffer.pop(chat_id, None)
+        last_message_time.pop(chat_id, None)
+        return conversation, summary
 
 
 async def finalize_conversation(chat_id: int, delay: float):
@@ -542,15 +696,11 @@ async def finalize_conversation(chat_id: int, delay: float):
     path, which calls _flush_chat directly).
     """
     await asyncio.sleep(delay)
-    conversation = [m.to_llm_dict_full() for m in current_messages_buffer.get(chat_id, [])]
-    # Snapshot the conversation summary before _flush_chat pops it from
-    # pending_summaries; falls back to the persisted summary in DB.
-    summary = pending_summaries.get(chat_id) or await get_summary(chat_id)
     # Memory-pipeline watermark: only messages newer than this are extracted from
     # (older ones were already processed in a previous finalize). Read before the
     # pipelines run and passed in; both share this single per-chat value.
     last_processed_id = await get_last_processed_message_id(chat_id)
-    await _flush_chat(chat_id)
+    conversation, summary = await _flush_chat(chat_id, capture=True)
     if conversation:
         asyncio.create_task(update_memories(conversation, summary, chat_id, last_processed_id))
         # Advance the watermark once to the newest message we just handed off, so
@@ -650,26 +800,7 @@ async def new_message(event):
     chat_id = event.chat_id
     print(f"[{chat_id}] new message received")
 
-    # On first contact for this chat, pre-load recent history into the buffer
-    if chat_id not in current_messages_buffer:
-        current_messages_buffer[chat_id] = []
-        # Tag Rachel's own past messages by id, not by resolved name: get_history
-        # resolves her turns to her Telegram first name (via COALESCE), which need
-        # not equal BOT_NAME. The downstream partition/AIMessage logic keys off
-        # sender == BOT_NAME, so normalize her seeded turns to BOT_NAME here.
-        me = await client.get_me()
-        past = await get_history(chat_id, N_PAST_MSG_REQUIRED)
-        for h in past:
-            is_bot = h["sender_user_id"] == me.id
-            current_messages_buffer[chat_id].append(
-                BufferedMessage(
-                    telegram_message_id=h["telegram_message_id"],
-                    sender_user_id=h["sender_user_id"],
-                    sender_name=BOT_NAME if is_bot else h["sender"],
-                    content=h["content"],
-                    is_persisted=True,
-                )
-            )
+    me = await client.get_me()
 
     sender = await event.get_sender()
     # Prioritize first name, better for summary and fact extraction
@@ -697,16 +828,18 @@ async def new_message(event):
         print(f"[{chat_id}] empty message skipped")
         return
 
-    current_messages_buffer[chat_id].append(
+    buffer_len = await _append_to_buffer(
+        chat_id,
         BufferedMessage(
             telegram_message_id=event.message.id,
             sender_user_id=sender.id if sender else 0,
             sender_name=event_name,
             content=content,
             is_persisted=False,
-        )
+        ),
+        me.id,
     )
-    print(f"[{chat_id}] buffer length: {len(current_messages_buffer[chat_id])}")
+    print(f"[{chat_id}] buffer length: {buffer_len}")
 
     last_message_time[chat_id] = time.time()
 
@@ -730,16 +863,14 @@ async def new_message(event):
         wait_tasks[chat_id] = asyncio.create_task(wait_before_reply(event, REPLY_DELAY))
 
     # Always reset the flush timer: persist buffer 60 s after the last message
-    if chat_id in flush_tasks and not flush_tasks[chat_id].done():
-        flush_tasks[chat_id].cancel()
-    flush_tasks[chat_id] = asyncio.create_task(finalize_conversation(chat_id, CHAT_BLACKOUT_TIME))
+    _reset_flush_timer(chat_id)
 
     # Hard cap, enforced on every incoming message (not just when Rachel
     # replies): a busy group where she is never tagged would otherwise keep
     # resetting the 60 s flush timer forever and grow the buffer unbounded.
     # Override the timer with an immediate finalize (delay 0) so the buffer is
     # persisted and the memory pipelines still run on the dialogue so far.
-    if len(current_messages_buffer.get(chat_id, [])) >= MAX_BUFFER_LEN:
+    if buffer_len >= MAX_BUFFER_LEN:
         print(f"[{chat_id}] Buffer hit MAX_BUFFER_LEN ({MAX_BUFFER_LEN}), flushing immediately")
         if chat_id in flush_tasks and not flush_tasks[chat_id].done():
             flush_tasks[chat_id].cancel()
