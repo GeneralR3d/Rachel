@@ -152,6 +152,43 @@
   .spacer { height: 6px; }
   .inline-note { font-size: 11px; color: var(--muted); margin-top: 6px; }
 
+  /* proactive tab: the sidebar switches between schedules and destinations */
+  .proactive-tabs { display: flex; width: 100%; margin: 12px 0 10px; }
+  .proactive-tabs button { flex: 1; }
+  .proactive-panel[hidden] { display: none; }
+  .chat-search { margin-bottom: 8px; }
+  .chat-picker {
+    max-height: calc(75vh - 150px); overflow: auto;
+    border: 1px solid var(--border); border-radius: 8px;
+  }
+  .chatpick {
+    display: block; width: 100%; padding: 11px 12px;
+    border: 0; border-bottom: 1px solid var(--border); border-radius: 0;
+    background: transparent; color: var(--text); text-align: left;
+    white-space: normal;
+  }
+  .chatpick:last-child { border-bottom: 0; }
+  .chatpick:hover { background: var(--panel-2); }
+  .chatpick.selected {
+    background: rgba(124,156,255,.10);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .chatpick-name { display: block; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+  .chatpick-meta {
+    display: flex; justify-content: space-between; gap: 8px;
+    margin-top: 3px; color: var(--muted); font-size: 11px;
+  }
+  .target-choice {
+    display: flex; align-items: center; justify-content: space-between; gap: 14px;
+    width: 100%; min-height: 38px; padding: 8px 11px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel-2); color: var(--text); text-align: left;
+  }
+  .target-choice:hover { border-color: var(--accent-2); background: var(--panel-2); }
+  .target-choice .target-name { display: block; font-size: 13px; font-weight: 500; }
+  .target-choice .target-id { display: block; color: var(--muted); font-size: 11px; margin-top: 1px; }
+  .target-choice .target-action { color: var(--accent); font-size: 11px; flex: none; }
+
   /* users tab: list on the left, detail on the right */
   .userlayout { display: flex; gap: 18px; align-items: flex-start; }
   .userlist { flex: none; width: 300px; position: sticky; top: 100px; align-self: flex-start; }
@@ -294,7 +331,17 @@
             <button onclick="newProactiveSchedule()">New</button>
             <button onclick="loadProactiveSchedules()" class="ghost">Reload</button>
           </div>
-          <div id="proactiveList"></div>
+          <div class="seg proactive-tabs" role="tablist" aria-label="Proactive sidebar">
+            <button id="proactiveSchedulesTab" class="active" role="tab" aria-selected="true" onclick="showProactiveSidebar('schedules')">Schedules</button>
+            <button id="proactiveChatsTab" role="tab" aria-selected="false" onclick="showProactiveSidebar('chats')">Chats</button>
+          </div>
+          <div id="proactiveSchedulesPanel" class="proactive-panel" role="tabpanel">
+            <div id="proactiveList"></div>
+          </div>
+          <div id="proactiveChatsPanel" class="proactive-panel" role="tabpanel" hidden>
+            <input id="proactiveChatSearch" class="chat-search" type="search" placeholder="Search name or Telegram ID" aria-label="Search Telegram chats" oninput="renderProactiveChatList()">
+            <div id="proactiveChatList" class="chat-picker"></div>
+          </div>
         </div>
         <div class="userdetail">
           <div class="detailhead">
@@ -305,7 +352,17 @@
           </div>
           <div class="row">
             <div><label>Name</label><input id="proactiveName" placeholder="Morning check-in"></div>
-            <div><label>Target chat</label><input id="proactiveChat" type="number" list="proactiveChatOptions" placeholder="Telegram chat ID"><datalist id="proactiveChatOptions"></datalist></div>
+            <div>
+              <label>Target chat</label>
+              <input id="proactiveChat" type="hidden">
+              <button id="proactiveChatChoice" type="button" class="target-choice" onclick="showProactiveSidebar('chats')">
+                <span>
+                  <span id="proactiveChatName" class="target-name">Choose a chat</span>
+                  <span id="proactiveChatId" class="target-id mono">No Telegram chat selected</span>
+                </span>
+                <span class="target-action">Choose</span>
+              </button>
+            </div>
           </div>
           <div class="row">
             <div><label>Cron (minute hour day month weekday)</label><input id="proactiveCron" class="mono" value="0 9 * * *"></div>
@@ -654,12 +711,14 @@ async function loadChats() {
   try {
     const chats = await api("/list-chats");
     CHATS = chats;
-    const options = document.getElementById("proactiveChatOptions");
-    if (options) options.innerHTML = chats.map(c => `<option value="${c.chat_id}">`).join("");
+    renderProactiveChatList();
+    renderProactiveTarget();
+    renderProactiveScheduleList();
     if (!chats.length) { box.innerHTML = '<div class="muted spacer">No chats.</div>'; return; }
-    let html = "<table><thead><tr><th>Chat ID</th><th>Msgs</th></tr></thead><tbody>";
+    let html = "<table><thead><tr><th>Name</th><th>Chat ID</th><th>Msgs</th></tr></thead><tbody>";
     for (const c of chats) {
       html += `<tr class="clickable" data-cid="${c.chat_id}" onclick="selectChat('${c.chat_id}')">
+        <td>${esc(c.chat_name || "Name unavailable")}</td>
         <td class="mono">${c.chat_id}</td><td>${c.message_count}</td></tr>`;
     }
     html += "</tbody></table>";
@@ -1005,32 +1064,101 @@ async function loadProactiveSchedules() {
   box.innerHTML = '<div class="muted spacer">Loading…</div>';
   try {
     PROACTIVE_SCHEDULES = await api("/proactive-schedules");
-    if (!PROACTIVE_SCHEDULES.length) {
-      box.innerHTML = '<div class="muted spacer">No schedules.</div>';
-      return;
-    }
-    box.innerHTML = "";
-    for (const s of PROACTIVE_SCHEDULES) {
-      const row = document.createElement("div");
-      row.className = "traitrow" + (s.id === selectedProactiveSchedule ? " selected" : "");
-      row.dataset.sid = s.id;
-      row.onclick = () => selectProactiveSchedule(s.id);
-      row.innerHTML = `<div class="tname">${esc(s.name)}</div>
-        <div class="tval mono">${esc(s.cron_expression)} · ${esc(s.timezone)}</div>
-        <div class="tval">${s.enabled ? "enabled" : "disabled"} · next ${esc(formatTimestamp(s.next_run_at))}</div>`;
-      const toggle = document.createElement("button");
-      toggle.className = "ghost";
-      toggle.style.marginTop = "7px";
-      toggle.textContent = s.enabled ? "Disable" : "Enable";
-      toggle.onclick = event => { event.stopPropagation(); toggleProactiveSchedule(s.id, !s.enabled); };
-      row.appendChild(toggle);
-      box.appendChild(row);
-    }
+    renderProactiveScheduleList();
     if (selectedProactiveSchedule) {
       const refreshed = PROACTIVE_SCHEDULES.find(s => s.id === selectedProactiveSchedule);
       if (refreshed) renderProactiveSchedule(refreshed);
     }
   } catch (e) { box.innerHTML = ""; toast("Proactive: " + e.message, "err"); }
+}
+
+function renderProactiveScheduleList() {
+  const box = document.getElementById("proactiveList");
+  if (!box) return;
+  if (!PROACTIVE_SCHEDULES.length) {
+    box.innerHTML = '<div class="muted spacer">No schedules.</div>';
+    return;
+  }
+  box.innerHTML = "";
+  for (const s of PROACTIVE_SCHEDULES) {
+    const chat = CHATS.find(c => String(c.chat_id) === String(s.chat_id));
+    const row = document.createElement("div");
+    row.className = "traitrow" + (s.id === selectedProactiveSchedule ? " selected" : "");
+    row.dataset.sid = s.id;
+    row.onclick = () => selectProactiveSchedule(s.id);
+    row.innerHTML = `<div class="tname">${esc(s.name)}</div>
+      <div class="tval">${esc(chat?.chat_name || "Name unavailable")} <span class="mono">${esc(s.chat_id)}</span></div>
+      <div class="tval mono">${esc(s.cron_expression)} · ${esc(s.timezone)}</div>
+      <div class="tval">${s.enabled ? "enabled" : "disabled"} · next ${esc(formatTimestamp(s.next_run_at))}</div>`;
+    const toggle = document.createElement("button");
+    toggle.className = "ghost";
+    toggle.style.marginTop = "7px";
+    toggle.textContent = s.enabled ? "Disable" : "Enable";
+    toggle.onclick = event => { event.stopPropagation(); toggleProactiveSchedule(s.id, !s.enabled); };
+    row.appendChild(toggle);
+    box.appendChild(row);
+  }
+}
+
+function showProactiveSidebar(view) {
+  const showChats = view === "chats";
+  document.getElementById("proactiveSchedulesPanel").hidden = showChats;
+  document.getElementById("proactiveChatsPanel").hidden = !showChats;
+  document.getElementById("proactiveSchedulesTab").classList.toggle("active", !showChats);
+  document.getElementById("proactiveSchedulesTab").setAttribute("aria-selected", String(!showChats));
+  document.getElementById("proactiveChatsTab").classList.toggle("active", showChats);
+  document.getElementById("proactiveChatsTab").setAttribute("aria-selected", String(showChats));
+  if (showChats) {
+    renderProactiveChatList();
+    document.getElementById("proactiveChatSearch").focus();
+  }
+}
+
+function renderProactiveChatList() {
+  const box = document.getElementById("proactiveChatList");
+  if (!box) return;
+  const query = (document.getElementById("proactiveChatSearch")?.value || "").trim().toLocaleLowerCase();
+  const chats = CHATS.filter(chat =>
+    !query || String(chat.chat_id).includes(query) || (chat.chat_name || "").toLocaleLowerCase().includes(query));
+  if (!CHATS.length) {
+    box.innerHTML = '<div class="muted spacer">No chats with saved history.</div>';
+    return;
+  }
+  if (!chats.length) {
+    box.innerHTML = '<div class="muted spacer">No chats match that search.</div>';
+    return;
+  }
+  const selectedId = document.getElementById("proactiveChat").value;
+  box.innerHTML = "";
+  for (const chat of chats) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "chatpick" + (String(chat.chat_id) === selectedId ? " selected" : "");
+    row.dataset.cid = chat.chat_id;
+    row.setAttribute("aria-pressed", String(String(chat.chat_id) === selectedId));
+    row.innerHTML = `<span class="chatpick-name">${esc(chat.chat_name || "Name unavailable")}</span>
+      <span class="chatpick-meta"><span class="mono">${esc(chat.chat_id)}</span><span>${esc(chat.message_count)} messages</span></span>`;
+    row.onclick = () => selectProactiveChat(chat.chat_id);
+    box.appendChild(row);
+  }
+}
+
+function selectProactiveChat(chatId) {
+  document.getElementById("proactiveChat").value = String(chatId);
+  renderProactiveTarget();
+  renderProactiveChatList();
+}
+
+function renderProactiveTarget() {
+  const chatId = document.getElementById("proactiveChat")?.value || "";
+  const chat = CHATS.find(c => String(c.chat_id) === chatId);
+  document.getElementById("proactiveChatName").textContent = chatId
+    ? (chat?.chat_name || "Name unavailable")
+    : "Choose a chat";
+  document.getElementById("proactiveChatId").textContent = chatId
+    ? `Telegram ID ${chatId}`
+    : "No Telegram chat selected";
+  document.querySelector("#proactiveChatChoice .target-action").textContent = chatId ? "Change" : "Choose";
 }
 
 function newProactiveSchedule() {
@@ -1047,6 +1175,9 @@ function newProactiveSchedule() {
   document.getElementById("proactiveDeleteBtn").disabled = true;
   document.getElementById("proactiveMeta").textContent = "";
   document.querySelectorAll("#proactiveList .traitrow").forEach(r => r.classList.remove("selected"));
+  document.getElementById("proactiveChatSearch").value = "";
+  renderProactiveTarget();
+  showProactiveSidebar("chats");
 }
 
 function selectProactiveSchedule(id) {
@@ -1055,6 +1186,7 @@ function selectProactiveSchedule(id) {
   if (schedule) renderProactiveSchedule(schedule);
   document.querySelectorAll("#proactiveList .traitrow").forEach(r =>
     r.classList.toggle("selected", Number(r.dataset.sid) === id));
+  showProactiveSidebar("schedules");
 }
 
 function renderProactiveSchedule(s) {
@@ -1062,6 +1194,8 @@ function renderProactiveSchedule(s) {
   document.getElementById("proactiveFormId").textContent = "#" + s.id;
   document.getElementById("proactiveName").value = s.name;
   document.getElementById("proactiveChat").value = s.chat_id;
+  renderProactiveTarget();
+  renderProactiveChatList();
   document.getElementById("proactiveCron").value = s.cron_expression;
   document.getElementById("proactiveTimezone").value = s.timezone;
   document.getElementById("proactiveIntent").value = s.intent;
@@ -1086,7 +1220,7 @@ function proactiveFormBody() {
 
 async function saveProactiveSchedule() {
   const body = proactiveFormBody();
-  if (!Number.isSafeInteger(body.chat_id)) { toast("Enter a valid numeric chat ID", "err"); return; }
+  if (!body.chat_id || !Number.isSafeInteger(body.chat_id)) { toast("Choose a target chat from the left panel", "err"); return; }
   try {
     const path = selectedProactiveSchedule ? "/proactive-schedules/" + selectedProactiveSchedule : "/proactive-schedules";
     const saved = await api(path, { method: selectedProactiveSchedule ? "PUT" : "POST", body });

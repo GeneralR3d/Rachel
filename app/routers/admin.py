@@ -6,13 +6,15 @@ so the HTTP API and the in-Telegram admin bot stay in sync.
 
 import asyncio
 import base64
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from apscheduler.triggers.cron import CronTrigger
+from telethon import utils
 
 from app import repository
 from app import prompts
@@ -73,6 +75,7 @@ class UserNameOut(BaseModel):
 class AllChats(BaseModel):
     chat_id: int
     message_count: int
+    chat_name: str | None = None
 
 
 class SummaryOut(BaseModel):
@@ -145,9 +148,39 @@ async def read_user_names() -> list[UserNameOut]:
     return [UserNameOut(**u) for u in await repository.get_all_users()]
 
 
+async def resolve_chat_name(
+    chat_id: int,
+    get_entity: Callable[[int], Awaitable[Any]],
+) -> str | None:
+    """Resolve a chat ID to its Telegram display name without failing the list."""
+    try:
+        entity = await get_entity(chat_id)
+    except Exception:
+        return None
+
+    display_name = utils.get_display_name(entity).strip()
+    return display_name or None
+
+
+async def enrich_chats_with_names(
+    chats: list[dict[str, Any]],
+    get_entity: Callable[[int], Awaitable[Any]],
+) -> list[dict[str, Any]]:
+    """Return chat rows with names resolved concurrently from Telegram."""
+    names = await asyncio.gather(
+        *(resolve_chat_name(chat["chat_id"], get_entity) for chat in chats)
+    )
+    return [
+        {**chat, "chat_name": name}
+        for chat, name in zip(chats, names, strict=True)
+    ]
+
+
 @router.get("/list-chats", response_model=list[AllChats])
 async def get_all_chat_ids() -> list[AllChats]:
-    return [AllChats(**row) for row in await repository.get_all_chats()]
+    chats = await repository.get_all_chats()
+    chats = await enrich_chats_with_names(chats, client.get_entity)
+    return [AllChats(**row) for row in chats]
 
 
 # --- proactive outreach --------------------------------------------------
