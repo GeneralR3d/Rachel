@@ -114,6 +114,7 @@ async def _get_extractor_llm():
             api_key=settings.graphiti_api_key,
             base_url=settings.merge_gateway_openai_base_url,
             temperature=0.0,
+            reasoning_effort="none",
         ).with_structured_output(ExtractorOutput, method="function_calling")
     return _extractor_cache[model]
 

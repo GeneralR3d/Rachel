@@ -355,6 +355,13 @@ def _base_chat(model: str, temperature: float) -> ChatOpenAI:
         api_key=settings.merge_gateway_api_key,
         base_url=settings.merge_gateway_openai_base_url,
         temperature=temperature,
+        # Every reply-pipeline client sends tools (the structured-output clients
+        # use function calling too). DeepSeek thinking mode requires hidden
+        # reasoning_content to be replayed for every earlier assistant turn when
+        # tools are present, but Rachel intentionally persists only visible reply
+        # text. Disable reasoning so persisted history remains valid tool-call
+        # input across requests and model restarts.
+        reasoning_effort="none",
     )
 
 

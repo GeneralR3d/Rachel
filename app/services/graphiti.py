@@ -19,6 +19,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
+from openai import NOT_GIVEN
 from pydantic import BaseModel, ValidationError
 
 from graphiti_core import Graphiti
@@ -63,6 +64,18 @@ class _RetryingOpenAIGenericClient(OpenAIGenericClient):
     """
 
     _VALIDATION_RETRIES = 3
+
+    def _build_response_format(self, response_model: type[BaseModel] | None) -> Any:
+        """Keep Graphiti's prompt-injected schema without requesting JSON mode.
+
+        Merge Gateway capability-gates both ``json_schema`` and ``json_object``.
+        Some otherwise-compatible models (including DeepSeek flash routes) support
+        neither, so sending either response format rejects the call before the model
+        sees Graphiti's schema prompt. ``NOT_GIVEN`` makes the OpenAI SDK omit the
+        field entirely; the existing validation and corrective re-rolls still enforce
+        the response shape on our side.
+        """
+        return NOT_GIVEN
 
     async def generate_response(self, *args, **kwargs) -> Dict[str, Any]:
         """Public entry point Graphiti calls for every LLM round-trip (node
@@ -170,14 +183,11 @@ async def get_graphiti() -> Graphiti:
                         small_model=small_model,
                         base_url=settings.merge_gateway_openai_base_url,
                     ),
-                    # Kept from the OpenRouter era and still the safe default: a
-                    # gateway downgrades json_schema to a plain json_object for
-                    # models without native constrained decoding, so the schema's
-                    # field names are never enforced — the dedup model then emits
-                    # `resolutions` instead of `entity_resolutions` and NodeResolutions
-                    # fails to validate. In json_object mode Graphiti instead embeds
-                    # the full schema (field names included) into the prompt text, so
-                    # the model is explicitly told the required keys.
+                    # This mode makes Graphiti embed the full schema (field names
+                    # included) into the prompt. Our override above deliberately omits
+                    # response_format from the HTTP request because Merge Gateway gates
+                    # json_object just like json_schema, and not every route supports
+                    # either form of constrained output.
                     structured_output_mode="json_object",
                 ),
                 embedder=OpenAIEmbedder(
