@@ -48,7 +48,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.errors import GraphRecursionError
 from langgraph.managed import RemainingSteps
 from langgraph.runtime import Runtime
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ConfigDict, ValidationError
 from typing_extensions import TypedDict
 
 from app.config import get_settings
@@ -262,6 +262,7 @@ class ResponseOutput(BaseModel):
     retrieval_request: str = Field(
         ..., description="Precise missing information for the context fetcher; empty for respond. Do not select tools."
     )
+    model_config = ConfigDict(extra="forbid")
     reason: str = Field(
         ...,
         description="A single sentence explaining why this reply was given, naming which part of the personality traits or system prompt instructions drove it. For traceability and debugging.",
