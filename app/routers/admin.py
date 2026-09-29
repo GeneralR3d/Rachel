@@ -13,7 +13,7 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from apscheduler.triggers.cron import CronTrigger
 from telethon import utils
 
@@ -161,6 +161,7 @@ class ProactiveScheduleIn(BaseModel):
     timezone: str = "Asia/Singapore"
     intent: str
     enabled: bool = True
+    repeat_times: int | None = Field(default=None, strict=True, gt=0, le=9223372036854775807)
 
 
 class ProactiveEnabledIn(BaseModel):
@@ -169,6 +170,7 @@ class ProactiveEnabledIn(BaseModel):
 
 class ProactiveScheduleOut(ProactiveScheduleIn):
     id: int
+    repeat_completed: int
     last_run_at: datetime | None = None
     last_status: str | None = None
     last_error: str | None = None
@@ -179,7 +181,9 @@ class ProactiveScheduleOut(ProactiveScheduleIn):
 
 def _schedule_out(row: dict) -> ProactiveScheduleOut:
     return ProactiveScheduleOut(
-        **row, next_run_at=proactive.next_run_at(row["id"])
+        **row, next_run_at=(
+            None if proactive.is_schedule_exhausted(row) else proactive.next_run_at(row["id"])
+        )
     )
 
 
@@ -214,6 +218,8 @@ async def _validated_schedule_data(body: ProactiveScheduleIn) -> dict:
         "timezone": timezone_name,
         "intent": intent,
         "enabled": body.enabled,
+        # Omitted on PUT preserves the existing limit; explicit null clears it.
+        **({"repeat_times": body.repeat_times} if "repeat_times" in body.model_fields_set else {}),
     }
 
 
@@ -270,9 +276,15 @@ async def run_proactive_schedule(schedule_id: int) -> ProactiveScheduleOut:
         raise HTTPException(status_code=404, detail="Proactive schedule not found")
     if proactive.is_schedule_running(schedule_id):
         raise HTTPException(status_code=409, detail="This schedule is already running")
-    if not await proactive.run_schedule(schedule_id):
+    # Manual runs intentionally bypass the enabled requirement.
+    if not await proactive.run_schedule(schedule_id=schedule_id, require_enabled=False):
         if proactive.is_schedule_running(schedule_id):
             raise HTTPException(status_code=409, detail="This schedule is already running")
+        row = await repository.get_proactive_schedule(schedule_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Proactive schedule not found")
+        if proactive.is_schedule_exhausted(row):
+            raise HTTPException(status_code=409, detail="This schedule has reached its repeat limit")
         raise HTTPException(status_code=503, detail="Proactive scheduler is not accepting runs")
     row = await repository.get_proactive_schedule(schedule_id)
     if row is None:

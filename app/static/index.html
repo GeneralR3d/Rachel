@@ -369,6 +369,11 @@
           </div>
           <label>Intent</label>
           <textarea id="proactiveIntent" placeholder="Check in warmly about how their week is going and encourage them about their current goal."></textarea>
+          <div class="row">
+            <div><label>Repeat limit (blank = unlimited)</label><input id="proactiveRepeatTimes" type="number" min="1" step="1" placeholder="Unlimited"></div>
+            <div><label>Attempts consumed</label><input id="proactiveRepeatCompleted" type="number" value="0" readonly></div>
+          </div>
+          <div class="muted">Each attempt is counted before execution, including attempts that fail or are interrupted.</div>
           <label style="display:flex;align-items:center;gap:8px;color:var(--text)"><input id="proactiveEnabled" type="checkbox" checked style="width:auto"> Enabled</label>
           <div class="btns">
             <button onclick="saveProactiveSchedule()">Save</button>
@@ -1031,6 +1036,15 @@ async function setActiveModel(role, model_string) {
 let PROACTIVE_SCHEDULES = [];
 let selectedProactiveSchedule = null;
 
+function proactiveScheduleDone(s) {
+  return s.repeat_times !== null && s.repeat_completed >= s.repeat_times;
+}
+
+function refreshProactiveRunButton() {
+  const schedule = PROACTIVE_SCHEDULES.find(s => s.id === selectedProactiveSchedule);
+  document.getElementById("proactiveRunBtn").disabled = !schedule || proactiveScheduleDone(schedule);
+}
+
 function formatTimestamp(value) {
   if (!value) return "—";
   const d = new Date(value);
@@ -1067,7 +1081,8 @@ function renderProactiveScheduleList() {
     row.innerHTML = `<div class="tname">${esc(s.name)}</div>
       <div class="tval">${esc(chat?.chat_name || "Name unavailable")} <span class="mono">${esc(s.chat_id)}</span></div>
       <div class="tval mono">${esc(s.cron_expression)} · ${esc(s.timezone)}</div>
-      <div class="tval">${s.enabled ? "enabled" : "disabled"} · next ${esc(formatTimestamp(s.next_run_at))}</div>`;
+      <div class="tval">${proactiveScheduleDone(s) ? "Done" : (s.enabled ? "enabled" : "disabled")} · next ${esc(formatTimestamp(s.next_run_at))}</div>
+      <div class="tval">Attempts: ${esc(s.repeat_completed)} / ${s.repeat_times === null ? "unlimited" : esc(s.repeat_times)}</div>`;
     const toggle = document.createElement("button");
     toggle.className = "ghost";
     toggle.style.marginTop = "7px";
@@ -1148,6 +1163,8 @@ function newProactiveSchedule() {
   document.getElementById("proactiveCron").value = "0 9 * * *";
   document.getElementById("proactiveTimezone").value = "Asia/Singapore";
   document.getElementById("proactiveIntent").value = "";
+  document.getElementById("proactiveRepeatTimes").value = "";
+  document.getElementById("proactiveRepeatCompleted").value = 0;
   document.getElementById("proactiveEnabled").checked = true;
   document.getElementById("proactiveRunBtn").disabled = true;
   document.getElementById("proactiveDeleteBtn").disabled = true;
@@ -1177,11 +1194,13 @@ function renderProactiveSchedule(s) {
   document.getElementById("proactiveCron").value = s.cron_expression;
   document.getElementById("proactiveTimezone").value = s.timezone;
   document.getElementById("proactiveIntent").value = s.intent;
+  document.getElementById("proactiveRepeatTimes").value = s.repeat_times ?? "";
+  document.getElementById("proactiveRepeatCompleted").value = s.repeat_completed;
   document.getElementById("proactiveEnabled").checked = s.enabled;
-  document.getElementById("proactiveRunBtn").disabled = false;
+  document.getElementById("proactiveRunBtn").disabled = proactiveScheduleDone(s);
   document.getElementById("proactiveDeleteBtn").disabled = false;
   document.getElementById("proactiveMeta").textContent =
-    `Next run: ${formatTimestamp(s.next_run_at)}\nLast run: ${formatTimestamp(s.last_run_at)}\nLatest result: ${s.last_status || "—"}` +
+    `${proactiveScheduleDone(s) ? "Done · " : ""}Attempts consumed: ${s.repeat_completed} / ${s.repeat_times ?? "unlimited"}\nNext run: ${formatTimestamp(s.next_run_at)}\nLast run: ${formatTimestamp(s.last_run_at)}\nLatest result: ${s.last_status || "—"}` +
     (s.last_error ? `\nError: ${s.last_error}` : "");
 }
 
@@ -1193,12 +1212,17 @@ function proactiveFormBody() {
     timezone: document.getElementById("proactiveTimezone").value,
     intent: document.getElementById("proactiveIntent").value,
     enabled: document.getElementById("proactiveEnabled").checked,
+    repeat_times: document.getElementById("proactiveRepeatTimes").value.trim() === ""
+      ? null : Number(document.getElementById("proactiveRepeatTimes").value),
   };
 }
 
 async function saveProactiveSchedule() {
   const body = proactiveFormBody();
   if (!body.chat_id || !Number.isSafeInteger(body.chat_id)) { toast("Choose a target chat from the left panel", "err"); return; }
+  if (body.repeat_times !== null && (!Number.isSafeInteger(body.repeat_times) || body.repeat_times < 1)) {
+    toast("Repeat limit must be a positive whole number, or blank for unlimited", "err"); return;
+  }
   try {
     const path = selectedProactiveSchedule ? "/proactive-schedules/" + selectedProactiveSchedule : "/proactive-schedules";
     const saved = await api(path, { method: selectedProactiveSchedule ? "PUT" : "POST", body });
@@ -1225,8 +1249,11 @@ async function runProactiveSchedule() {
     const result = await api(`/proactive-schedules/${selectedProactiveSchedule}/run`, { method: "POST" });
     toast(result.last_status === "succeeded" ? "Outreach sent" : "Outreach failed", result.last_status === "succeeded" ? "ok" : "err");
     await loadProactiveSchedules();
-  } catch (e) { toast("Run now: " + e.message, "err"); }
-  finally { btn.disabled = false; btn.textContent = "Run now"; }
+  } catch (e) {
+    toast("Run now: " + e.message, "err");
+    await loadProactiveSchedules();
+  }
+  finally { refreshProactiveRunButton(); btn.textContent = "Run now"; }
 }
 
 async function deleteProactiveSchedule() {

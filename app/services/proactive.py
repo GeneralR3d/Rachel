@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -29,11 +29,16 @@ def build_trigger(cron_expression: str, timezone_name: str) -> CronTrigger:
     return CronTrigger.from_crontab(cron_expression, timezone=zone)
 
 
+def is_schedule_exhausted(schedule: dict) -> bool:
+    limit = schedule["repeat_times"]
+    return limit is not None and schedule["repeat_completed"] >= limit
+
+
 def _add_or_replace_job(schedule: dict) -> None:
     if _scheduler is None:
         return
     job_id = _job_id(schedule["id"])
-    if not schedule["enabled"]:
+    if not schedule["enabled"] or is_schedule_exhausted(schedule):
         remove_schedule_job(schedule["id"])
         return
     _scheduler.add_job(
@@ -89,6 +94,20 @@ def remove_schedule_job(schedule_id: int) -> None:
         _scheduler.remove_job(job.id)
 
 
+async def _remove_ineligible_schedule_job(schedule_id: int) -> None:
+    scheduler = _scheduler
+    if scheduler is None:
+        return
+    job = scheduler.get_job(_job_id(schedule_id))
+    latest = await repository.get_proactive_schedule(schedule_id)
+    # The DB read yields during commit/close. An admin may replace the job then;
+    # never remove that replacement using the older SELECT snapshot.
+    if _scheduler is not scheduler or scheduler.get_job(_job_id(schedule_id)) is not job:
+        return
+    if latest is None or not latest["enabled"] or is_schedule_exhausted(latest):
+        remove_schedule_job(schedule_id)
+
+
 def next_run_at(schedule_id: int) -> datetime | None:
     if _scheduler is None:
         return None
@@ -101,14 +120,15 @@ def is_schedule_running(schedule_id: int) -> bool:
 
 
 async def _scheduled_run(schedule_id: int) -> None:
-    await run_schedule(schedule_id)
+    await run_schedule(schedule_id, require_enabled=True)
 
 
-async def run_schedule(schedule_id: int) -> bool:
+async def run_schedule(schedule_id: int, *, require_enabled: bool = False) -> bool:
     """Run one schedule through the shared generation/send path.
 
     Returns False if the service is stopping, the row vanished, or this schedule
-    already has a process-local execution in progress.
+    already has a process-local execution in progress, or its allowance is spent.
+    Cron callbacks additionally require the stored schedule to still be enabled.
     """
     if not _accepting_runs:
         return False
@@ -121,13 +141,14 @@ async def run_schedule(schedule_id: int) -> bool:
         _active_tasks.add(task)
     try:
         async with lock:
-            schedule = await repository.get_proactive_schedule(schedule_id)
-            if schedule is None:
-                return False
-            ran_at = datetime.now(timezone.utc)
-            await repository.set_proactive_schedule_status(
-                schedule_id, "running", ran_at=ran_at
+            schedule = await repository.claim_proactive_schedule_run(
+                schedule_id, require_enabled=require_enabled
             )
+            if schedule is None:
+                await _remove_ineligible_schedule_job(schedule_id)
+                return False
+            if is_schedule_exhausted(schedule):
+                await _remove_ineligible_schedule_job(schedule_id)
             try:
                 await send_proactive_message(
                     schedule["chat_id"], schedule["intent"], schedule_id

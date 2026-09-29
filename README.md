@@ -101,6 +101,12 @@ flowchart TB
 - **Data layer** (`app/models.py`, `app/repository.py`, `app/database.py`) uses async SQLAlchemy sessions and PostgreSQL upserts for durable chat and control-plane state.
 - **Admin plane** (`app/telegram/bot.py`, `app/routers/admin.py`, `app/static/index.html`) exposes Telegram commands, REST endpoints, a zero-build dashboard, live architecture diagrams, and Prometheus metrics.
 
+### Proactive outreach repeat limits
+
+Each proactive schedule has `repeat_times` (a positive integer, or `null` for unlimited) and a read-only `repeat_completed` counter. The dashboard accepts a blank repeat limit for unlimited schedules and displays consumed attempts. PostgreSQL atomically checks the limit and commits the increment before generation or sending starts; failures, interruptions, and process crashes still consume that attempt. “Run now” shares the same allowance as cron fires.
+
+Exhausted schedules show **Done** and are removed from the active scheduler without changing their saved `enabled` setting. Raising the limit above the consumed count, or clearing it to unlimited, resumes an enabled schedule. Editing or toggling a schedule never resets its counter. Existing schedules migrate to unlimited with zero counted attempts; older executions are not reconstructed. Apply `uv run alembic upgrade head` before starting the updated application.
+
 ### Reply workflow
 
 ```mermaid
@@ -492,7 +498,14 @@ Run a lightweight Python syntax check without starting databases or Telegram:
 uv run python -m compileall -q app scripts alembic
 ```
 
-There is currently no automated test suite, lint configuration, or CI workflow in the repository. The original Telethon/SQLite implementation remains under [`Reference/`](Reference/) as a porting reference.
+Run the automated tests with configured app settings (placeholder API credentials suffice; tests do not send Telegram messages):
+
+```bash
+uv run python -m unittest discover -s tests
+node --test tests/test_proactive_dashboard.cjs
+```
+
+Set `TEST_DATABASE_URL` to a disposable PostgreSQL database to include repeat-limit integration tests; each test uses and removes its own isolated schema. Without it, database integration tests are skipped. There is no lint configuration or CI workflow. The original Telethon/SQLite implementation remains under [`Reference/`](Reference/) as a porting reference.
 
 ## Deployment
 

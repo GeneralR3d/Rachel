@@ -188,6 +188,8 @@ def _proactive_schedule_dict(row: ProactiveSchedule) -> dict:
         "timezone": row.timezone,
         "intent": row.intent,
         "enabled": row.enabled,
+        "repeat_times": row.repeat_times,
+        "repeat_completed": row.repeat_completed,
         "last_run_at": row.last_run_at,
         "last_status": row.last_status,
         "last_error": row.last_error,
@@ -239,6 +241,40 @@ async def delete_proactive_schedule(schedule_id: int) -> bool:
             delete(ProactiveSchedule).where(ProactiveSchedule.id == schedule_id)
         )
     return result.rowcount > 0
+
+
+async def claim_proactive_schedule_run(
+    schedule_id: int, *, require_enabled: bool = False
+) -> dict | None:
+    """Atomically consume an eligible attempt and commit before returning.
+
+    The conditional UPDATE also enforces the limit across concurrent callers.
+    Manual runs may execute disabled schedules, but share the same allowance.
+    """
+    stmt = (
+        update(ProactiveSchedule)
+        .where(
+            ProactiveSchedule.id == schedule_id,
+            sa.or_(
+                ProactiveSchedule.repeat_times.is_(None),
+                ProactiveSchedule.repeat_completed < ProactiveSchedule.repeat_times,
+            ),
+        )
+        .values(
+            repeat_completed=ProactiveSchedule.repeat_completed + 1,
+            last_status="running",
+            last_run_at=func.now(),
+            last_error=None,
+        )
+        .returning(ProactiveSchedule)
+    )
+    if require_enabled:
+        stmt = stmt.where(ProactiveSchedule.enabled.is_(True))
+    async with session_scope() as session:
+        row = (await session.execute(stmt)).scalar_one_or_none()
+        claimed = _proactive_schedule_dict(row) if row is not None else None
+    # Exiting session_scope commits. No caller can begin sending before this.
+    return claimed
 
 
 async def set_proactive_schedule_status(
