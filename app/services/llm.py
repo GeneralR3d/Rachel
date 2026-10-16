@@ -953,7 +953,7 @@ async def get_response(
         "response_reason": "",
     }
 
-    result = await _graph.ainvoke(initial_state)
+    result = await _graph.ainvoke(initial_state, config={"run_name": "RachelReplyGraph"})
 
     if chat_id is not None:
         _chat_mood[chat_id] = result["mood"]

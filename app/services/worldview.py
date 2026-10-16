@@ -284,7 +284,7 @@ async def update_worldview(
         "chat_id": chat_id,
     }
     try:
-        result = await _graph.ainvoke(state)
+        result = await _graph.ainvoke(state, config={"run_name": "WorldviewMemoryGraph"})
     except Exception as e:  # never let memory upkeep crash the caller
         print(f"{tag} update failed: {e}")
         traceback.print_exc()

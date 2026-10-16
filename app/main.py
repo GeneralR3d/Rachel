@@ -9,6 +9,10 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from phoenix.otel import register
+
+register(project_name="Rachel", protocol="http/protobuf", auto_instrument=True)
+
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from prometheus_client import make_asgi_app

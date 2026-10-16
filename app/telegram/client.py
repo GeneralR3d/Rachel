@@ -12,6 +12,7 @@ import bisect
 import random
 import re
 import time
+import uuid
 from pprint import pprint
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +36,7 @@ from app.repository import (
 )
 from app.services.llm import get_chat_mood, get_response, set_chat_mood
 from app.services.memory import update_memories
+from app.services.tracing import traced_workflow
 from app.telegram.bot import ADMIN
 from app.utils import parse_history
 
@@ -85,6 +87,8 @@ class BufferedMessage(BaseModel):
 
 # state
 current_messages_buffer: Dict[int, List[BufferedMessage]] = {}
+# One Phoenix session per buffer lifetime (inactivity or size-cap flush).
+burst_sessions: Dict[int, str] = {}
 pending_summaries: Dict[int, str] = {}
 wait_tasks: Dict[int, asyncio.Task] = {}
 flush_tasks: Dict[int, asyncio.Task] = {}
@@ -332,6 +336,8 @@ async def _reply(event):
     """
     chat_id = event.chat_id
     buffer = current_messages_buffer[chat_id]
+    session_id = burst_sessions.get(chat_id)
+    chat_name = _chat_display_name(getattr(event, "chat", None))
     me = await client.get_me()
 
     if not client.is_connected():
@@ -415,27 +421,20 @@ async def _reply(event):
             print(f"[{chat_id}] Nothing new since watermark {watermark} — skipping redundant reply")
             return
 
-        try:
-            response, response_reason, new_summary, load_time = await get_response(
-                history=context,
-                current_summary=current_summary,
-                chat_id=chat_id,
-                senders=senders,
-                must_reply=must_reply,
-                is_private=is_private,
-                responded_watermark=watermark,
-            )
-        except Exception as e:
-            print(f"[{chat_id}] get_response failed ({type(e).__name__}: {e}), retrying once...")
-            response, response_reason, new_summary, load_time = await get_response(
-                history=context,
-                current_summary=current_summary,
-                chat_id=chat_id,
-                senders=senders,
-                must_reply=must_reply,
-                is_private=is_private,
-                responded_watermark=watermark,
-            )
+        response, response_reason, new_summary, load_time = await _generate_response_with_retry(
+            {
+                "history": context,
+                "current_summary": current_summary,
+                "chat_id": chat_id,
+                "senders": senders,
+                "must_reply": must_reply,
+                "is_private": is_private,
+                "responded_watermark": watermark,
+            },
+            session_id,
+            chat_id,
+            chat_name,
+        )
 
         if new_summary is not None:
             pending_summaries[chat_id] = new_summary
@@ -493,6 +492,18 @@ async def _reply(event):
             print(f"[{chat_id}] Buffer flushed mid-reply; persisted reply directly to DB")
 
 
+async def _generate_response_with_retry(
+    response_kwargs: Dict[str, Any], session_id: str | None, chat_id: int, chat_name: str | None = None
+):
+    """Keep a failed first graph run and its retry in one response trace."""
+    with traced_workflow("telegram_reply", session_id, chat_id, chat_name):
+        try:
+            return await get_response(**response_kwargs)
+        except Exception as e:
+            print(f"[{chat_id}] get_response failed ({type(e).__name__}: {e}), retrying once...")
+            return await get_response(**response_kwargs)
+
+
 async def wait_before_reply(event, delay: int):
     """Wait ``delay`` seconds, then reply (awaited so it completes in-task)."""
     try:
@@ -528,10 +539,11 @@ async def _flush_chat(chat_id: int) -> None:
     #TODO: fix this gap. Any messages that arrive between these will be lost.
 
     current_messages_buffer.pop(chat_id, None)
+    burst_sessions.pop(chat_id, None)
     last_message_time.pop(chat_id, None)
 
 
-async def finalize_conversation(chat_id: int, delay: float):
+async def finalize_conversation(chat_id: int, delay: float, chat_name: str | None):
     """After ``delay`` seconds of inactivity, treat the conversation as finished:
     persist unpersisted buffer messages to DB and extract world-view facts.
 
@@ -542,6 +554,7 @@ async def finalize_conversation(chat_id: int, delay: float):
     path, which calls _flush_chat directly).
     """
     await asyncio.sleep(delay)
+    session_id = burst_sessions.get(chat_id)
     conversation = [m.to_llm_dict_full() for m in current_messages_buffer.get(chat_id, [])]
     # Snapshot the conversation summary before _flush_chat pops it from
     # pending_summaries; falls back to the persisted summary in DB.
@@ -552,7 +565,10 @@ async def finalize_conversation(chat_id: int, delay: float):
     last_processed_id = await get_last_processed_message_id(chat_id)
     await _flush_chat(chat_id)
     if conversation:
-        asyncio.create_task(update_memories(conversation, summary, chat_id, last_processed_id))
+        asyncio.create_task(update_memories(
+            conversation, summary, chat_id, last_processed_id,
+            session_id=session_id, chat_name=chat_name,
+        ))
         # Advance the watermark once to the newest message we just handed off, so
         # the next finalize treats everything up to here as already-processed.
         # Done here (not inside the pipelines) so it happens exactly once.
@@ -585,6 +601,23 @@ async def flush_all_buffers() -> None:
 # event handlers
 
 
+def _chat_display_name(chat) -> str | None:
+    """Use a group title or a private chat's display name when available."""
+    if chat is None:
+        return None
+    title = (getattr(chat, "title", None) or "").strip()
+    if title:
+        return title
+    name = " ".join(
+        part.strip() for part in (getattr(chat, "first_name", None), getattr(chat, "last_name", None))
+        if part and part.strip()
+    )
+    if name:
+        return name
+    username = (getattr(chat, "username", None) or "").strip()
+    return f"@{username}" if username else None
+
+
 @client.on(events.NewMessage(pattern="\\/clear_history"))
 async def on_clear_history(event):
     print(f"[{event.chat_id}] clear history command received")
@@ -603,7 +636,7 @@ async def on_clear_history(event):
     await clear_history(chat_id)
     await delete_summary(chat_id)
 
-    for state in (current_messages_buffer, pending_summaries, last_message_time, wait_tasks, flush_tasks):
+    for state in (current_messages_buffer, burst_sessions, pending_summaries, last_message_time, wait_tasks, flush_tasks):
         state.pop(chat_id, None)
 
     await event.respond("History cleared.")
@@ -653,6 +686,7 @@ async def new_message(event):
     # On first contact for this chat, pre-load recent history into the buffer
     if chat_id not in current_messages_buffer:
         current_messages_buffer[chat_id] = []
+        burst_sessions[chat_id] = uuid.uuid4().hex
         # Tag Rachel's own past messages by id, not by resolved name: get_history
         # resolves her turns to her Telegram first name (via COALESCE), which need
         # not equal BOT_NAME. The downstream partition/AIMessage logic keys off
@@ -732,7 +766,8 @@ async def new_message(event):
     # Always reset the flush timer: persist buffer 60 s after the last message
     if chat_id in flush_tasks and not flush_tasks[chat_id].done():
         flush_tasks[chat_id].cancel()
-    flush_tasks[chat_id] = asyncio.create_task(finalize_conversation(chat_id, CHAT_BLACKOUT_TIME))
+    chat_name = _chat_display_name(getattr(event, "chat", None))
+    flush_tasks[chat_id] = asyncio.create_task(finalize_conversation(chat_id, CHAT_BLACKOUT_TIME, chat_name))
 
     # Hard cap, enforced on every incoming message (not just when Rachel
     # replies): a busy group where she is never tagged would otherwise keep
@@ -743,7 +778,7 @@ async def new_message(event):
         print(f"[{chat_id}] Buffer hit MAX_BUFFER_LEN ({MAX_BUFFER_LEN}), flushing immediately")
         if chat_id in flush_tasks and not flush_tasks[chat_id].done():
             flush_tasks[chat_id].cancel()
-        flush_tasks[chat_id] = asyncio.create_task(finalize_conversation(chat_id, 0))
+        flush_tasks[chat_id] = asyncio.create_task(finalize_conversation(chat_id, 0, chat_name))
 
 
 @client.on(events.ChatAction)

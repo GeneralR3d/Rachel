@@ -13,3 +13,9 @@ __pycache__/
 
 /Reference/
 worldview.md
+
+# Added by px setup — local Phoenix credentials
+.env.phoenix
+
+# Added by px setup — local Phoenix credentials
+.px/

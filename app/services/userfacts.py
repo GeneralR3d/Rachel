@@ -635,7 +635,7 @@ async def update_user_facts(
         "chat_id": chat_id,
     }
     try:
-        await _graph.ainvoke(state)
+        await _graph.ainvoke(state, config={"run_name": "UserFactsMemoryGraph"})
     except Exception as e:  # never let memory upkeep crash the caller
         print(f"{_tag(chat_id)} update failed: {e}")
         traceback.print_exc()

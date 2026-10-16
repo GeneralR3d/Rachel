@@ -2,13 +2,17 @@
 
 This walks through deploying Rachel on a **fresh Ubuntu/Debian VPS** with nothing
 installed. Unlike [`DEPLOY.md`](./DEPLOY.md) (app on the host via uv + systemd),
-here **Postgres, Neo4j, and the app all run in docker-compose**. nginx stays on
-the host as the reverse proxy terminating HTTPS in front of the admin API.
+here **Postgres, Neo4j, Phoenix, and the app all run in docker-compose**. nginx
+stays on the host as the reverse proxy terminating HTTPS in front of the admin
+API and Phoenix UI.
 
 Rachel needs **two** datastores, both defined in `docker-compose.yml`:
 
 - **Postgres** — chat history, summaries, user profiles, prompts, traits, schedule.
 - **Neo4j** — the Graphiti world-view / per-user-facts knowledge graph.
+
+Phoenix collects the app's traces and stores them in the `phoenix_data` Docker
+volume.
 
 > **Four things people trip on:**
 > 1. **The Telegram login is interactive** — `scripts.login` prompts for a phone
@@ -72,14 +76,16 @@ Fill in:
 
 - `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` — from [my.telegram.org](https://my.telegram.org)
 - `TELEGRAM_BOT_TOKEN` — admin bot from [@BotFather](https://t.me/botfather)
-- `OPENROUTER_API_KEY` — drives Rachel's router/summarizer/responder.
-- `OPENROUTER_GRAPHITI_API_KEY` — separate key billed for all Graphiti/world-view
-  LLM + embedder + reranker calls. **Leave blank to reuse `OPENROUTER_API_KEY`.**
+- `MERGE_GATEWAY_API_KEY` — drives Rachel's router/summarizer/responder.
+- `MERGE_GATEWAY_GRAPHITI_API_KEY` — separate key billed for all Graphiti/world-view
+  LLM + embedder + reranker calls. **Leave blank to reuse `MERGE_GATEWAY_API_KEY`.**
 - `ADMIN_ID` — your user id from [@userinfobot](https://t.me/userinfobot)
 - `DB_PASSWORD` — **change this** from the `rachel` default for any internet-facing VPS.
 - `NEO4J_PASSWORD` — **set this.** docker-compose reads it for `NEO4J_AUTH`
   (`neo4j/<password>`) and injects the same value into the app. It falls back to
   `password` if left unset — change it for any internet-facing VPS.
+- `PHOENIX_ROOT_URL` — set to `https://phoenix.yourdomain.com`, the public URL
+  configured in nginx below. Phoenix uses this when generating external URLs.
 
 > **Leave `DATABASE_URL` and `NEO4J_URI` alone.** The `app` service in
 > `docker-compose.yml` sets `DATABASE_URL=...@db:5432/rachel` and
@@ -102,11 +108,15 @@ for a container deploy — no uncommenting needed. Confirm the block looks like 
         condition: service_healthy
       neo4j:
         condition: service_healthy
+      phoenix:
+        condition: service_started
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://rachel:${DB_PASSWORD:-rachel}@db:5432/rachel
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-password}
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
+      PHOENIX_ENDPOINT: http://phoenix:6006
       PYTHONUNBUFFERED: 1
     restart: always
     ports:
@@ -124,6 +134,8 @@ for a container deploy — no uncommenting needed. Confirm the block looks like 
 >   replaces systemd in the host-based guide).
 > - **`depends_on` both `db` and `neo4j` on `service_healthy`** so the app doesn't
 >   start until both datastores accept connections.
+> - **`PHOENIX_COLLECTOR_ENDPOINT`** uses `phoenix:6006`, the container-network
+>   address; the host's `localhost:6006` mapping is for nginx and SSH access.
 > - **`DATABASE_URL` + `NEO4J_URI` injected here** point at the compose service
 >   hosts, overriding the loopback URLs in `.env`.
 
@@ -140,15 +152,37 @@ Bind mounts need these to exist as files first:
 touch anon.session bot.session
 ```
 
-## 8. Start Postgres and Neo4j
+## 8. Start Postgres, Neo4j, and Phoenix
 
 ```bash
-docker compose up -d db neo4j
-docker compose ps                  # confirm BOTH db and neo4j are healthy
+docker compose up -d db neo4j phoenix
+docker compose ps                  # db and neo4j healthy; phoenix running
 ```
 
 Neo4j may report `starting` for 20-40 s before it flips to `healthy` — wait for it
 before moving on, since the login container (next) depends on it too.
+
+Phoenix listens on port 6006 inside Docker and is published only at
+`127.0.0.1:6006` on the VPS. The shipped Compose service is:
+
+```yaml
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "127.0.0.1:6006:6006"
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+      PHOENIX_ROOT_URL: ${PHOENIX_ROOT_URL:-http://localhost:6006}
+    volumes:
+      - phoenix_data:/mnt/data
+    restart: unless-stopped
+```
+
+Check the local UI before configuring nginx:
+
+```bash
+curl -fsS -o /dev/null http://127.0.0.1:6006/
+```
 
 ## 9. One-time interactive Telegram login (in a one-off container)
 
@@ -169,7 +203,7 @@ invalidated.
 
 ```bash
 docker compose up -d --build app
-docker compose ps                  # app + db + neo4j all up
+docker compose ps                  # app + db + neo4j + phoenix all up
 docker compose logs -f app         # watch lifespan seed prompts/traits/schedule
                                    # and connect both Telegram clients
 ```
@@ -197,7 +231,9 @@ docker compose run --rm app uv run python -m scripts.add_worldview_fact "Chagee 
 
 ## 11. Configure nginx as the reverse proxy
 
-Point a **DNS A record** for `rachel.yourdomain.com` at the VPS IP before continuing.
+Point **DNS A records** for `rachel.yourdomain.com` and
+`phoenix.yourdomain.com` at the VPS IP before continuing. The
+`PHOENIX_ROOT_URL` in `.env` must match the latter HTTPS address.
 
 Create `/etc/nginx/sites-available/rachel`:
 
@@ -221,19 +257,41 @@ server {
 }
 ```
 
+Create `/etc/nginx/sites-available/phoenix` for the Phoenix UI:
+
+```nginx
+server {
+    server_name phoenix.yourdomain.com;
+
+    auth_basic "Phoenix admin";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+
+    location / {
+        proxy_pass http://127.0.0.1:6006;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    listen 80;
+}
+```
+
 Create the basic-auth user, enable the site, and reload:
 
 ```bash
 htpasswd -c /etc/nginx/.htpasswd admin     # prompts for a password
 
 ln -s /etc/nginx/sites-available/rachel /etc/nginx/sites-enabled/
+ln -s /etc/nginx/sites-available/phoenix /etc/nginx/sites-enabled/
 nginx -t && systemctl reload nginx
 ```
 
 ## 12. Enable HTTPS with certbot
 
 ```bash
-certbot --nginx -d rachel.yourdomain.com   # rewrites the config to 443 + HTTPS
+certbot --nginx -d rachel.yourdomain.com -d phoenix.yourdomain.com
 ```
 
 Certbot auto-renews via a systemd timer; test with `certbot renew --dry-run`.
@@ -247,27 +305,28 @@ ufw allow 'Nginx Full'             # opens 80 + 443
 ufw enable
 ```
 
-Ports **8000** (uvicorn), **5433** (Postgres), and **7687/7474** (Neo4j bolt +
-browser) stay closed to the internet — all are published only on `127.0.0.1`, and
-nginx is the only public entry point.
+Ports **8000** (uvicorn), **6006** (Phoenix), **5433** (Postgres), and
+**7687/7474** (Neo4j bolt + browser) stay closed to the internet — all are
+published only on `127.0.0.1`, and nginx is the only public entry point.
 
 ---
 
 ## Order that matters (recap)
 
 1. Docker, nginx installed
-2. `.env` filled (set `DB_PASSWORD` **and** `NEO4J_PASSWORD`; **don't** touch
+2. `.env` filled (set `DB_PASSWORD`, `NEO4J_PASSWORD`, and `PHOENIX_ROOT_URL`; **don't** touch
    `DATABASE_URL` / `NEO4J_URI`)
 3. Confirm the `app` service is enabled (loopback port, `restart: always`,
    `depends_on` db + neo4j)
 4. `touch anon.session bot.session`
-5. `docker compose up -d db neo4j` ← wait for **both** healthy
+5. `docker compose up -d db neo4j phoenix` ← wait for both datastores healthy
 6. `docker compose run --rm app uv run python -m scripts.login` ← interactive, by hand
 7. `docker compose up -d --build app` (migrations run automatically on start)
-8. nginx site + basic auth → `certbot --nginx` for HTTPS
+8. nginx sites for Rachel and Phoenix + basic auth → `certbot --nginx` for HTTPS
 9. ufw: SSH + Nginx Full only
 
 Browse the admin API at `https://rachel.yourdomain.com/docs` (basic-auth prompt).
+Browse traces at `https://phoenix.yourdomain.com` (basic-auth prompt).
 
 ## Updating a deployment
 
@@ -289,9 +348,10 @@ docker compose logs -f app
 ```bash
 docker compose logs -f app          # live app logs (replaces journalctl)
 docker compose logs -f neo4j        # Neo4j logs (Graphiti ingest/search errors surface here)
+docker compose logs -f phoenix      # Phoenix trace collector and UI logs
 docker compose restart app          # restart just the app
 docker compose down                 # stop everything (data survives in named volumes)
-docker compose up -d                # bring db + neo4j + app back up
+docker compose up -d                # bring db + neo4j + phoenix + app back up
 ```
 
 > Shutdown is graceful: `app/main.py`'s lifespan flushes all in-memory message
