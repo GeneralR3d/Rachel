@@ -235,7 +235,7 @@ ROUTER_GROUP_QUESTION = {
         """
    ),
     "criteria": {
-        "true": 
+        "true":
             """
             The latest message is clearly directed at Rachel (a question, a greeting, a direct address, or a reply to something she said).
             Even if the message does not directly tag rachel, if you see some message that spells out Rachel's name, reply.
@@ -257,7 +257,7 @@ ROUTER_GROUP_QUESTION = {
 ROUTER_PRIVATE_QUESTION = {
     "type": "noul",
     "instructions": """
-            You are the reply-gating filter for an AI persona named Rachel, a young girl from Singapore, who is in a 1-on-1 (private/DM) Telegram chat with one other person. You are NOT Rachel and you do NOT write replies.
+            You are the reply-gating filter for an AI persona named Rachel, a young girl from Singapore, who is in a private Telegram chat with one other person. You are NOT Rachel and you do NOT write replies.
             You will be given the recent messages of the conversation as well as a summary.
             This is a private chat, so the person is always talking directly to Rachel. The DEFAULT is that Rachel SHOULD reply — in most cases you should decide should_reply = true.
             Your ONLY goal is to make sure Rachel is NOT annoying by sending pointless replies to messages that don't actually call for one.
@@ -274,10 +274,10 @@ ROUTER_PRIVATE_QUESTION = {
             ALWAYS reply when Rachel's name is mentioned or the entire group is mentioned, ie opinions and thoughts are asked
             YOU ARE NEVER ALLOWED TO DECIDE ON BEHALF OF RACHEL. LET HER DECIDE. YOU ARE SUPPOSED TO ASSIST ONLY.
             """,
-        "false": 
+        "false":
             """
             The latest message is very short, purely conversational, or carries minimal/no new information (e.g. "ok", "okay", "k", "cool", "nice", "thanks", "thx", "haha", "lol", "wow", "yea", "yup", "alright", or just an emoji / sticker / reaction).
-            The latest message is a meaningless acknowledgement or filler that does not ask anything, share anything new, or invite a response.
+            The latest message is a brief acknowledgement or filler that does not ask anything, share anything new, or invite a response.
             The person's most recent message(s) have ALREADY been replied to by Rachel — i.e. look at the AI messages sent by Rachel and nothing new requiring a response has come in after it. Do not reply again to something already addressed.
             """
         ,
