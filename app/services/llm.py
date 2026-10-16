@@ -513,7 +513,7 @@ async def router_node(state: GraphState) -> Dict:
         print(f"[router] decision error ({kind}; defaulting to reply): {type(e).__name__}: {e}")
         return {"should_reply": True}
 
-    should_reply = probability >= 0.7
+    should_reply = probability >= 0.8
     print(f"[router] should_reply={should_reply} | probability={probability:.3f}")
     return {"should_reply": should_reply}
 
