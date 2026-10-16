@@ -13,7 +13,7 @@
     --text: #e6e9ef;
     --muted: #8b93a3;
     --accent: #7c9cff;
-    --accent-2: #5b78d6;
+    --accent-2: #4560b3;
     --danger: #ff6b6b;
     --danger-2: #d64545;
     --ok: #4ade80;
@@ -37,8 +37,8 @@
   header .sub { color: var(--muted); font-size: 12px; }
   .health { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
-  .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-  .dot.bad { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+  .dot.ok { background: var(--ok); }
+  .dot.bad { background: var(--danger); }
 
   nav {
     position: sticky; top: 53px; z-index: 9;
@@ -84,7 +84,7 @@
     padding: 9px 16px; font-size: 13px; font-weight: 500; cursor: pointer;
     font-family: var(--sans); white-space: nowrap;
   }
-  button:hover { background: var(--accent); }
+  button:hover { background: #536dbc; }
   button:disabled { opacity: .5; cursor: not-allowed; }
   button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
   button.ghost:hover { background: var(--panel-2); }
@@ -106,7 +106,7 @@
   td.mono, .mono { font-family: var(--mono); font-size: 12px; }
   tr.clickable:hover { background: var(--panel-2); cursor: pointer; }
 
-  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; }
   .toast {
     position: fixed; bottom: 22px; right: 22px; z-index: 50;
     display: flex; flex-direction: column; gap: 8px;
@@ -134,7 +134,7 @@
   .traitrow:hover { background: var(--panel-2); }
   .traitrow.selected { background: var(--panel-2); }
   .traitrow .tname { font-size: 13px; }
-  .traitrow .tval { font-size: 11px; color: var(--muted); margin-top: 2px; text-transform: capitalize; }
+  .traitrow .tval { font-size: 14px; color: var(--muted); margin-top: 2px; text-transform: capitalize; }
   .promptopt {
     border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;
     margin-bottom: 12px; cursor: pointer; background: var(--panel-2);
@@ -147,10 +147,10 @@
     text-transform: uppercase; letter-spacing: .4px; color: var(--muted); margin-bottom: 6px;
   }
   .promptopt.active .lvl { color: var(--accent); }
-  .promptopt .lvl .badge { font-size: 10px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); }
+  .promptopt .lvl .badge { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); }
   .promptopt .ptext { font-size: 13px; color: var(--text); white-space: pre-wrap; }
   .spacer { height: 6px; }
-  .inline-note { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .inline-note { font-size: 14px; color: var(--muted); margin-top: 6px; }
 
   /* users tab: list on the left, detail on the right */
   .userlayout { display: flex; gap: 18px; align-items: flex-start; }
@@ -861,7 +861,7 @@ async function loadArchitecture() {
 let MODELS = [];       // catalog: [{id, model_string}]
 let ACTIVE_MODELS = {}; // {main, small, embedding}
 const MODEL_ROLES = [
-  { key: "main", label: "Main LLM", note: "router / summarizer / responder / context-fetcher + memory extractors." },
+  { key: "main", label: "Main LLM", note: "summarizer / responder / context-fetcher + memory extractors. Router uses DECISIONS_LLM." },
   { key: "small", label: "Small model", note: "Graphiti internal helper + reranker calls." },
   { key: "embedding", label: "Embedding model", note: "⚠️ Changing this may not match existing Neo4j vectors — search can degrade until re-ingested." },
 ];

@@ -1,4 +1,4 @@
-"""LLM integration via LangGraph + LangChain ChatOpenAI, pointed at Merge Gateway.
+"""LLM integration via LangGraph and Merge Gateway.
 
 The nodes are gated by a checker + router up front, then summarizer_node and
 context_fetcher_node fan out in parallel before the responder joins them:
@@ -33,6 +33,7 @@ responder_node:      generates Rachel's reply using the mood detected in the
 """
 
 import asyncio
+import math
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -42,6 +43,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pprint import pprint
 
 import tiktoken
+import httpx
 
 from app.services import worldview
 from app.services.metrics import LLM_CALLS, record_llm_error
@@ -64,8 +66,8 @@ from app.config import get_settings
 from app.prompts import (
     CONTEXT_FETCHER_SYSTEM_PROMPT,
     CONVERSATION_STYLE,
-    ROUTER_PM_SYSTEM_PROMPT,
-    ROUTER_SYSTEM_PROMPT,
+    ROUTER_GROUP_QUESTION,
+    ROUTER_PRIVATE_QUESTION,
     USER_PROFILE_ATTRIBUTE_GUIDE,
     USER_PROFILE_FIELDS,
 )
@@ -269,19 +271,6 @@ def _render_profile(profile: dict, show_unknown: bool = False) -> str:
 MOOD_LABELS = list(CONVERSATION_STYLE)
 
 
-class RouterOutput(BaseModel):
-    # should_reply is declared first so the model commits to the decision before
-    # writing the (cosmetic) justification — it sometimes drops trailing fields.
-    should_reply: bool = Field(
-        ...,
-        description="True if Rachel should send a reply to the latest messages, False if she should stay silent.",
-    )
-    reason: str = Field(
-        ...,
-        description="A single short sentence explaining the reply/no-reply decision.",
-    )
-
-
 class SummarizerOutput(BaseModel):
     summary: str = Field(
         ...,
@@ -330,14 +319,12 @@ class GraphState(TypedDict):
 # capabilities (['json_schema'])"). function_calling was also what the previous
 # ChatOpenRouter clients defaulted to, so this keeps behaviour identical.
 #
-# The four reply-pipeline clients are built lazily and cached keyed on the active
+# The chat clients are built lazily and cached keyed on the active
 # "main" model string (from the DB, via repository.get_active_models), so an admin
 # switching the model at runtime takes effect on the next node call without a
 # restart. invalidate_model_clients() clears this cache (and resets Graphiti's
 # singleton) when the active model changes.
 #
-# include_raw lets router_node salvage should_reply from the raw tool-call args
-# when structured parsing fails (the model occasionally omits a required field).
 _client_cache: Dict[str, Any] = {}
 
 
@@ -363,16 +350,6 @@ def _base_chat(model: str, temperature: float) -> ChatOpenAI:
         # input across requests and model restarts.
         reasoning_effort="none",
     )
-
-
-async def _get_router_llm():
-    model = await _current_main_model()
-    key = f"router:{model}"
-    if key not in _client_cache:
-        _client_cache[key] = _base_chat(model, 0.0).with_structured_output(
-            RouterOutput, method="function_calling", include_raw=True
-        )
-    return _client_cache[key]
 
 
 async def _get_summarizer_llm():
@@ -500,54 +477,45 @@ async def router_node(state: GraphState) -> Dict:
         recent_history, divider_text=ROUTER_NODE_DIVIDER, watermark=state.get("responded_watermark")
     )
 
-    # In a 1-on-1 DM use the PM-specific gate (filters out low-information
-    # acknowledgements and already-answered messages); in groups use the default
-    # gate (filters out chatter that doesn't concern Rachel).
-    router_prompt = ROUTER_PM_SYSTEM_PROMPT if state.get("is_private") else ROUTER_SYSTEM_PROMPT
-    system_msgs = ChatPromptTemplate.from_messages(
-        [("system", router_prompt)]
-    ).format_messages(current_summary=state.get("current_summary") or "")
-    msgs = [*system_msgs, *history_msgs]
-
-    msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
-    print(f"[router] context: {len(msgs)} messages, {msgs_tokens} tokens")
+    question = ROUTER_PRIVATE_QUESTION if state.get("is_private") else ROUTER_GROUP_QUESTION
+    decision_state = (
+        f"Conversation summary: {state.get('current_summary') or '(none)'}\n\n"
+        "Recent messages:\n"
+        + "\n".join(str(message.content) for message in history_msgs)
+    )
+    print(f"[router] context: {len(history_msgs)} messages, {_count_tokens(decision_state)} tokens")
 
     LLM_CALLS.labels(node="router").inc()
     try:
-        result = await (await _get_router_llm()).ainvoke(msgs)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                f"{settings.merge_gateway_base_url.rstrip('/')}/decisions",
+                headers={"Authorization": f"Bearer {settings.merge_gateway_api_key}"},
+                json={
+                    "model": settings.decisions_llm,
+                    "state": decision_state,
+                    "questions": {"should_reply": question},
+                },
+            )
+            response.raise_for_status()
+        answer = response.json()["answers"]["should_reply"]
+        probability = answer["noul"]
+        if (
+            answer.get("type") != "noul"
+            or isinstance(probability, bool)
+            or not isinstance(probability, (int, float))
+            or not math.isfinite(probability)
+            or not 0 <= probability <= 1
+        ):
+            raise ValueError("Invalid should_reply Noul answer")
     except Exception as e:
         kind = record_llm_error("router", e)
-        print(f"[router] LLM error ({kind}; defaulting to reply): {type(e).__name__}: {e}")
+        print(f"[router] decision error ({kind}; defaulting to reply): {type(e).__name__}: {e}")
         return {"should_reply": True}
 
-    parsed: RouterOutput | None = result.get("parsed")
-    if parsed is not None:
-        print(f"[router] should_reply={parsed.should_reply} | reason={parsed.reason}")
-        return {"should_reply": parsed.should_reply}
-
-    # Structured parsing failed (model omitted a required field). Try to salvage
-    # the actual decision from the raw tool-call args before falling open — a
-    # dropped `reason` shouldn't force a reply when should_reply was given.
-    should_reply = _salvage_should_reply(result.get("raw"))
-    print(
-        f"[router] structured parse failed ({result.get('parsing_error')}); "
-        f"salvaged should_reply={should_reply}"
-    )
+    should_reply = probability >= 0.8
+    print(f"[router] should_reply={should_reply} | probability={probability:.3f}")
     return {"should_reply": should_reply}
-
-
-def _salvage_should_reply(raw: Any) -> bool:
-    """Pull should_reply out of a raw model response whose structured parse failed.
-    Falls open to True (reply) when the field is absent or unreadable."""
-    try:
-        tool_calls = getattr(raw, "tool_calls", None) or []
-        if tool_calls:
-            value = tool_calls[0].get("args", {}).get("should_reply")
-            if isinstance(value, bool):
-                return value
-    except Exception:
-        pass
-    return True
 
 
 def _route_after_router(state: GraphState):

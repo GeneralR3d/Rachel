@@ -6,6 +6,7 @@ so the HTTP API and the in-Telegram admin bot stay in sync.
 
 import asyncio
 import base64
+import json
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -27,7 +28,7 @@ router = APIRouter()
 # summarizer prompts are intentionally excluded here — they live in the DB
 # and have their own editable endpoints above.
 WORKFLOW_PROMPTS: list[tuple[str, str, str]] = [
-    ("router", "Router / reply-gating", prompts.ROUTER_SYSTEM_PROMPT),
+    ("router", "Router / reply-gating", json.dumps(prompts.ROUTER_GROUP_QUESTION, indent=2)),
     ("worldview_fact_extractor", "World-view: fact extractor", prompts.FACT_EXTRACTOR_SYSTEM_PROMPT),
     ("worldview_consolidation", "World-view: consolidation", prompts.CONSOLIDATION_SYSTEM_PROMPT),
     ("userfacts_fact_extractor", "User facts: fact extractor", prompts.USER_FACT_EXTRACTOR_SYSTEM_PROMPT),
