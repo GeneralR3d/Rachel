@@ -29,6 +29,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from app.config import get_settings
 from app.services.userfacts import update_user_facts
 from app.services.worldview import update_worldview
+from app.services.tracing import traced_workflow
 
 BOT_NAME = get_settings().bot_name
 
@@ -88,6 +89,8 @@ async def update_memories(
     summary: str = "",
     chat_id: int | None = None,
     last_processed_id: int = 0,
+    session_id: str | None = None,
+    chat_name: str | None = None,
 ) -> None:
     """Run both memory pipelines on a finished conversation.
 
@@ -101,8 +104,9 @@ async def update_memories(
     if not conversation:
         return
 
-    extraction_msgs, has_new = build_extraction_history(conversation, last_processed_id)
-    await asyncio.gather(
-        update_worldview(extraction_msgs, has_new, chat_id),
-        update_user_facts(conversation, extraction_msgs, has_new, summary, chat_id),
-    )
+    with traced_workflow("memory_update", session_id, chat_id, chat_name):
+        extraction_msgs, has_new = build_extraction_history(conversation, last_processed_id)
+        await asyncio.gather(
+            update_worldview(extraction_msgs, has_new, chat_id),
+            update_user_facts(conversation, extraction_msgs, has_new, summary, chat_id),
+        )
