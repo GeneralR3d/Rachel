@@ -25,7 +25,7 @@ Rachel does not answer directly inside Telegram's message-arrival event. Every n
 
 ### 2. Layered participation instead of “always reply”
 
-Direct mentions and replies can bypass the LLM gate, while ordinary group messages and DMs pass through purpose-specific router prompts that decide whether a response adds value. Untagged conversations also have a small spontaneity path, so Rachel can occasionally join naturally without dominating the room. Operators can issue strict natural-language controls—`Rachel shush` for a 15-minute silence, `Rachel mute` for indefinite silence, and `Rachel speak` to resume—without stopping persistence or memory extraction.
+Direct mentions and replies can bypass the JEV decision gate, while ordinary group messages and DMs pass through purpose-specific reply questions that decide whether a response adds value. Untagged conversations also have a small spontaneity path, so Rachel can occasionally join naturally without dominating the room. Operators can issue strict natural-language controls—`Rachel shush` for a 15-minute silence, `Rachel mute` for indefinite silence, and `Rachel speak` to resume—without stopping persistence or memory extraction.
 
 ### 3. Selective retrieval in parallel with summarization
 
@@ -108,7 +108,7 @@ flowchart LR
     S((start)) --> C[cheap checker]
     C -->|forced reply| SUM[summarizer]
     C -->|forced reply| CTX[context fetcher]
-    C -->|ordinary turn| R[LLM router]
+    C -->|ordinary turn| R[JEV decision router]
     R -->|stay silent| E((end))
     R -->|reply| SUM
     R -->|reply| CTX
@@ -246,7 +246,7 @@ Rachel's own Telegram login is intentionally not stored in `.env`; step 6 create
 #### Merge Gateway and model roles
 
 **`MERGE_GATEWAY_API_KEY`** *(required)*
-Authenticates reply routing, summarization, context selection, user-fact extraction, and profile extraction. Create a Gateway credential at [gateway.merge.dev](https://gateway.merge.dev).
+Authenticates JEV reply routing, summarization, context selection, user-fact extraction, and profile extraction. Create a Gateway credential at [gateway.merge.dev](https://gateway.merge.dev).
 Example: `MERGE_GATEWAY_API_KEY=mg_...`
 
 **`MERGE_GATEWAY_GRAPHITI_API_KEY`** *(optional)*
@@ -254,7 +254,7 @@ Separately meters the world-view extractor and Graphiti's internal LLM, embeddin
 Example: `MERGE_GATEWAY_GRAPHITI_API_KEY=mg_...`
 
 **`MERGE_GATEWAY_BASE_URL`** *(optional)*
-Gateway-native base URL used by Graphiti embeddings. Keep the default unless you operate a custom endpoint.
+Gateway-native base URL used by Graphiti embeddings and the router's `/decisions` request. Keep the default unless you operate a custom endpoint.
 Default: `https://api-gateway.merge.dev/v1`
 
 **`MERGE_GATEWAY_OPENAI_BASE_URL`** *(optional)*
@@ -262,8 +262,12 @@ OpenAI-compatible base URL used by chat completions and reranking. The `/v1/open
 Default: `https://api-gateway.merge.dev/v1/openai`
 
 **`LLM_MODEL`** *(optional)*
-Initial model for the reply workflows, extractors, and Graphiti's main role. The value must use Gateway's `provider/model` format.
+Initial model for the chat reply workflows, extractors, and Graphiti's main role. The value must use Gateway's `provider/model` format.
 Default: `deepseek/deepseek-v4-flash`
+
+**`DECISIONS_LLM`** *(optional)*
+Decision model for the router's reply gate. The router asks one `should_reply` Noul question through `/v1/decisions` and replies when its probability is at least 0.7. Invalid answers and request errors default to replying.
+Default: `typesafe/jev-1.13`
 
 **`LLM_SMALL_MODEL`** *(optional; supported by the code but not currently listed in `template.env`)*
 Initial smaller model for Graphiti helper and reranker calls.

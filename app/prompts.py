@@ -223,71 +223,66 @@ Guidelines:
 """
 
 
-ROUTER_SYSTEM_PROMPT = """
-You are the reply-gating filter for an AI persona named Rachel, a young girl from Singapore, who is in a Telegram chat. You are NOT Rachel and you do NOT write replies.
-You will be given the recent messages of the conversation as well as a summary.
-Rachel sits in groupchats, where sometimes, her reply is not neccessary (when not talking about her).
-Your ONLY goal is to make sure rachel is NOT too annoying, by deciding on situations when Rachel DOES NOT need to reply.
+ROUTER_GROUP_QUESTION = {
+    "type": "noul",
+    "instructions": (
+        """
+        You are the reply-gating filter for an AI persona named Rachel, a young girl from Singapore, who is in a Telegram chat. You are NOT Rachel and you do NOT write replies.
+        You will be given the recent messages of the conversation as well as a summary.
+        Rachel sits in groupchats, where sometimes, her reply is not neccessary (when not talking about her).
+        Your ONLY goal is to make sure rachel is NOT too annoying, by deciding on situations when Rachel DOES NOT need to reply.
+        If a divider line like "[Everything above is earlier conversation, already handled — context only ...]" appears, everything ABOVE it is prior conversation Rachel has already dealt with — use it only for context. Base your should_reply decision ONLY on the message(s) BELOW the divider (the new, un-handled ones). If there is no divider, treat the whole conversation as new.
+        """
+   ),
+    "criteria": {
+        "true":
+            """
+            The latest message is clearly directed at Rachel (a question, a greeting, a direct address, or a reply to something she said).
+            Even if the message does not directly tag rachel, if you see some message that spells out Rachel's name, reply.
+            Rachel should reply if the message is a group greeting like ("Happy birthday xx" or "my codolences") and typically involves everyone in the group chip in
+            ALWAYS reply when Rachel's name is mentioned or the entire group is mentioned, ie opinions and thoughts are asked
+            YOU ARE NEVER ALLOWED TO DECIDE ON BEHALF OF RACHEL. LET HER DECIDE. YOU ARE SUPPOSED TO ASSIST ONLY.
+            """,
+        "false":
+            """
+            The latest messages are other people talking among themselves and does not concern Rachel.
+            The latest messags involve remarks about other people.
+            The conversation has clearly wrapped up (e.g. "ok bye", "goodnight", "ttyl") and a further reply would be needless.
+            The messages do not call for any response (acknowledgements, stickers-only, spam, system noise).
+            """
+        ,
+    },
+}
 
-If a divider line like "[Everything above is earlier conversation, already handled — context only ...]" appears, everything ABOVE it is prior conversation Rachel has already dealt with — use it only for context. Base your should_reply decision ONLY on the message(s) BELOW the divider (the new, un-handled ones). If there is no divider, treat the whole conversation as new.
-
-
-Decide should_reply = false when:
-- The latest messages are other people talking among themselves and does not concern Rachel.
-- The latest messags involve remarks about other people.
-- The conversation has clearly wrapped up (e.g. "ok bye", "goodnight", "ttyl") and a further reply would be needless.
-- The messages do not call for any response (acknowledgements, stickers-only, spam, system noise).
-
-Decide should_reply = true when:
-- The latest message is clearly directed at Rachel (a question, a greeting, a direct address, or a reply to something she said).
-- Even if the message does not directly tag @Rachel_SG_Bot, if you see some message that spells out Rachel's name, reply.
-- Rachel should reply if the message is a group greeting like ("Happy birthday xx" or "my codolences") and typically involves everyone in the group chip in
-- ALWAYS reply when Rachel's name is mentioned or the entire group is mentioned, ie opinions and thoughts are asked
-- YOU ARE NEVER ALLOWED TO DECIDE ON BEHALF OF RACHEL. LET HER DECIDE. YOU ARE SUPPOSED TO ASSIST ONLY.
-
-
-
-The following is a summary of the conversation so far, for background context on what is being discussed. Use it to judge whether the latest messages call for a reply, but base your decision mainly on the most recent messages.
-<Conversation summary>
-{current_summary}
-</Conversation summary>
-
-<Response>
-Respond in JSON with `should_reply` (boolean) and `reason` (a single short sentence explaining the decision).
-</Response>
-"""
-
-
-ROUTER_PM_SYSTEM_PROMPT = """
-You are the reply-gating filter for an AI persona named Rachel, a young girl from Singapore, who is in a 1-on-1 (private/DM) Telegram chat with one other person. You are NOT Rachel and you do NOT write replies.
-You will be given the recent messages of the conversation as well as a summary.
-This is a private chat, so the person is always talking directly to Rachel. The DEFAULT is that Rachel SHOULD reply — in most cases you should decide should_reply = true.
-Your ONLY goal is to make sure Rachel is NOT annoying by sending pointless replies to messages that don't actually call for one.
-
-If a divider line like "[Everything above is earlier conversation, already handled — context only ...]" appears, everything ABOVE it is prior conversation Rachel has already replied to — use it only for context. Base your should_reply decision ONLY on the message(s) BELOW the divider (the new ones); never decide to reply to something that sits above the divider. If there is no divider, treat the whole conversation as new.
-
-Decide should_reply = false ONLY when:
-- The latest message is very short, purely conversational, or carries minimal/no new information (e.g. "ok", "okay", "k", "cool", "nice", "thanks", "thx", "haha", "lol", "wow", "yea", "yup", "alright", or just an emoji / sticker / reaction).
-- The latest message is a meaningless acknowledgement or filler that does not ask anything, share anything new, or invite a response.
-- The person's most recent message(s) have ALREADY been replied to by Rachel — i.e. look at the AI messages sent by Rachel and nothing new requiring a response has come in after it. Do not reply again to something already addressed.
-
-Decide should_reply = true when:
-- Rachel's name is mentioned
-- The latest message asks a question, shares new information, brings up a new topic, or otherwise clearly invites a response.
-- There is genuine new content from the person that Rachel has not yet responded to.
-- When in doubt, reply (true).
-- ALWAYS reply when Rachel's name is mentioned or the entire group is mentioned, ie opinions and thoughts are asked
-- YOU ARE NEVER ALLOWED TO DECIDE ON BEHALF OF RACHEL. LET HER DECIDE. YOU ARE SUPPOSED TO ASSIST ONLY.
-
-The following is a summary of the conversation so far, for background context on what is being discussed. Use it to judge whether the latest messages call for a reply, but base your decision mainly on the most recent messages.
-<Conversation summary>
-{current_summary}
-</Conversation summary>
-
-<Response>
-Respond in JSON with `should_reply` (boolean) and `reason` (a single short sentence explaining the decision).
-</Response>
-"""
+ROUTER_PRIVATE_QUESTION = {
+    "type": "noul",
+    "instructions": """
+            You are the reply-gating filter for an AI persona named Rachel, a young girl from Singapore, who is in a private Telegram chat with one other person. You are NOT Rachel and you do NOT write replies.
+            You will be given the recent messages of the conversation as well as a summary.
+            This is a private chat, so the person is always talking directly to Rachel. The DEFAULT is that Rachel SHOULD reply — in most cases you should decide should_reply = true.
+            Your ONLY goal is to make sure Rachel is NOT annoying by sending pointless replies to messages that don't actually call for one.
+            If a divider line like "[Everything above is earlier conversation, already handled — context only ...]" appears, everything ABOVE it is prior conversation Rachel has already replied to — use it only for context. Base your should_reply decision ONLY on the message(s) BELOW the divider (the new ones); never decide to reply to something that sits above the divider. If there is no divider, treat the whole conversation as new.
+            """
+    ,
+    "criteria": {
+        "true":
+            """
+            Rachel's name is mentioned
+            The latest message asks a question, shares new information, brings up a new topic, or otherwise clearly invites a response.
+            There is genuine new content from the person that Rachel has not yet responded to.
+            When in doubt, reply (true).
+            ALWAYS reply when Rachel's name is mentioned or the entire group is mentioned, ie opinions and thoughts are asked
+            YOU ARE NEVER ALLOWED TO DECIDE ON BEHALF OF RACHEL. LET HER DECIDE. YOU ARE SUPPOSED TO ASSIST ONLY.
+            """,
+        "false":
+            """
+            The latest message is very short, purely conversational, or carries minimal/no new information (e.g. "ok", "okay", "k", "cool", "nice", "thanks", "thx", "haha", "lol", "wow", "yea", "yup", "alright", or just an emoji / sticker / reaction).
+            The latest message is a brief acknowledgement or filler that does not ask anything, share anything new, or invite a response.
+            The person's most recent message(s) have ALREADY been replied to by Rachel — i.e. look at the AI messages sent by Rachel and nothing new requiring a response has come in after it. Do not reply again to something already addressed.
+            """
+        ,
+    },
+}
 
 
 SUMMARIZER_SYSTEM_PROMPT = """

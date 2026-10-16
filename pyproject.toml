@@ -9,6 +9,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "telethon>=1.36",
     "openai>=1.0",
+    "httpx>=0.28",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "sqlalchemy[asyncio]>=2.0.30",

@@ -52,6 +52,8 @@ class Settings(BaseSettings):
         "deepseek/deepseek-v4-flash",
         validation_alias=AliasChoices("llm_model", "openrouter_model"),
     )
+    # Decision model used only by the reply-gating router.
+    decisions_llm: str = "typesafe/jev-1.13"
     # Smaller/cheaper model Graphiti uses for its internal helper + reranker calls.
     llm_small_model: str = Field(
         "deepseek/deepseek-v4-flash",
