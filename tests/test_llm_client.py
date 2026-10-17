@@ -8,7 +8,7 @@ from langchain_core.tools import tool
 from openai import AsyncOpenAI
 
 from app.services.llm import _base_chat
-from app.services import userfacts, worldview
+from app.services import llm, userfacts, worldview
 
 
 @tool
@@ -18,6 +18,58 @@ def _lookup(query: str) -> str:
 
 
 class ReplyPipelineClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_responder_uses_medium_reasoning_with_json_schema_and_no_tools(self) -> None:
+        requests: list[dict] = []
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            requests.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "deepseek/deepseek-v4.1-flash",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"content":"hey","reason":"I followed the friendly tone."}',
+                        },
+                        "finish_reason": "stop",
+                    }],
+                },
+            )
+
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle_request))
+        openai_client = AsyncOpenAI(
+            api_key="test-key",
+            base_url="https://gateway.example/v1/openai",
+            http_client=http_client,
+        )
+        llm.invalidate_model_clients()
+        with patch("app.services.llm.get_active_models", new=AsyncMock(return_value={"main": "deepseek/deepseek-v4.1-flash"})):
+            responder = await llm._get_responder_llm()
+        model = responder.first.bound
+        model.async_client = openai_client.chat.completions
+        model.root_async_client = openai_client
+
+        try:
+            result = await responder.ainvoke([
+                AIMessage(content="Rachel: an earlier persisted reply"),
+                HumanMessage(content="Jamie: hi"),
+            ])
+        finally:
+            await openai_client.close()
+            llm.invalidate_model_clients()
+
+        self.assertEqual(result.content, "hey")
+        self.assertEqual(result.reason, "I followed the friendly tone.")
+        self.assertEqual(requests[0].get("reasoning_effort"), "medium")
+        self.assertEqual(requests[0]["response_format"]["type"], "json_schema")
+        self.assertNotIn("tools", requests[0])
+        self.assertNotIn("reasoning_content", requests[0]["messages"][0])
+
     async def test_tool_request_disables_reasoning_for_replay_safe_history(
         self,
     ) -> None:

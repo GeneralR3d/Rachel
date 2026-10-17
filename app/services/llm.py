@@ -314,11 +314,8 @@ class GraphState(TypedDict):
     response_reason: str
 
 
-# method="function_calling" is pinned on every structured-output client below:
-# langchain-openai defaults to json_schema, which Merge Gateway rejects for models
-# without native constrained decoding ("no vendor supports the requested
-# capabilities (['json_schema'])"). function_calling was also what the previous
-# ChatOpenRouter clients defaulted to, so this keeps behaviour identical.
+# The summarizer uses function calling for broad model compatibility. The
+# responder uses json_schema so it can request reasoning without tool calls.
 #
 # The chat clients are built lazily and cached keyed on the active
 # "main" model string (from the DB, via repository.get_active_models), so an admin
@@ -337,19 +334,15 @@ async def _current_main_model() -> str:
         return settings.llm_model
 
 
-def _base_chat(model: str, temperature: float) -> ChatOpenAI:
+def _base_chat(model: str, temperature: float, reasoning_effort: str = "none") -> ChatOpenAI:
     return ChatOpenAI(
         model=model,
         api_key=settings.merge_gateway_api_key,
         base_url=settings.merge_gateway_openai_base_url,
         temperature=temperature,
-        # Every reply-pipeline client sends tools (the structured-output clients
-        # use function calling too). DeepSeek thinking mode requires hidden
-        # reasoning_content to be replayed for every earlier assistant turn when
-        # tools are present, but Rachel intentionally persists only visible reply
-        # text. Disable reasoning so persisted history remains valid tool-call
-        # input across requests and model restarts.
-        reasoning_effort="none",
+        # Tool-bearing clients keep reasoning disabled because persisted replies
+        # contain only visible text, not reasoning_content to replay with tools.
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -367,8 +360,8 @@ async def _get_responder_llm():
     model = await _current_main_model()
     key = f"responder:{model}"
     if key not in _client_cache:
-        _client_cache[key] = _base_chat(model, 0.2).with_structured_output(
-            ResponseOutput, method="function_calling"
+        _client_cache[key] = _base_chat(model, 0.2, reasoning_effort="medium").with_structured_output(
+            ResponseOutput, method="json_schema"
         )
     return _client_cache[key]
 
@@ -822,13 +815,10 @@ async def responder_node(state: GraphState) -> Dict:
                 "response_reason": "Salvaged from non-JSON model output (json_mode parse failure).",
             }
         if result is None:
-            # with_structured_output(method="function_calling") returns None when
-            # the model replies in plain prose without making a tool call. Raise so
-            # the outer BaseException handler logs it and re-raises (the reply task
-            # will fail open — the caller treats an empty response_text as no reply).
+            # A missing parsed object cannot supply the required reply fields.
             record_llm_error("responder", ValueError("with_structured_output returned None"))
-            print("[responder] structured output returned None (model sent no tool call)")
-            raise ValueError("Responder LLM returned None (no tool call in response)")
+            print("[responder] structured output returned None")
+            raise ValueError("Responder LLM returned no parsed response")
         print(f"[responder] LLM returned: content={result.content[:80]!r} | reason={result.reason!r}")
         return {"response_text": result.content, "response_reason": result.reason}
     except BaseException as e:
