@@ -6,12 +6,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
+from langgraph.graph import END, START, StateGraph
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace.status import StatusCode
 from openinference.instrumentation import get_attributes_from_context
+from openinference.instrumentation.langchain import LangChainInstrumentor
 
 from app.services import llm, memory
 from app.services.tracing import traced_workflow
@@ -152,6 +154,59 @@ class PhoenixGroupingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attrs["llm.token_count.completion"], 1)
         self.assertEqual(attrs["llm.token_count.total"], 21)
         self.assertEqual(attrs["llm.cost.total"], 0.002)
+
+    async def test_jev_decision_is_nested_under_instrumented_router(self):
+        instrumentor = LangChainInstrumentor()
+        instrumentor.instrument(tracer_provider=self.provider)
+        self.addCleanup(instrumentor.uninstrument)
+        graph = StateGraph(llm.GraphState)
+        graph.add_node("router_node", llm.router_node)
+        graph.add_edge(START, "router_node")
+        graph.add_edge("router_node", END)
+        compiled = graph.compile()
+
+        for status, body, should_reply in (
+            (200, {"answers": {"should_reply": {"type": "noul", "noul": 0.69}}}, False),
+            (200, {"answers": {"should_reply": {"type": "noul", "noul": 0.8}}}, True),
+            (503, {"error": "upstream unavailable"}, True),
+            (200, {"answers": {"should_reply": {"type": "noul", "noul": 1.5}}}, True),
+        ):
+            with self.subTest(status=status, body=body):
+                self.exporter.clear()
+                client = httpx.AsyncClient(transport=httpx.MockTransport(
+                    lambda request: httpx.Response(status, json=body)
+                ))
+                try:
+                    with patch("httpx.AsyncClient", return_value=client), traced_workflow("telegram_reply", "burst-1"):
+                        result = await compiled.ainvoke({
+                            "history": [{"sender": "Alex", "content": "Thanks"}],
+                            "current_summary": None, "responded_watermark": None,
+                            "is_private": False,
+                        }, config={"run_name": "RachelReplyGraph"})
+                        self.assertEqual(trace.get_current_span().name, "telegram_reply")
+                finally:
+                    await client.aclose()
+
+                self.assertEqual(result["should_reply"], should_reply)
+                spans = {span.name: span for span in self.exporter.get_finished_spans()}
+                root, graph_span, router, decision = (
+                    spans[name] for name in ("telegram_reply", "RachelReplyGraph", "router_node", "JEV decision")
+                )
+                self.assertIsNone(root.parent)
+                self.assertEqual(graph_span.parent.span_id, root.context.span_id)
+                self.assertEqual(router.parent.span_id, graph_span.context.span_id)
+                self.assertEqual(decision.parent.span_id, router.context.span_id)
+                self.assertEqual({span.context.trace_id for span in spans.values()}, {root.context.trace_id})
+                self.assertEqual(router.status.status_code, StatusCode.OK)
+                if status == 503 or body["answers"]["should_reply"]["noul"] == 1.5:
+                    self.assertEqual(decision.status.status_code, StatusCode.ERROR)
+                    self.assertEqual(json.loads(decision.attributes["output.value"]), {"should_reply": True})
+                    self.assertIn("exception", [event.name for event in decision.events])
+                else:
+                    self.assertNotEqual(decision.status.status_code, StatusCode.ERROR)
+                    self.assertEqual(json.loads(decision.attributes["output.value"]), {
+                        "probability": body["answers"]["should_reply"]["noul"], "should_reply": should_reply,
+                    })
 
     async def test_jev_http_and_answer_errors_are_traced_while_router_fails_open(self):
         for status, body in (
