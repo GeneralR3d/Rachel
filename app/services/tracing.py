@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from typing import Any, Callable, Iterator
 
 from openinference.instrumentation import using_attributes
+from openinference.instrumentation.langchain import get_current_span as get_langchain_span
 from openinference.semconv.trace import SpanAttributes
 from opentelemetry import context, trace
 
@@ -43,7 +44,10 @@ def traced_jev_decision(
     model: str, state: str, question: dict[str, Any]
 ) -> Iterator[Callable[[dict[str, Any], float, bool], None]]:
     """Trace a JEV call, including its validated result or fail-open error."""
-    with trace.get_tracer(__name__).start_as_current_span("JEV decision") as span:
+    # LangChain's callback spans are not attached to the OpenTelemetry context.
+    parent = get_langchain_span()
+    parent_context = trace.set_span_in_context(parent) if parent is not None else None
+    with trace.get_tracer(__name__).start_as_current_span("JEV decision", context=parent_context) as span:
         span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, "LLM")
         span.set_attribute(SpanAttributes.LLM_MODEL_NAME, model)
         span.set_attribute(SpanAttributes.LLM_REQUEST_MODEL_NAME, model)
