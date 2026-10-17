@@ -14,6 +14,7 @@ doesn't override ``clone``), so partitions never clash with each other.
 """
 
 import asyncio
+import json
 import logging
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -47,8 +48,7 @@ _graphiti: Graphiti | None = None
 
 
 class _RetryingOpenAIGenericClient(OpenAIGenericClient):
-    """OpenAIGenericClient that re-rolls when the model returns valid JSON whose
-    *shape* doesn't match the requested response_model.
+    """Re-prompt malformed JSON and schema mismatches within one retry budget.
 
     Graphiti validates the returned dict against its own pydantic models (e.g.
     ``ExtractedEdges`` / ``NodeResolutions``) **after** ``generate_response``
@@ -56,11 +56,12 @@ class _RetryingOpenAIGenericClient(OpenAIGenericClient):
     transport errors (rate-limit / empty / 5xx / JSON-decode) — never sees these
     schema-*shape* mismatches. deepseek-v4-flash occasionally emits e.g. a
     pipe-delimited header string in place of a list of edge objects; a re-roll
-    with a corrective note usually fixes it. We validate here (where the
-    response_model is available) and retry a few times before giving up. On
-    exhaustion the last result is returned unchanged, so behaviour is never worse
-    than the un-wrapped client (Graphiti raises the same ValidationError it would
-    have anyway).
+    with schema-specific feedback usually fixes it. We validate here (where the
+    response_model is available) and retry a few times before giving up. JSON
+    parse failures get corrective feedback too, rather than falling through to
+    identical-prompt transport retries. On exhaustion, schema-invalid results
+    pass through for Graphiti to validate; malformed JSON raises ValueError so
+    the outer retry policy cannot restart the exhausted format-retry budget.
     """
 
     _VALIDATION_RETRIES = 3
@@ -103,18 +104,25 @@ class _RetryingOpenAIGenericClient(OpenAIGenericClient):
         # tenacity retries, which reuse the caller's message list.
         working = [Message(role=m.role, content=m.content) for m in messages]
         result: Dict[str, Any] = {}
+        name = getattr(response_model, "__name__", "response")
         for attempt in range(self._VALIDATION_RETRIES + 1):
-            result = await super()._generate_response(
-                working, response_model, max_tokens, model_size
-            )
-            if response_model is None:
-                return result
             try:
-                response_model.model_validate(result)
+                result = await super()._generate_response(
+                    working, response_model, max_tokens, model_size
+                )
+                if response_model is not None:
+                    response_model.model_validate(result)
                 return result
-            except ValidationError as e:
-                name = getattr(response_model, "__name__", "response")
+            except (json.JSONDecodeError, ValidationError) as e:
+                invalid_json = isinstance(e, json.JSONDecodeError)
                 if attempt == self._VALIDATION_RETRIES:
+                    if invalid_json:
+                        # A JSONDecodeError here would trigger the outer tenacity
+                        # policy and multiply the format attempts. Keep its cause
+                        # for diagnostics, but stop retrying this malformed output.
+                        raise ValueError(
+                            f"{name}: invalid JSON after {attempt + 1} attempts: {e}"
+                        ) from e
                     # Exhausted the re-rolls — Graphiti will raise this same
                     # ValidationError downstream (outside this client), so it
                     # never reaches generate_response's except. Count it here.
@@ -128,16 +136,27 @@ class _RetryingOpenAIGenericClient(OpenAIGenericClient):
                     f"[graphiti] structured-output invalid ({name}, "
                     f"attempt {attempt + 1}); retrying"
                 )
+                correction = (
+                    f"Your previous response was not valid JSON:\n{e}"
+                    if invalid_json else
+                    "Your previous JSON did not match the required schema and "
+                    f"failed validation with:\n{e}"
+                )
+                correction += (
+                    "\n\nRespond again with ONE JSON object. Do not include multiple "
+                    "JSON objects, Markdown fences, explanations, or any text after "
+                    "the object. Follow the exact field names and value types in the "
+                    "required schema, including each array's item type."
+                )
+                if response_model is not None:
+                    correction += (
+                        "\n\nRequired JSON schema:\n"
+                        + json.dumps(response_model.model_json_schema())
+                    )
                 working.append(
                     Message(
                         role="user",
-                        content=(
-                            "Your previous JSON did not match the required schema and "
-                            f"failed validation with:\n{e}\n\nRespond again with ONE JSON "
-                            "object that strictly matches the schema. Every array element "
-                            "must be a JSON object with the specified fields — never a "
-                            "string or a header line."
-                        ),
+                        content=correction,
                     )
                 )
         return result
