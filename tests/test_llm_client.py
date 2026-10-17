@@ -20,6 +20,11 @@ def _lookup(query: str) -> str:
 class ReplyPipelineClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_responder_uses_medium_reasoning_with_json_schema_and_no_tools(self) -> None:
         requests: list[dict] = []
+        outputs = iter([
+            '{"decision":"respond","retrieval_request":"","content":"hey","reason":"I followed the friendly tone."}',
+            '{"content":"Which cafe?","reason":"INTERNAL","retrieval_request":"INTERNAL"}',
+            'Could you tell me which day?',
+        ])
 
         def handle_request(request: httpx.Request) -> httpx.Response:
             requests.append(json.loads(request.content))
@@ -34,7 +39,7 @@ class ReplyPipelineClientTests(unittest.IsolatedAsyncioTestCase):
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": '{"content":"hey","reason":"I followed the friendly tone."}',
+                            "content": next(outputs),
                         },
                         "finish_reason": "stop",
                     }],
@@ -50,7 +55,7 @@ class ReplyPipelineClientTests(unittest.IsolatedAsyncioTestCase):
         llm.invalidate_model_clients()
         with patch("app.services.llm.get_active_models", new=AsyncMock(return_value={"main": "deepseek/deepseek-v4.1-flash"})):
             responder = await llm._get_responder_llm()
-        model = responder.first.bound
+        model = responder.first.steps__["raw"].bound
         model.async_client = openai_client.chat.completions
         model.root_async_client = openai_client
 
@@ -59,12 +64,23 @@ class ReplyPipelineClientTests(unittest.IsolatedAsyncioTestCase):
                 AIMessage(content="Rachel: an earlier persisted reply"),
                 HumanMessage(content="Jamie: hi"),
             ])
+            with (
+                patch.object(llm, "_get_responder_llm", AsyncMock(return_value=responder)),
+                patch.object(llm, "get_responder_system_prompt", AsyncMock(return_value="Reply naturally.")),
+                patch.object(llm, "get_active_trait_prompts", AsyncMock(return_value="friendly")),
+            ):
+                for expected in ("Which cafe?", "Could you tell me which day?"):
+                    fallback = await llm.responder_node({"history": [], "tool_observations": [], "context_passes": 1})
+                    self.assertEqual(fallback["response_text"], expected)
+                    self.assertEqual(fallback["responder_decision"], "respond")
+                    self.assertEqual(fallback["responder_status"], "parse_fallback")
         finally:
             await openai_client.close()
             llm.invalidate_model_clients()
 
-        self.assertEqual(result.content, "hey")
-        self.assertEqual(result.reason, "I followed the friendly tone.")
+        self.assertEqual(result["parsed"]["content"], "hey")
+        self.assertEqual(result["parsed"]["reason"], "I followed the friendly tone.")
+        self.assertIsNone(result["parsing_error"])
         self.assertEqual(requests[0].get("reasoning_effort"), "medium")
         self.assertEqual(requests[0]["response_format"]["type"], "json_schema")
         self.assertNotIn("tools", requests[0])

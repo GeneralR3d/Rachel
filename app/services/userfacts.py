@@ -113,9 +113,9 @@ _user_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 # --- Storage access (Graphiti) ------------------------------------------------
 
 
-async def search_user_facts(user_id: int, query: str | None = None) -> str:
+async def search_user_facts(user_id: int, query: str | None = None, *, raise_on_error: bool = False) -> str:
     """Search one user's personal-facts partition; see ``graphiti.search_graph``."""
-    return await search_graph(query, user_facts_group_id(user_id), "[userfacts]")
+    return await search_graph(query, user_facts_group_id(user_id), "[userfacts]", raise_on_error=raise_on_error)
 
 
 async def add_user_facts(user_id: int, facts: List[str]) -> None:
@@ -147,7 +147,7 @@ async def get_user_facts(user_id: int) -> List[str]:
     return await list_episodes(user_facts_group_id(user_id))
 
 
-async def search_user_info(user_id: int, query: str | None = None) -> tuple[str, dict]:
+async def search_user_info(user_id: int, query: str | None = None, *, raise_on_error: bool = False) -> tuple[str, dict]:
     """Fetch BOTH halves of Rachel's memory about one participant in one shot.
 
     Wraps ``search_user_facts`` (the free-form Graphiti facts) and, in addition,
@@ -163,7 +163,7 @@ async def search_user_info(user_id: int, query: str | None = None) -> tuple[str,
     # top-level import here would be circular.
     from app.services.llm import get_user_profiles_cached
 
-    facts = await search_user_facts(user_id, query)
+    facts = await search_user_facts(user_id, query, raise_on_error=raise_on_error)
     profiles = await get_user_profiles_cached([user_id])
     return facts, profiles.get(user_id, {})
 
