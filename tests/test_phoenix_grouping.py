@@ -5,10 +5,12 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace.status import StatusCode
 from openinference.instrumentation import get_attributes_from_context
 
 from app.services import llm, memory
@@ -109,6 +111,75 @@ class PhoenixGroupingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(attributes["metadata"]), {"telegram_chat_id": -42})
         root = self.exporter.get_finished_spans()[0]
         self.assertEqual(json.loads(root.attributes["metadata"]), {"telegram_chat_id": -42})
+
+    async def test_jev_decision_is_visible_in_reply_trace(self):
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(
+            200,
+            json={
+                "object": "decision", "model": "jev-1.13.0", "vendor": "typesafe",
+                "answers": {"should_reply": {"type": "noul", "noul": 0.69}},
+                "usage": {"input_tokens": 20, "output_tokens": 1, "total_tokens": 21, "cost": 0.002},
+            },
+        )))
+        try:
+            with patch("httpx.AsyncClient", return_value=client), traced_workflow("telegram_reply", "burst-1"):
+                result = await llm.router_node({
+                    "history": [{"sender": "Alex", "content": "Thanks"}],
+                    "current_summary": "Planning dinner", "responded_watermark": None,
+                    "is_private": False,
+                })
+        finally:
+            await client.aclose()
+
+        self.assertEqual(result, {"should_reply": False})
+        spans = {span.name: span for span in self.exporter.get_finished_spans()}
+        self.assertEqual(len(spans), 2)
+        root, decision = spans["telegram_reply"], spans["JEV decision"]
+        self.assertEqual(decision.parent.span_id, root.context.span_id)
+        self.assertEqual(decision.context.trace_id, root.context.trace_id)
+        attrs = decision.attributes
+        self.assertEqual(attrs["openinference.span.kind"], "LLM")
+        self.assertEqual(attrs["llm.model_name"], "jev-1.13.0")
+        self.assertEqual(attrs["llm.request.model_name"], llm.settings.decisions_llm)
+        self.assertEqual(attrs["llm.response.model_name"], "jev-1.13.0")
+        self.assertEqual(attrs["llm.provider"], "typesafe")
+        self.assertEqual(attrs["input.mime_type"], "application/json")
+        traced_input = json.loads(attrs["input.value"])
+        self.assertIn("Planning dinner", traced_input["state"])
+        self.assertEqual(traced_input["questions"]["should_reply"], llm.ROUTER_GROUP_QUESTION)
+        self.assertEqual(json.loads(attrs["output.value"]), {"probability": 0.69, "should_reply": False})
+        self.assertEqual(attrs["llm.token_count.prompt"], 20)
+        self.assertEqual(attrs["llm.token_count.completion"], 1)
+        self.assertEqual(attrs["llm.token_count.total"], 21)
+        self.assertEqual(attrs["llm.cost.total"], 0.002)
+
+    async def test_jev_http_and_answer_errors_are_traced_while_router_fails_open(self):
+        for status, body in (
+            (503, {"error": "upstream unavailable"}),
+            (200, {"answers": {"should_reply": {"type": "noul", "noul": 1.5}}}),
+        ):
+            with self.subTest(status=status):
+                self.exporter.clear()
+                client = httpx.AsyncClient(transport=httpx.MockTransport(
+                    lambda request: httpx.Response(status, json=body)
+                ))
+                try:
+                    with patch("httpx.AsyncClient", return_value=client), traced_workflow("telegram_reply", "burst-1"):
+                        result = await llm.router_node({
+                            "history": [{"sender": "Alex", "content": "Thanks"}],
+                            "current_summary": None, "responded_watermark": None,
+                            "is_private": False,
+                        })
+                finally:
+                    await client.aclose()
+
+                self.assertEqual(result, {"should_reply": True})
+                spans = {span.name: span for span in self.exporter.get_finished_spans()}
+                self.assertEqual(set(spans), {"telegram_reply", "JEV decision"})
+                self.assertEqual(spans["JEV decision"].parent.span_id, spans["telegram_reply"].context.span_id)
+                self.assertEqual(spans["JEV decision"].status.status_code, StatusCode.ERROR)
+                self.assertEqual(json.loads(spans["JEV decision"].attributes["output.value"]), {"should_reply": True})
+                self.assertIn("exception", [event.name for event in spans["JEV decision"].events])
 
     async def test_chat_display_name_uses_group_title_or_user_name(self):
         self.assertEqual(

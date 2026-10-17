@@ -47,6 +47,7 @@ import httpx
 
 from app.services import worldview
 from app.services.metrics import LLM_CALLS, record_llm_error
+from app.services.tracing import traced_jev_decision
 
 _tokenizer = tiktoken.get_encoding("cl100k_base")
 
@@ -487,33 +488,36 @@ async def router_node(state: GraphState) -> Dict:
 
     LLM_CALLS.labels(node="router").inc()
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
-                f"{settings.merge_gateway_base_url.rstrip('/')}/decisions",
-                headers={"Authorization": f"Bearer {settings.merge_gateway_api_key}"},
-                json={
-                    "model": settings.decisions_llm,
-                    "state": decision_state,
-                    "questions": {"should_reply": question},
-                },
-            )
-            response.raise_for_status()
-        answer = response.json()["answers"]["should_reply"]
-        probability = answer["noul"]
-        if (
-            answer.get("type") != "noul"
-            or isinstance(probability, bool)
-            or not isinstance(probability, (int, float))
-            or not math.isfinite(probability)
-            or not 0 <= probability <= 1
-        ):
-            raise ValueError("Invalid should_reply Noul answer")
+        with traced_jev_decision(settings.decisions_llm, decision_state, question) as record_result:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    f"{settings.merge_gateway_base_url.rstrip('/')}/decisions",
+                    headers={"Authorization": f"Bearer {settings.merge_gateway_api_key}"},
+                    json={
+                        "model": settings.decisions_llm,
+                        "state": decision_state,
+                        "questions": {"should_reply": question},
+                    },
+                )
+                response.raise_for_status()
+            decision = response.json()
+            answer = decision["answers"]["should_reply"]
+            probability = answer["noul"]
+            if (
+                answer.get("type") != "noul"
+                or isinstance(probability, bool)
+                or not isinstance(probability, (int, float))
+                or not math.isfinite(probability)
+                or not 0 <= probability <= 1
+            ):
+                raise ValueError("Invalid should_reply Noul answer")
+            should_reply = probability >= 0.8
+            record_result(decision, probability, should_reply)
     except Exception as e:
         kind = record_llm_error("router", e)
         print(f"[router] decision error ({kind}; defaulting to reply): {type(e).__name__}: {e}")
         return {"should_reply": True}
 
-    should_reply = probability >= 0.8
     print(f"[router] should_reply={should_reply} | probability={probability:.3f}")
     return {"should_reply": should_reply}
 
