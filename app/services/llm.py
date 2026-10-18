@@ -24,6 +24,7 @@ import httpx
 from app.services import worldview
 from app.services.metrics import AGENT_CONTEXT_PASSES, AGENT_LOOP_OUTCOMES, LLM_CALLS, record_llm_error
 from app.services.context import ToolObservation
+from app.services.url_fetch import fetch_url, normalize_url
 from app.services.prompt_builders import (
     build_context_fetcher_handoff,
     build_context_fetcher_prompt,
@@ -31,6 +32,8 @@ from app.services.prompt_builders import (
     build_responder_context,
     build_responder_loop_message,
     build_responder_prompt,
+    build_url_context_message,
+    split_url_observations,
 )
 from app.services.tracing import traced_jev_decision
 
@@ -357,7 +360,7 @@ async def _get_responder_llm():
 # some models — each pass has a hard timeout below and records failures as
 # observations, so a hang/error can never stall the pipeline.) CONTEXT_TOOLS is the
 # single source of truth for both the agent's tools and its dynamic prompt.
-CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool, *PROACTIVE_TOOLS]
+CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool, *PROACTIVE_TOOLS, fetch_url]
 
 
 class ContextFetcherPromptContext(TypedDict):
@@ -576,6 +579,8 @@ def _resolve_name_to_id(
 def _context_category(name: str) -> str:
     if name in {tool.name for tool in PROACTIVE_TOOLS}:
         return "proactive_schedules"
+    if name == fetch_url.name:
+        return "url_content"
     if name == search_world_view.name:
         return "worldview"
     if name == search_user_info_tool.name:
@@ -605,18 +610,20 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
     )
     participants = ", ".join(senders.values()) or "(unknown)"
     pass_number = state.get("context_passes", 0) + 1
-    # Supply all earlier results and failures for the agent to evaluate.
-    # This handoff is not a user turn.
+    # Keep URL payloads and failures out of the system-message handoff.
+    other_observations, url_observations = split_url_observations(observations)
     handoff = SystemMessage(content=build_context_fetcher_handoff(
         context_pass=pass_number,
         max_context_passes=settings.agent_max_context_passes,
         retrieval_request=state.get("retrieval_request", ""),
-        observations=observations,
+        observations=other_observations,
     ))
-    
+    url_data = build_url_context_message(observations=url_observations)
+    url_messages = [HumanMessage(content=url_data)] if url_data else []
+
     request = ModelRequest(
         model=await _get_context_fetcher_llm(),
-        messages=[handoff, *history_msgs],
+        messages=[handoff, *url_messages, *history_msgs],
         tools=CONTEXT_TOOLS,
         runtime=Runtime(context={"participants": participants, "datetime": formatted_datetime,
                                  "intent": state.get("intent", "")}),
@@ -644,9 +651,30 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
             # its deadline; completed calls replace it below.
             "status": "timeout", "raw_result": "Tool call exceeded the retrieval pass deadline.",
         }
+        if name == fetch_url.name:
+            observation['url_attempted'] = False
+            try:
+                target = normalize_url(arguments.get('url', ''))
+                observation['arguments'] = {'url': target}
+                if any(o['tool_name'] == fetch_url.name and o['arguments'].get('url') == target
+                       for o in observations):
+                    continue
+                attempted = {o['arguments']['url'] for o in observations
+                             if o['tool_name'] == fetch_url.name and o.get('url_attempted')}
+                if len(attempted) >= 2:
+                    raise ValueError('URL attempt limit reached for this reply')
+            except ValueError as error:
+                observation.update(status='error', raw_result=str(error))
+                observations.append(observation)
+                continue
+            observation['url_attempted'] = True
+        # Reserve attempts before awaiting so a cancelled pass still consumes them.
         observations.append(observation)
         try:
-            if name == search_world_view.name:
+            if name == fetch_url.name:
+                result = await _context_tools_by_name[name].ainvoke(observation['arguments'])
+                usable = bool(result['content'].strip())
+            elif name == search_world_view.name:
                 result = await search_worldview(arguments.get("query", ""), raise_on_error=True)
                 usable = bool(result and result.strip())
             elif name == search_user_info_tool.name:
@@ -779,7 +807,10 @@ async def responder_node(state: GraphState) -> Dict:
         communication_style = CONVERSATION_STYLE.get(mood, CONVERSATION_STYLE["default"])
         print(f"[responder] communication style fetched (tokens={_count_tokens(communication_style)})")
 
-        context = build_responder_context(state.get("tool_observations", []))
+        other_observations, url_observations = split_url_observations(state.get("tool_observations", []))
+        context = build_responder_context(other_observations)
+        url_data = build_url_context_message(observations=url_observations)
+        url_messages = [HumanMessage(content=url_data)] if url_data else []
 
         now = datetime.now(SGT)
         formatted_datetime = (
@@ -817,7 +848,7 @@ async def responder_node(state: GraphState) -> Dict:
             remaining_steps=state.get("remaining_steps"),
             context=context,
         ))
-        msgs = [main_system_message, loop_system_message, *history_msgs]
+        msgs = [main_system_message, loop_system_message, *url_messages, *history_msgs]
         msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
         print(f"[responder] TOTAL context: {len(msgs)} messages, {msgs_tokens} tokens")
 

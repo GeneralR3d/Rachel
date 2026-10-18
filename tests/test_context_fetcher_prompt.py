@@ -66,10 +66,12 @@ class ContextFetcherPromptTests(unittest.TestCase):
 
     def test_guidance_registry_order_and_capability_selection(self):
         guidance = prompts.CONTEXT_FETCHER_TOOL_GUIDANCE
-        self.assertEqual(list(guidance), ["schedule", "worldview", "user_info", "proactive_schedules"])
+        self.assertEqual(list(guidance), ["schedule", "worldview", "user_info", "proactive_schedules", "url_content"])
         for tools, categories in (
-            (list(reversed(llm.CONTEXT_TOOLS)), ["schedule", "worldview", "user_info", "proactive_schedules"]),
+            (list(reversed(llm.CONTEXT_TOOLS)), ["schedule", "worldview", "user_info", "proactive_schedules", "url_content"]),
             ([llm.search_world_view, llm.CALENDAR_TOOLS[-1]], ["schedule", "worldview"]),
+            ([llm.fetch_url], ["url_content"]),
+            ([llm.fetch_url, llm.CALENDAR_TOOLS[0]], ["schedule", "url_content"]),
             ([], []),
         ):
             with self.subTest(categories=categories):
