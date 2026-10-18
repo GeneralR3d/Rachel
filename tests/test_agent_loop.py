@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from prometheus_client import REGISTRY
 
 from app.config import Settings
+from app.prompts import RESPONDER_SYSTEM_PROMPT
 from app.services import llm
 
 REAL_SUMMARIZER = llm.summarizer_node
@@ -87,7 +88,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.stack.enter_context(patch.object(llm, "get_responder_system_prompt", AsyncMock(return_value="Schedule: {schedule_context}\nWorld: {world_view}\nFacts: {user_facts}\nProfiles: {user_profiles}")))
+        self.stack.enter_context(patch.object(llm, "RESPONDER_SYSTEM_PROMPT", RESPONDER_SYSTEM_PROMPT))
         self.stack.enter_context(patch.object(llm, "get_active_trait_prompts", AsyncMock(return_value="friendly")))
         self.summary_runs = 0
 
@@ -129,6 +130,19 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.summary_runs, 1)
         self.assertNotIn("schedule_context", result)
         self.assertEqual(result["tool_observations"][0]["raw_result"], "Friday: class until 5.")
+
+    async def test_new_tool_reaches_responder_without_schedule_guidance(self):
+        _, responder = self.models([calls(("lookup_weather", {"day": "Friday"}))], [reply()])
+        lookup = AsyncMock(return_value='Forecast: literal {sunshine}.')
+        with patch.dict(llm._context_tools_by_name, {"lookup_weather": SimpleNamespace(ainvoke=lookup)}):
+            result = await self.run_graph()
+        self.assertEqual(result["tool_observations"][0]["result_category"], "lookup_weather")
+        prompt = responder.messages[0][0].content
+        self.assertIn("lookup_weather:\nForecast: literal {sunshine}.", prompt)
+        self.assertIn("No schedule context was fetched.", prompt)
+        schedule = prompt.split("Rachel's schedule context:", 1)[1].split("People in this conversation:", 1)[0]
+        self.assertNotIn("sunshine", schedule)
+        lookup.assert_awaited_once_with({"day": "Friday"})
 
     async def test_refinement_retains_every_category_and_handoff(self):
         fetcher, responder = self.models([
@@ -339,7 +353,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_nil_summary_and_skipped_loop_keep_public_contract(self):
         self.models([calls()], [reply()])
-        self.stack.enter_context(patch.object(llm, "get_summarizer_system_prompt", AsyncMock(return_value="Summarize.")))
+        self.stack.enter_context(patch.object(llm, "SUMMARIZER_SYSTEM_PROMPT", "Summarize."))
         self.stack.enter_context(patch.object(llm, "_get_summarizer_llm", AsyncMock(return_value=Model([llm.SummarizerOutput(summary="NIL", mood="excited")]))))
         with patch.object(llm, "summarizer_node", REAL_SUMMARIZER), patch.object(llm, "_graph", llm._build_graph()):
             result = await llm.get_response(state()["history"], "old summary", chat_id=-125, must_reply=True)

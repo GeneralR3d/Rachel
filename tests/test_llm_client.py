@@ -120,7 +120,7 @@ class ReplyPipelineClientTests(unittest.IsolatedAsyncioTestCase):
             ])
             with (
                 patch.object(llm, "_get_responder_llm", AsyncMock(return_value=responder)),
-                patch.object(llm, "get_responder_system_prompt", AsyncMock(return_value="Reply naturally.")),
+                patch.object(llm, "RESPONDER_SYSTEM_PROMPT", "Reply naturally."),
                 patch.object(llm, "get_active_trait_prompts", AsyncMock(return_value="friendly")),
             ):
                 for expected in ("Which cafe?", "Could you tell me which day?"):

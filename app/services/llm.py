@@ -23,7 +23,7 @@ import httpx
 
 from app.services import worldview
 from app.services.metrics import AGENT_CONTEXT_PASSES, AGENT_LOOP_OUTCOMES, LLM_CALLS, record_llm_error
-from app.services.context import ToolObservation
+from app.services.context import ToolObservation, build_responder_context
 from app.services.tracing import traced_jev_decision
 
 _tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -48,20 +48,18 @@ from app.config import get_settings
 from app.prompts import (
     CONTEXT_FETCHER_SYSTEM_PROMPT,
     RESPONDER_LOOP_INSTRUCTIONS,
+    RESPONDER_SYSTEM_PROMPT,
+    SUMMARIZER_SYSTEM_PROMPT,
     CONVERSATION_STYLE,
     ROUTER_GROUP_QUESTION,
     ROUTER_PRIVATE_QUESTION,
-    USER_PROFILE_ATTRIBUTE_GUIDE,
-    USER_PROFILE_FIELDS,
 )
 from app.calander import CALENDAR_TOOLS
-from app.services.userfacts import search_user_facts, search_user_info, search_user_info_tool
+from app.services.userfacts import search_user_info, search_user_info_tool
 from app.services.worldview import search_world_view, search_worldview
 from app.repository import (
     get_active_models,
     get_active_trait_prompts,
-    get_responder_system_prompt,
-    get_summarizer_system_prompt,
     get_user_profiles_batch,
 )
 
@@ -231,22 +229,6 @@ async def get_user_profiles_cached(user_ids: List[int]) -> Dict[int, dict]:
     Used by the userfacts profile pipeline for its context read."""
     return await _get_user_profiles_cached(user_ids)
 
-
-def _render_profile(profile: dict, show_unknown: bool = False) -> str:
-    """Render a stored profile dict as labelled lines, in schema order.
-
-    With show_unknown=True, every slot is emitted — empty ones as "NIL" — so the
-    responder can see which attributes are still gaps and subtly probe for them.
-    With show_unknown=False, empty slots are skipped. Returns "" if nothing to show.
-    """
-    lines = []
-    for key, label, _guide in USER_PROFILE_FIELDS:
-        value = str(profile.get(key, "")).strip()
-        if value:
-            lines.append(f"- {label}: {value}")
-        elif show_unknown:
-            lines.append(f"- {label}: NIL")
-    return "\n".join(lines)
 
 # Mood labels are defined by CONVERSATION_STYLE's keys, not a static
 # Literal — Field(json_schema_extra={"enum": ...}) lets the structured-output
@@ -634,7 +616,9 @@ def _context_category(name: str) -> str:
         return "worldview"
     if name == search_user_info_tool.name:
         return "user_info"
-    return "schedule" if name in _context_tools_by_name else "retrieval"
+    if name in {tool.name for tool in CALENDAR_TOOLS}:
+        return "schedule"
+    return name if name in _context_tools_by_name else "retrieval"
 
 
 async def _run_context_fetcher(state: GraphState, observations: List[ToolObservation]) -> None:
@@ -734,28 +718,6 @@ async def context_fetcher_node(state: GraphState) -> Dict:
     }
 
 
-def _format_observations(observations: List[ToolObservation]) -> Dict[str, str]:
-    """Build the four prompt sections only at the responder boundary."""
-    parts: Dict[str, List[str]] = {key: [] for key in ("schedule_context", "world_view", "user_facts", "user_profiles", "retrieval_status")}
-    for observation in observations:
-        result = observation["raw_result"]
-        category = observation["result_category"]
-        if observation["status"] != "success":
-            parts["retrieval_status"].append(json.dumps(observation, ensure_ascii=False))
-        # An empty user lookup still tells the responder which profile slots
-        # are unknown, without treating NIL slots as successful retrieval.
-        if category == "user_info" and observation["status"] in ("success", "empty"):
-            label = f"{result['name']} (id {result['user_id']})"
-            if result["facts"]:
-                parts["user_facts"].append(f"{label}:\n{result['facts']}")
-            parts["user_profiles"].append(f"{label}:\n{_render_profile(result['profile'], show_unknown=True)}")
-        elif observation["status"] == "success":
-            key = {"schedule": "schedule_context", "worldview": "world_view"}.get(category)
-            if key:
-                parts[key].append(result if isinstance(result, str) else json.dumps(result, ensure_ascii=False))
-    return {key: "\n\n".join(values) for key, values in parts.items()}
-
-
 def _loop_outcome(state: GraphState, decision: str) -> str:
     if decision == "fetch_more":
         if (state.get("context_passes", 0) >= settings.agent_max_context_passes
@@ -829,10 +791,7 @@ async def responder_node(state: GraphState) -> Dict:
         communication_style = CONVERSATION_STYLE.get(mood, CONVERSATION_STYLE["default"])
         print(f"[responder] communication style fetched (tokens={_count_tokens(communication_style)})")
 
-        context = _format_observations(state.get("tool_observations", []))
-        world_view = context["world_view"] or "Nothing learned yet."
-        user_facts = context["user_facts"] or "Nothing learned yet."
-        user_profiles = context["user_profiles"] or "No one looked up yet."
+        context = build_responder_context(state.get("tool_observations", []))
 
         now = datetime.now(SGT)
         formatted_datetime = (
@@ -841,10 +800,6 @@ async def responder_node(state: GraphState) -> Dict:
             f"the current day of week is {now.strftime('%A')}, "
             f"the current time is {now.strftime('%H:%M')}"
         )
-        # Rachel's schedule (right now / today / other days) is no longer
-        # injected here — context_fetcher_node fetches it via tools and it
-        # arrives through {schedule_context}.
-
         history_msgs = _build_history_messages(
             state["history"], divider_text=RESPONDER_NODE_DIVIDER, watermark=state.get("responded_watermark")
         )
@@ -852,7 +807,7 @@ async def responder_node(state: GraphState) -> Dict:
         print(f"[responder] history fetched (count={len(history_msgs)}, tokens={history_tokens})")
         pprint(history_msgs)
 
-        system_tmpl = ChatPromptTemplate.from_messages([("system", system_prompt_str)])
+        system_tmpl = ChatPromptTemplate.from_messages([("system", RESPONDER_SYSTEM_PROMPT)])
 
         system_msgs = system_tmpl.format_messages(
             communication_style=communication_style,
@@ -860,11 +815,7 @@ async def responder_node(state: GraphState) -> Dict:
             personality_traits=personality_traits,
             conversation_mood=mood,
             datetime=formatted_datetime,
-            schedule_context=context["schedule_context"] or "No schedule context was fetched.",
-            world_view=world_view,
-            user_facts=user_facts,
-            user_profiles=user_profiles,
-            profile_attributes=USER_PROFILE_ATTRIBUTE_GUIDE,
+            tool_results=context["tool_results"],
         )
         loop_guidance = SystemMessage(content=RESPONDER_LOOP_INSTRUCTIONS + "\nLoop state: " + json.dumps({
             "context_passes": state.get("context_passes", 0),

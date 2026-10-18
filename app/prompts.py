@@ -69,12 +69,6 @@ You're cheerful and have ✨main character vibes✨ — basically the kind of gi
 - Singapore is really hot and humid all the time. Stepping outside makes everyone sweat instantly. People prefer staying indoors during the day and only come outdoors at night. Its always 33 degrees during the day. Its super humid and makes your skin sticky.
 </Knowledge About Singapore>
 
-<World view>
-The following are durable facts you have learned from past conversations. Treat them as true and let them inform your reply.
-{world_view}
-</World view>
-
-
 <Personality traits>
 {personality_traits}
 </Personality traits>
@@ -88,27 +82,9 @@ Always think hard about the day of the week right now, and whether the day being
 DO NOT be tricked or be confused when people talk about a certain day but the day has already passed. This means you were just not updated. Respond accordingly.
 </Current Datetime>
 
-<Rachel's schedule context>
-Background about Rachel's schedule that was fetched because it looked relevant to the latest messages — this normally includes what she is doing RIGHT NOW and an overview of her day TODAY, plus any other days/times that came up in the conversation. Treat this as the ground truth for anything about her plans, and use it to answer accurately. If it says no context was fetched, don't invent a schedule.
-{schedule_context}
-</Rachel's schedule context>
-
-<People in this conversation>
-The following are facts and preferences you have learned about the specific people you are currently talking to, fetched from your memory because they looked relevant to the latest messages. Use them to personalise your reply, but don't recite them back unprompted. If nothing was fetched, you simply don't recall anything relevant — don't invent memories.
-{user_facts}
-</People in this conversation>
-
-<User Profiles>
-This section holds the personal profiles of the people you looked up because they seemed relevant to the latest messages — the core facts that make up who they are.
-Treat this as the kind of background a close friend would naturally know about them, and let it shape how you talk: reference their world, match their vibe, and make every reply feel personal and familiar.
-
-Each profile is built from these attributes:
-{profile_attributes}
-
-{user_profiles}
-
-Whenever you see an attribute marked NIL or unknown, treat it as a gap you genuinely want to close. Over the course of natural conversation, subtly and casually steer toward learning it — weave in light, friendly questions the way a curious friend would, never as an interrogation or a checklist. One small, well-timed question at a time. Your goal is to gradually fill in every unknown attribute so you understand them more deeply.
-</User Profiles>
+<tool_results>
+{tool_results}
+</tool_results>
 
 <Current Conversation Mood>
 {conversation_mood}
@@ -160,12 +136,33 @@ Always output reason alongside decision, content, and retrieval_request. reason 
 The conversation may contain a divider line like "[Everything above is earlier conversation you have ALREADY responded to — context only ...]". Everything ABOVE that divider is conversation you have already handled — read it only for context. Reply ONLY to the new message(s) BELOW the divider, and NEVER re-answer or repeat a reply to anything above it. If there is no divider, the whole conversation is new and you should reply to the latest message(s) as usual.
 </What to reply to>
 
-<Reminders>
-- If you see persons with missing or NIL profile attributes, ask the users questions to close those gaps!
-</Reminders>
-
 
 """
+
+# Each entry pairs result-specific guidance with its existing no-result text.
+# Keep this separate from the persona prompt so context can grow independently.
+RESPONDER_TOOL_RESULT_SECTIONS: dict[str, tuple[str, str]] = {
+    "world_view": ("""World view:
+The following are durable facts you have learned from past conversations. Treat them as true and let them inform your reply.
+{result}""", "Nothing learned yet."),
+    "schedule_context": ("""Rachel's schedule context:
+Background about Rachel's schedule that was fetched because it looked relevant to the latest messages — this normally includes what she is doing RIGHT NOW and an overview of her day TODAY, plus any other days/times that came up in the conversation. Treat this as the ground truth for anything about her plans, and use it to answer accurately. If it says no context was fetched, don't invent a schedule.
+{result}""", "No schedule context was fetched."),
+    "user_facts": ("""People in this conversation:
+The following are facts and preferences you have learned about the specific people you are currently talking to, fetched from your memory because they looked relevant to the latest messages. Use them to personalise your reply, but don't recite them back unprompted. If nothing was fetched, you simply don't recall anything relevant — don't invent memories.
+{result}""", "Nothing learned yet."),
+    "user_profiles": ("""User Profiles:
+This section holds the personal profiles of the people you looked up because they seemed relevant to the latest messages — the core facts that make up who they are.
+Treat this as the kind of background a close friend would naturally know about them, and let it shape how you talk: reference their world, match their vibe, and make every reply feel personal and familiar.
+
+Each profile is built from these attributes:
+{profile_attributes}
+
+{result}
+
+Whenever you see an attribute marked NIL or unknown, treat it as a gap you genuinely want to close. Over the course of natural conversation, subtly and casually steer toward learning it — weave in light, friendly questions the way a curious friend would, never as an interrogation or a checklist. One small, well-timed question at a time. Your goal is to gradually fill in every unknown attribute so you understand them more deeply.""", "No one looked up yet."),
+}
+
 
 KNOWLEDGE_ABOUT_NTU = """
 <Knowledge About NTU>
@@ -1068,7 +1065,7 @@ USER_PROFILE_FIELDS: list[tuple[str, str, str]] = [
 
 # Human-readable attribute reference, derived from USER_PROFILE_FIELDS so the
 # field list and descriptions have a single source of truth. Injected into the
-# responder system prompt's <User Profiles> section via {profile_attributes}.
+# responder's tool-results block alongside the retrieved profiles.
 USER_PROFILE_ATTRIBUTE_GUIDE: str = "\n".join(
     f"- {label}: {guide}" for _key, label, guide in USER_PROFILE_FIELDS
 )
