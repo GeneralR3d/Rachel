@@ -122,7 +122,7 @@ After the gate passes, the summarizer runs once in parallel with the initial con
 
 The responder can request another context pass when an existing schedule or memory tool could supply an essential missing fact. Only the context fetcher selects and executes tools. Raw observations accumulate across passes, including empty results, errors, and timeouts. The agent may repeat tool calls or retry failed lookups within its pass budget. The responder formats the collected schedule, world-view, facts, and profiles for its prompt.
 
-Set `AGENT_MAX_CONTEXT_PASSES` to **1–10** (default **2**, including the initial fetch). Retrieval stops on a sufficient response, the pass cap, or an approaching graph recursion limit. When more context is still needed, Rachel sends the responder's prepared best-effort clarification. Prometheus exposes `rachel_agent_loop_outcomes_total{outcome}` (`first_pass`, `retried`, `capped`) and `rachel_agent_context_passes` alongside per-node LLM metrics.
+Set `AGENT_MAX_CONTEXT_PASSES` to **1–10** (default **3**, including the initial fetch). Retrieval stops on a sufficient response, the pass cap, or an approaching graph recursion limit. When more context is still needed, Rachel sends the responder's prepared best-effort clarification. Prometheus exposes `rachel_agent_loop_outcomes_total{outcome}` (`first_pass`, `retried`, `capped`) and `rachel_agent_context_passes` alongside per-node LLM metrics.
 
 The reply diagram is rendered from [scripts/graph_llm.mmd](scripts/graph_llm.mmd) and checked into the repository:
 
