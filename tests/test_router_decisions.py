@@ -70,7 +70,7 @@ class RouterDecisionTests(unittest.IsolatedAsyncioTestCase):
                     "object": "decision",
                     "model": "jev-1.13.0",
                     "vendor": "typesafe",
-                    "answers": {"should_reply": {"type": "noul", "noul": 0.8}},
+                    "answers": {"should_reply": {"type": "noul", "noul": 0.7}},
                     "usage": {"input_tokens": 20, "output_tokens": 1, "total_tokens": 21, "cost": 0.0},
                 },
             )

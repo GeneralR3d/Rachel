@@ -495,7 +495,7 @@ async def router_node(state: GraphState) -> Dict:
                 or not 0 <= probability <= 1
             ):
                 raise ValueError("Invalid should_reply Noul answer")
-            should_reply = probability >= 0.8
+            should_reply = probability >= 0.7
             record_result(decision, probability, should_reply)
     except Exception as e:
         kind = record_llm_error("router", e)
