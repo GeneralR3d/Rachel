@@ -1,4 +1,4 @@
-"""Raw retrieval records and responder context for one ephemeral reply."""
+"""Raw tool observations and responder context for one ephemeral reply."""
 
 from typing import Any, Literal
 

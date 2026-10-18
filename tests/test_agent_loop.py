@@ -381,6 +381,122 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm.get_chat_mood(-123), "excited")
         self.assertEqual(self.summary_runs, 1)
 
+    async def test_proactive_refinement_keeps_intent_and_history_as_context(self):
+        intent = "Ask how the {茶} exam went"
+        fetcher, responder = self.models([
+            calls(("search_user_info", {"name": "Jamie", "query": "exam"})),
+            calls(("get_day_overview", {"day": "Friday"})),
+        ], [reply("fetch_more", "How did it go?", "Friday exam schedule"), reply(content="How was your exam?")])
+        history = [
+            {"sender": "Jamie", "content": "Old question", "telegram_message_id": 1},
+            {"sender": llm.BOT_NAME, "content": "Already answered", "telegram_message_id": 2},
+            {"sender": "Jamie", "content": "Thanks!", "telegram_message_id": 3},
+        ]
+        llm.set_chat_mood(-126, "excited")
+        self.addCleanup(llm._chat_mood.pop, -126, None)
+        before = REGISTRY.get_sample_value("rachel_agent_context_passes_sum") or 0
+        with patch.object(llm, "_proactive_graph", llm._build_proactive_graph()):
+            result = await llm.get_proactive_response(history, intent, "old summary", -126, {7: "Jamie"})
+        self.assertEqual(result[:2], ("How was your exam?", "Grounded in context."))
+        self.assertEqual(len(result), 3)
+        self.assertEqual(self.summary_runs, 0)
+        self.assertEqual(llm.get_chat_mood(-126), "excited")
+        self.assertEqual(REGISTRY.get_sample_value("rachel_agent_context_passes_sum"), before + 2)
+        self.assertEqual(len(fetcher.messages), 2)
+        self.assertEqual(len(responder.messages), 2)
+        for messages in fetcher.messages + responder.messages:
+            self.assertIn(intent, messages[0].content)
+            self.assertIn("prior context only", messages[0].content)
+            self.assertEqual([m.content for m in messages if m.type in ("human", "ai")], [
+                "Jamie: Old question", f"{llm.BOT_NAME}: Already answered", "Jamie: Thanks!",
+            ])
+        self.assertIn("Jamie likes tea.", responder.messages[-1][0].content)
+        self.assertIn("Friday: class until 5.", responder.messages[-1][0].content)
+
+    async def test_due_reminder_is_current_task_after_prior_schedule_confirmation(self):
+        intent = (
+            "One-time nudge to Ding Ren in this chat: he asked Rachel to remind him in "
+            "5 minutes because he needed to check his calendar. Ask him to check his "
+            "calendar and confirm which slot works for the Japanese food meetup — "
+            "Tuesday next week (20 Oct) after 5pm, or Wednesday dinner. Rachel has "
+            "class 2-5pm on Tuesday and cheerleading practice from 9pm, so Tuesday "
+            "after 5pm or Wednesday dinner are the options."
+        )
+        history = [
+            {"sender": "Ding Ren", "content": "Remind me in 5 minutes to check my calendar", "telegram_message_id": 1},
+            {"sender": llm.BOT_NAME, "content": "okay reminder set, i'll ping you in 5 mins", "telegram_message_id": 2},
+        ]
+        fetcher, responder = self.models([calls(), calls()], [
+            reply("fetch_more", "Time to check your calendar!", "Relevant meetup background"),
+            reply(content="eh check your calendar — Tuesday after 5pm or Wednesday dinner for Japanese food?"),
+        ])
+        with patch.object(llm, "_proactive_graph", llm._build_proactive_graph()):
+            await llm.get_proactive_response(history, intent, chat_id=-128, senders={7: "Ding Ren"})
+
+        for stage, invocations in (("fetcher", fetcher.messages), ("responder", responder.messages)):
+            for pass_number, messages in enumerate(invocations, 1):
+                with self.subTest(stage=stage, pass_number=pass_number):
+                    # The old assistant confirmation must not be the generation prompt's last turn.
+                    self.assertEqual(messages[-1].type, "system")
+                    self.assertIn(intent, messages[-1].content)
+                    self.assertEqual([m.content for m in messages if m.type in ("human", "ai")], [
+                        "Ding Ren: Remind me in 5 minutes to check my calendar",
+                        f"{llm.BOT_NAME}: okay reminder set, i'll ping you in 5 mins",
+                    ])
+
+    async def test_proactive_caps_all_configured_budgets(self):
+        for budget in range(1, 11):
+            with self.subTest(budget=budget):
+                fetcher, responder = self.models(
+                    [calls()] * budget,
+                    [reply("fetch_more", "How have things been?", "More personal background")] * budget,
+                )
+                with patch.object(llm.settings, "agent_max_context_passes", budget), patch.object(
+                    llm, "_proactive_graph", llm._build_proactive_graph()
+                ):
+                    result = await llm.get_proactive_response([], "Check in")
+                self.assertEqual(result[0], "How have things been?")
+                self.assertEqual(len(fetcher.messages), budget)
+                self.assertEqual(len(responder.messages), budget)
+
+    async def test_proactive_recursion_preserves_last_reply_without_mood_write(self):
+        class ExhaustedGraph:
+            async def astream(self, initial_state, **kwargs):
+                self.config = kwargs["config"]
+                yield {**initial_state, "context_passes": 1, "response_text": "How was the exam?",
+                       "response_reason": "Checking in", "mood": "sad"}
+                raise GraphRecursionError("emergency")
+
+        graph = ExhaustedGraph()
+        with patch.object(llm, "_proactive_graph", graph):
+            result = await llm.get_proactive_response([], "Ask about the exam", chat_id=-127)
+        self.assertEqual(result[:2], ("How was the exam?", "Checking in"))
+        self.assertNotIn(-127, llm._chat_mood)
+        self.assertEqual(graph.config["run_name"], "RachelProactiveGraph")
+
+    async def test_proactive_rejects_blank_intent_before_model_calls(self):
+        fetcher, responder = self.models([], [])
+        with self.assertRaises(ValueError):
+            await llm.get_proactive_response([], "  ")
+        self.assertEqual(fetcher.messages, [])
+        self.assertEqual(responder.messages, [])
+
+    async def test_proactive_parse_fallback_initiates_a_conversation(self):
+        self.models([calls()], [OutputParserException("invalid", llm_output='{"reason":"INTERNAL"}')])
+        with patch.object(llm, "_proactive_graph", llm._build_proactive_graph()):
+            content, _, _ = await llm.get_proactive_response([], "Check in")
+        self.assertEqual(content, "Hey, how have you been?")
+
+    async def test_proactive_early_recursion_fallback_initiates_a_conversation(self):
+        class ExhaustedGraph:
+            async def astream(self, initial_state, **kwargs):
+                yield initial_state
+                raise GraphRecursionError("emergency")
+
+        with patch.object(llm, "_proactive_graph", ExhaustedGraph()):
+            content, _, _ = await llm.get_proactive_response([], "Check in")
+        self.assertEqual(content, "Hey, how have you been?")
+
 
 if __name__ == "__main__":
     unittest.main()

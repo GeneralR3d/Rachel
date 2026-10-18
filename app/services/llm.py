@@ -27,6 +27,7 @@ from app.services.context import ToolObservation
 from app.services.prompt_builders import (
     build_context_fetcher_handoff,
     build_context_fetcher_prompt,
+    build_proactive_trigger,
     build_responder_context,
     build_responder_loop_message,
     build_responder_prompt,
@@ -48,7 +49,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.errors import GraphRecursionError
 from langgraph.managed import RemainingSteps
 from langgraph.runtime import Runtime
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ConfigDict, ValidationError
 from typing_extensions import TypedDict
 
 from app.config import get_settings
@@ -62,6 +63,7 @@ from app.prompts import (
     ROUTER_PRIVATE_QUESTION,
 )
 from app.calander import CALENDAR_TOOLS
+from app.services.proactive_tools import PROACTIVE_TOOLS
 from app.services.userfacts import search_user_info, search_user_info_tool
 from app.services.worldview import search_world_view, search_worldview
 from app.repository import (
@@ -257,11 +259,12 @@ class SummarizerOutput(BaseModel):
 
 class ResponseOutput(BaseModel):
     decision: Literal["respond", "fetch_more"] = Field(
-        ..., description="Respond now, or request one more supported context retrieval pass."
+        ..., description="Respond now, or request one more supported context/schedule-action pass."
     )
     retrieval_request: str = Field(
-        ..., description="Precise missing information for the context fetcher; empty for respond. Do not select tools."
+        ..., description="Missing information or desired proactive schedule action for the context fetcher; empty for respond. Do not select tools."
     )
+    model_config = ConfigDict(extra="forbid")
     reason: str = Field(
         ...,
         description="A single sentence explaining why this reply was given, naming which part of the personality traits or system prompt instructions drove it. For traceability and debugging.",
@@ -274,6 +277,8 @@ class ResponseOutput(BaseModel):
 
 class GraphState(TypedDict):
     history: List[Dict[str, Any]]
+    chat_id: int | None
+    intent: str
     current_summary: str | None
     mood: str
     senders: Dict[int, str]  # sender_user_id -> display name
@@ -294,8 +299,8 @@ class GraphState(TypedDict):
     response_reason: str
 
 
-# The summarizer uses function calling for broad model compatibility. The
-# responder uses json_schema so it can request reasoning without tool calls.
+
+
 #
 # The chat clients are built lazily and cached keyed on the active
 # "main" model string (from the DB, via repository.get_active_models), so an admin
@@ -343,7 +348,7 @@ async def _get_responder_llm():
         _client_cache[key] = _base_chat(model, 0.2, reasoning_effort="medium").with_structured_output(
             # Validate locally so an SDK-side schema error cannot discard the
             # visible reply before our fallback gets a chance to salvage it.
-            ResponseOutput.model_json_schema(), method="json_schema", include_raw=True
+            ResponseOutput.model_json_schema(), method="json_schema", strict=True, include_raw=True
         )
     return _client_cache[key]
 
@@ -352,12 +357,13 @@ async def _get_responder_llm():
 # some models — each pass has a hard timeout below and records failures as
 # observations, so a hang/error can never stall the pipeline.) CONTEXT_TOOLS is the
 # single source of truth for both the agent's tools and its dynamic prompt.
-CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool]
+CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool, *PROACTIVE_TOOLS]
 
 
 class ContextFetcherPromptContext(TypedDict):
     participants: str
     datetime: str
+    intent: str
 
 
 @dynamic_prompt
@@ -371,6 +377,7 @@ def context_fetcher_dynamic_prompt(request: ModelRequest) -> str:
         available_categories={_context_category(tool.name) for tool in tools},
         participants=context["participants"],
         current_datetime=context["datetime"],
+        intent=context.get("intent", ""),
     )
 
 
@@ -567,6 +574,8 @@ def _resolve_name_to_id(
 
 
 def _context_category(name: str) -> str:
+    if name in {tool.name for tool in PROACTIVE_TOOLS}:
+        return "proactive_schedules"
     if name == search_world_view.name:
         return "worldview"
     if name == search_user_info_tool.name:
@@ -579,9 +588,15 @@ def _context_category(name: str) -> str:
 async def _run_context_fetcher(state: GraphState, observations: List[ToolObservation]) -> None:
     """Append each raw observation immediately, preserving partial work on timeout."""
     senders = state.get("senders") or {}
+    proactive = bool((state.get("intent") or "").strip())
     history_msgs = _build_history_messages(
-        state["history"], divider_text=CONTEXT_NODE_DIVIDER, watermark=state.get("responded_watermark")
+        state["history"],
+        divider_text=None if proactive else CONTEXT_NODE_DIVIDER,
+        watermark=None if proactive else state.get("responded_watermark"),
     )
+    if proactive:
+        # End the old transcript with the fired job, not the earlier setup request.
+        history_msgs.append(SystemMessage(content=build_proactive_trigger(state["intent"])))
     now = datetime.now(SGT)
     formatted_datetime = (
         f"The current date is {now.strftime('%d %B %Y')}, "
@@ -603,7 +618,8 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
         model=await _get_context_fetcher_llm(),
         messages=[handoff, *history_msgs],
         tools=CONTEXT_TOOLS,
-        runtime=Runtime(context={"participants": participants, "datetime": formatted_datetime}),
+        runtime=Runtime(context={"participants": participants, "datetime": formatted_datetime,
+                                 "intent": state.get("intent", "")}),
     )
 
     async def call_model(model_request: ModelRequest) -> AIMessage:
@@ -613,7 +629,12 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
         )
 
     ai: AIMessage = await context_fetcher_dynamic_prompt.awrap_model_call(request, call_model)
-    for tc in getattr(ai, "tool_calls", None) or []:
+    tool_calls = getattr(ai, "tool_calls", None) or []
+    print(f"[context_fetcher] LLM requested {len(tool_calls)} tool call(s):")
+    for tc in tool_calls:
+        print(f"[context_fetcher]   -> {tc['name']}({tc['args']})")
+
+    for tc in tool_calls:
         name = tc["name"]
         arguments = tc["args"]
         observation: ToolObservation = {
@@ -639,7 +660,12 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
                 tool = _context_tools_by_name.get(name)
                 if tool is None:
                     raise ValueError(f"Unknown tool '{name}'")
-                result = await tool.ainvoke(arguments)
+                if _context_category(name) == "proactive_schedules":
+                    result = await tool.ainvoke(arguments, config={
+                        "configurable": {"current_chat_id": state.get("chat_id")},
+                    })
+                else:
+                    result = await tool.ainvoke(arguments)
                 usable = result is not None and bool(str(result).strip())
             observation.update(status="success" if usable else "empty", raw_result=result)
         except asyncio.TimeoutError as e:
@@ -731,8 +757,15 @@ def _salvage_reply(raw: str) -> str:
 
 def _parse_fallback(state: GraphState, raw: str, error: Exception) -> Dict:
     record_llm_error("responder", error)
-    content = _salvage_reply(raw) or state.get("response_text") or "I'm not sure yet — could you clarify what you mean?"
+    content = _salvage_reply(raw) or state.get("response_text") or _fallback_content(state)
     return _response_update(state, content, "Best-effort reply after structured-output parse failure.", status="parse_fallback")
+
+
+def _fallback_content(state: GraphState) -> str:
+    """Outreach must still initiate contact when no usable model content survives."""
+    if (state.get("intent") or "").strip():
+        return "Hey, how have you been?"
+    return "I'm not sure yet — could you clarify what you mean?"
 
 
 async def responder_node(state: GraphState) -> Dict:
@@ -755,9 +788,14 @@ async def responder_node(state: GraphState) -> Dict:
             f"the current day of week is {now.strftime('%A')}, "
             f"the current time is {now.strftime('%H:%M')}"
         )
+        proactive = bool((state.get("intent") or "").strip())
         history_msgs = _build_history_messages(
-            state["history"], divider_text=RESPONDER_NODE_DIVIDER, watermark=state.get("responded_watermark")
+            state["history"],
+            divider_text=None if proactive else RESPONDER_NODE_DIVIDER,
+            watermark=None if proactive else state.get("responded_watermark"),
         )
+        if proactive:
+            history_msgs.append(SystemMessage(content=build_proactive_trigger(state["intent"])))
         history_tokens = sum(_count_tokens(f"{m.type}: {m.content}") for m in history_msgs)
         print(f"[responder] history fetched (count={len(history_msgs)}, tokens={history_tokens})")
         pprint(history_msgs)
@@ -770,6 +808,7 @@ async def responder_node(state: GraphState) -> Dict:
             personality_traits=personality_traits,
             conversation_mood=mood,
             current_datetime=formatted_datetime,
+            intent=state.get("intent", ""),
         ))
         loop_system_message = SystemMessage(content=build_responder_loop_message(
             instructions=RESPONDER_LOOP_INSTRUCTIONS,
@@ -850,7 +889,41 @@ def _build_graph():
     return graph.compile()
 
 
+def _build_proactive_graph():
+    """Build the outreach-only graph: no checker, router, or summarizer."""
+    graph: StateGraph = StateGraph(GraphState)
+    graph.add_node("context_fetcher_node", context_fetcher_node)
+    graph.add_node("responder_node", responder_node)
+    graph.add_edge(START, "context_fetcher_node")
+    graph.add_edge("context_fetcher_node", "responder_node")
+    graph.add_conditional_edges("responder_node", _route_after_responder,
+                                {"context_fetcher_node": "context_fetcher_node", END: END})
+    return graph.compile()
+
+
 _graph = _build_graph()
+_proactive_graph = _build_proactive_graph()
+
+
+async def _run_response_graph(graph, initial_state: GraphState, *, run_name: str) -> GraphState:
+    """Apply the same pass budget, emergency recovery and metrics to both entry points."""
+    result = initial_state
+    try:
+        async for snapshot in graph.astream(initial_state, config={
+            "run_name": run_name,
+            "recursion_limit": 2 * settings.agent_max_context_passes + 8,
+        }, stream_mode="values"):
+            result = snapshot
+    except GraphRecursionError as e:
+        record_llm_error("responder", e)
+        result = {**result, "loop_outcome": "capped"}
+        if not result.get("response_text"):
+            result.update(response_text=_fallback_content(initial_state),
+                          response_reason="Emergency graph recursion fallback.")
+    if result.get("context_passes", 0):
+        AGENT_LOOP_OUTCOMES.labels(outcome=result["loop_outcome"]).inc()
+        AGENT_CONTEXT_PASSES.observe(result["context_passes"])
+    return result
 
 
 async def get_response(
@@ -879,6 +952,8 @@ async def get_response(
 
     initial_state: GraphState = {
         "history": history,
+        "chat_id": chat_id,
+        "intent": "",
         "current_summary": current_summary,
         "mood": current_mood,
         "senders": senders or {},
@@ -894,22 +969,7 @@ async def get_response(
         "response_reason": "",
     }
 
-    result = initial_state
-    try:
-        async for snapshot in _graph.astream(initial_state, config={
-            "run_name": "RachelReplyGraph",
-            "recursion_limit": 2 * settings.agent_max_context_passes + 8,
-        }, stream_mode="values"):
-            result = snapshot
-    except GraphRecursionError as e:
-        record_llm_error("responder", e)
-        result = {**result, "loop_outcome": "capped"}
-        if not result.get("response_text"):
-            result.update(response_text="I'm not sure yet — could you clarify what you mean?",
-                          response_reason="Emergency graph recursion fallback.")
-    if result.get("context_passes", 0):
-        AGENT_LOOP_OUTCOMES.labels(outcome=result["loop_outcome"]).inc()
-        AGENT_CONTEXT_PASSES.observe(result["context_passes"])
+    result = await _run_response_graph(_graph, initial_state, run_name="RachelReplyGraph")
 
     if chat_id is not None:
         _chat_mood[chat_id] = result["mood"]
@@ -917,3 +977,37 @@ async def get_response(
 
     new_summary = result["current_summary"] if result["current_summary"] != current_summary else None
     return result["response_text"], result["response_reason"], new_summary, time.time() - start
+
+
+async def get_proactive_response(
+    history: List[Dict[str, str]],
+    intent: str,
+    current_summary: str | None = None,
+    chat_id: int | None = None,
+    senders: Dict[int, str] | None = None,
+) -> Tuple[str, str, float]:
+    """Generate an unconditional outreach without routing, summarizing, or mood writes."""
+    if not intent.strip():
+        raise ValueError("Proactive outreach requires a non-empty intent")
+    start = time.time()
+    current_mood = _chat_mood.get(chat_id, DEFAULT_MOOD) if chat_id is not None else DEFAULT_MOOD
+    initial_state: GraphState = {
+        "history": history,
+        "chat_id": chat_id,
+        "intent": intent,
+        "current_summary": current_summary,
+        "mood": current_mood,
+        "senders": senders or {},
+        "must_reply": True,
+        "is_private": False,
+        "responded_watermark": None,
+        "should_reply": True,
+        "context_passes": 0,
+        "tool_observations": [],
+        "retrieval_request": "",
+        "responder_decision": "respond",
+        "response_text": "",
+        "response_reason": "",
+    }
+    result = await _run_response_graph(_proactive_graph, initial_state, run_name="RachelProactiveGraph")
+    return result["response_text"], result["response_reason"], time.time() - start

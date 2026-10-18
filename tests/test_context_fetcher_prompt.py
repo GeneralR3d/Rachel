@@ -61,13 +61,14 @@ class ContextFetcherPromptTests(unittest.TestCase):
         build.assert_called_once_with(
             system_prompt=template, tools=tools, available_categories={"worldview", "schedule"},
             participants="Jamie {茶}", current_datetime="Sunday {noon}",
+            intent="",
         )
 
     def test_guidance_registry_order_and_capability_selection(self):
         guidance = prompts.CONTEXT_FETCHER_TOOL_GUIDANCE
-        self.assertEqual(list(guidance), ["schedule", "worldview", "user_info"])
+        self.assertEqual(list(guidance), ["schedule", "worldview", "user_info", "proactive_schedules"])
         for tools, categories in (
-            (list(reversed(llm.CONTEXT_TOOLS)), ["schedule", "worldview", "user_info"]),
+            (list(reversed(llm.CONTEXT_TOOLS)), ["schedule", "worldview", "user_info", "proactive_schedules"]),
             ([llm.search_world_view, llm.CALENDAR_TOOLS[-1]], ["schedule", "worldview"]),
             ([], []),
         ):
@@ -86,7 +87,7 @@ class ContextFetcherPromptTests(unittest.TestCase):
         self.assertLess(prompt.index("SCHEDULE\n"), prompt.index("WORLD-VIEW FACTS\n"))
         self.assertLess(prompt.index("WORLD-VIEW FACTS\n"), prompt.index("PER-USER FACTS\n"))
         self.assertIn("Use at most one focused lookup per relevant participant", prompt)
-        self.assertIn("use at most one focused world-view search", prompt)
+        self.assertIn(prompts.CONTEXT_FETCHER_TOOL_GUIDANCE["worldview"], prompt)
         self.assertIn("Pass the participant's name EXACTLY", prompt)
         self.assertIn("Jamie", prompt)
         self.assertIn("18 October 2026", prompt)
@@ -116,9 +117,22 @@ class ContextFetcherPromptTests(unittest.TestCase):
         self.assertNotIn("- get_activity_now(", prompt)
         self.assertIn("Each invocation is one retrieval pass", prompt)
 
-    def test_partial_calendar_set_uses_full_category_overview(self):
+    def test_partial_calendar_set_uses_registered_category_guidance(self):
         prompt = rendered_prompt([llm.CALENDAR_TOOLS[-1], llm.search_world_view, llm.search_user_info_tool])
-        self.assertIn("There are four kinds of background you can gather: Rachel's weekly SCHEDULE", prompt)
+        for category in ("schedule", "worldview", "user_info"):
+            guidance = prompts.CONTEXT_FETCHER_TOOL_GUIDANCE[category]
+            self.assertIn(guidance, prompt)
+
+    def test_proactive_policy_is_combined_and_only_added_with_capability(self):
+        from app.services.proactive_tools import PROACTIVE_TOOLS
+
+        prompt = rendered_prompt(PROACTIVE_TOOLS)
+        self.assertIn(prompts.PROACTIVE_SCHEDULE_TOOL_PROMPT, prompt)
+        for guidance in ("repeat_times=1", "unlimited", "follow-up", "current chat", "Asia/Singapore"):
+            self.assertIn(guidance, prompt)
+        self.assertNotIn(prompts.PROACTIVE_SCHEDULE_TOOL_PROMPT, rendered_prompt([]))
+        for tool in PROACTIVE_TOOLS:
+            self.assertIn(f"- {tool.name}(", prompt)
 
 
 class RecordingToolModel(BaseChatModel):

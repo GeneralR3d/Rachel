@@ -101,6 +101,12 @@ flowchart TB
 - **Data layer** (`app/models.py`, `app/repository.py`, `app/database.py`) uses async SQLAlchemy sessions and PostgreSQL upserts for durable chat and control-plane state.
 - **Admin plane** (`app/telegram/bot.py`, `app/routers/admin.py`, `app/static/index.html`) exposes Telegram commands, REST endpoints, a zero-build dashboard, live architecture diagrams, and Prometheus metrics.
 
+### Proactive outreach repeat limits
+
+Each proactive schedule has `repeat_times` (a positive integer, or `null` for unlimited) and a read-only `repeat_completed` counter. The dashboard accepts a blank repeat limit for unlimited schedules and displays consumed attempts. PostgreSQL atomically checks the limit and commits the increment before generation or sending starts; failures, interruptions, and process crashes still consume that attempt. “Run now” shares the same allowance as cron fires.
+
+Exhausted schedules show **Done** and are removed from the active scheduler without changing their saved `enabled` setting. Raising the limit above the consumed count, or clearing it to unlimited, resumes an enabled schedule. Editing or toggling a schedule never resets its counter. Existing schedules migrate to unlimited with zero counted attempts; older executions are not reconstructed. Apply `uv run alembic upgrade head` before starting the updated application.
+
 ### Reply workflow
 
 ```mermaid
@@ -492,7 +498,16 @@ Run a lightweight Python syntax check without starting databases or Telegram:
 uv run python -m compileall -q app scripts alembic
 ```
 
-There is currently no automated test suite, lint configuration, or CI workflow in the repository. The original Telethon/SQLite implementation remains under [`Reference/`](Reference/) as a porting reference.
+Run the automated tests with configured app settings (placeholder API credentials suffice; tests do not send Telegram messages):
+
+```bash
+uv run python -m unittest discover -s tests
+node --test tests/test_proactive_dashboard.cjs
+```
+
+Set `TEST_DATABASE_URL` to a disposable PostgreSQL database to include repeat-limit integration tests; each test uses and removes its own isolated schema. Without it, database integration tests are skipped. There is no lint configuration or CI workflow. The original Telethon/SQLite implementation remains under [`Reference/`](Reference/) as a porting reference.
+
+The integration suite also covers schedule HTTP endpoints, scheduler shutdown, the outreach agent loop through message persistence, and migration data preservation. Migration `0a7e2c9d4b61` aligns the existing history timestamp field with the database. Existing rows receive migration time when the column is added; deployments that already have the column retain their timestamps.
 
 ## Deployment
 
@@ -505,12 +520,11 @@ The guides contain some pre-Merge-Gateway environment names; use the `MERGE_GATE
 
 ## Known Limitations
 
-- A documented race in `_flush_chat` can drop a message that arrives between the persistence write and buffer removal.
 - A multi-burst reply is persisted as one history row keyed to the first Telegram message ID, so an interleaved user message can be ordered differently after a database re-seed.
 - Timed silence, indefinite mute state, and reply watermarks are process-local; the durable memory-extraction watermark is persisted.
 - Switching to an embedding model with a different vector dimensionality does not automatically re-embed existing Neo4j data.
 - The admin HTTP surface does not implement its own authentication.
-- Tests, linting, CI, and a ready-made Prometheus/Grafana deployment are not yet included.
+- Linting, CI, and a ready-made Prometheus/Grafana deployment are not yet included.
 
 ## License
 

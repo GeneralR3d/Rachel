@@ -85,6 +85,7 @@ class ResponderPromptTests(unittest.IsolatedAsyncioTestCase):
             system_prompt=template, context=build.call_args.kwargs["context"],
             personality_traits="friendly {茶}", communication_style="thoughtful {茶}",
             conversation_mood="reflective", current_summary="Earlier {conversation}.",
+            intent="",
             current_datetime=(
                 "The current date is 18 October 2026, the current month is October, "
                 "the current day of week is Sunday, the current time is 12:00"

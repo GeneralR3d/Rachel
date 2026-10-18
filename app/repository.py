@@ -6,6 +6,7 @@ HTTP routes change as little as possible. Each function opens its own session
 """
 
 import time
+from datetime import datetime
 from typing import Optional, Union
 
 import sqlalchemy as sa
@@ -20,6 +21,7 @@ from app.models import (
     History,
     LLMModel,
     PersonalityTrait,
+    ProactiveSchedule,
     ScheduleActivity,
     User,
     UserFactsPreferences,
@@ -172,6 +174,134 @@ async def ensure_schedule_seeded() -> None:
                 )
             )
             await session.execute(stmt)
+
+
+# --- proactive outreach schedules ---------------------------------------
+
+
+def _proactive_schedule_dict(row: ProactiveSchedule) -> dict:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "chat_id": row.chat_id,
+        "cron_expression": row.cron_expression,
+        "timezone": row.timezone,
+        "intent": row.intent,
+        "enabled": row.enabled,
+        "repeat_times": row.repeat_times,
+        "repeat_completed": row.repeat_completed,
+        "last_run_at": row.last_run_at,
+        "last_status": row.last_status,
+        "last_error": row.last_error,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+async def get_proactive_schedules(
+    *, enabled_only: bool = False, chat_id: int | None = None
+) -> list[dict]:
+    stmt = select(ProactiveSchedule).order_by(ProactiveSchedule.id)
+    if chat_id is not None:
+        stmt = stmt.where(ProactiveSchedule.chat_id == chat_id)
+    if enabled_only:
+        stmt = stmt.where(ProactiveSchedule.enabled.is_(True))
+    async with session_scope() as session:
+        rows = (await session.execute(stmt)).scalars().all()
+    return [_proactive_schedule_dict(row) for row in rows]
+
+
+async def get_proactive_schedule(schedule_id: int, *, chat_id: int | None = None) -> dict | None:
+    stmt = select(ProactiveSchedule).where(ProactiveSchedule.id == schedule_id)
+    if chat_id is not None:
+        stmt = stmt.where(ProactiveSchedule.chat_id == chat_id)
+    async with session_scope() as session:
+        row = (await session.execute(stmt)).scalar_one_or_none()
+        return _proactive_schedule_dict(row) if row is not None else None
+
+
+async def create_proactive_schedule(data: dict) -> dict:
+    async with session_scope() as session:
+        row = ProactiveSchedule(**data)
+        session.add(row)
+        await session.flush()
+        await session.refresh(row)
+        return _proactive_schedule_dict(row)
+
+
+async def update_proactive_schedule(
+    schedule_id: int, data: dict, *, chat_id: int | None = None
+) -> dict | None:
+    if chat_id is not None and data.get("chat_id", chat_id) != chat_id:
+        raise ValueError("A scoped proactive schedule cannot be moved to another chat")
+    stmt = update(ProactiveSchedule).where(ProactiveSchedule.id == schedule_id)
+    if chat_id is not None:
+        stmt = stmt.where(ProactiveSchedule.chat_id == chat_id)
+    stmt = stmt.values({**data, "updated_at": func.now()}).returning(ProactiveSchedule)
+    async with session_scope() as session:
+        row = (await session.execute(stmt)).scalar_one_or_none()
+        return _proactive_schedule_dict(row) if row is not None else None
+
+
+async def delete_proactive_schedule(schedule_id: int, *, chat_id: int | None = None) -> bool:
+    stmt = delete(ProactiveSchedule).where(ProactiveSchedule.id == schedule_id)
+    if chat_id is not None:
+        stmt = stmt.where(ProactiveSchedule.chat_id == chat_id)
+    async with session_scope() as session:
+        result = await session.execute(stmt)
+    return result.rowcount > 0
+
+
+async def claim_proactive_schedule_run(
+    schedule_id: int, *, require_enabled: bool = False
+) -> dict | None:
+    """Atomically consume an eligible attempt and commit before returning.
+
+    The conditional UPDATE also enforces the limit across concurrent callers.
+    Manual runs may execute disabled schedules, but share the same allowance.
+    """
+    stmt = (
+        update(ProactiveSchedule)
+        .where(
+            ProactiveSchedule.id == schedule_id,
+            sa.or_(
+                ProactiveSchedule.repeat_times.is_(None),
+                ProactiveSchedule.repeat_completed < ProactiveSchedule.repeat_times,
+            ),
+        )
+        .values(
+            repeat_completed=ProactiveSchedule.repeat_completed + 1,
+            last_status="running",
+            last_run_at=func.now(),
+            last_error=None,
+        )
+        .returning(ProactiveSchedule)
+    )
+    if require_enabled:
+        stmt = stmt.where(ProactiveSchedule.enabled.is_(True))
+    async with session_scope() as session:
+        row = (await session.execute(stmt)).scalar_one_or_none()
+        claimed = _proactive_schedule_dict(row) if row is not None else None
+    # Exiting session_scope commits. No caller can begin sending before this.
+    return claimed
+
+
+async def set_proactive_schedule_status(
+    schedule_id: int,
+    status: str,
+    *,
+    error: str | None = None,
+    ran_at: datetime | None = None,
+) -> None:
+    values: dict = {"last_status": status, "last_error": error}
+    if ran_at is not None:
+        values["last_run_at"] = ran_at
+    async with session_scope() as session:
+        await session.execute(
+            update(ProactiveSchedule)
+            .where(ProactiveSchedule.id == schedule_id)
+            .values(**values)
+        )
 
 
 # --- weekly schedule ------------------------------------------------------

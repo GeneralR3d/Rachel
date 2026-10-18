@@ -8,7 +8,7 @@ Original SQLite tables (see Reference/app/db.py):
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, Integer, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Integer, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -83,6 +83,34 @@ class ScheduleActivity(Base):
     interesting_event: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class ProactiveSchedule(Base):
+    __tablename__ = "proactive_schedules"
+    __table_args__ = (
+        CheckConstraint("repeat_times IS NULL OR repeat_times > 0", name="ck_proactive_repeat_times"),
+        CheckConstraint("repeat_completed >= 0", name="ck_proactive_repeat_completed"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cron_expression: Mapped[str] = mapped_column(Text, nullable=False)
+    timezone: Mapped[str] = mapped_column(Text, nullable=False, server_default="Asia/Singapore")
+    intent: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    # NULL means unlimited; completed counts attempts consumed before execution.
+    repeat_times: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    repeat_completed: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class UserFactsPreferences(Base):
     __tablename__ = "user_facts_preferences"
 
@@ -129,7 +157,7 @@ class History(Base):
     __tablename__ = "history"
 
     # Telegram message IDs are unique per chat, so the PK is composite.
-    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     telegram_message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     # References users.telegram_user_id — no FK constraint to avoid cascade issues.
     sender_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
