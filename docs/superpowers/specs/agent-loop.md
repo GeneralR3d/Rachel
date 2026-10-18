@@ -55,7 +55,7 @@
       - fetch_more at the cap, near the LangGraph recursion limit → END using the already-generated fallback content
 
   - Keep the summarizer outside the loop: it runs once and is not repeated during retrieval refinement.
-  - Add AGENT_MAX_CONTEXT_PASSES to Settings, validated from 1–10 and defaulting to 2. Count the initial context fetch as pass 1.
+  - Add AGENT_MAX_CONTEXT_PASSES to Settings, validated from 1–10 and defaulting to 3. Count the initial context fetch as pass 1.
   - Invoke the graph with an explicit recursion_limit safely above the configured pass budget. Use RemainingSteps for graceful internal termination; retain GraphRecursionError handling only as an emergency
     fallback. LangGraph explicitly recommends this proactive approach.
 
@@ -97,6 +97,6 @@
   ## Assumptions
 
   - Version one uses only Rachel’s existing schedule, worldview, and per-user-memory tools.
-  - Default budget is two total context-fetch passes, configurable through the environment.
+  - Default budget is three total context-fetch passes, configurable through the environment.
   - At the cap, Rachel sends a natural best-effort response that acknowledges uncertainty and asks one focused follow-up question.
   - Agent state is ephemeral within one Telegram reply; durable checkpointing and web search remain separate future features.

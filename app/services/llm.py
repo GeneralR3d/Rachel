@@ -32,6 +32,7 @@ _tokenizer = tiktoken.get_encoding("cl100k_base")
 def _count_tokens(text: str) -> int:
     return len(_tokenizer.encode(text))
 
+from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -39,6 +40,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.errors import GraphRecursionError
 from langgraph.managed import RemainingSteps
+from langgraph.runtime import Runtime
 from pydantic import BaseModel, Field, ValidationError
 from typing_extensions import TypedDict
 
@@ -360,9 +362,7 @@ async def _get_responder_llm():
 # tools bound and decides which to call. (CLAUDE.md notes tool-calling can hang on
 # some models — each pass has a hard timeout below and records failures as
 # observations, so a hang/error can never stall the pipeline.) CONTEXT_TOOLS is the
-# single source of truth: it drives both the bound tools and the prompt's {tools}
-# listing (via format_tools). It combines the calendar tools with the world-view
-# search tool (Rachel's general learned facts).
+# single source of truth for both the agent's tools and its dynamic prompt.
 CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool]
 
 
@@ -381,6 +381,62 @@ def format_tools(tools) -> str:
     return "\n\n".join(lines)
 
 
+class ContextFetcherPromptContext(TypedDict):
+    participants: str
+    datetime: str
+
+
+@dynamic_prompt
+def context_fetcher_dynamic_prompt(request: ModelRequest) -> str:
+    """Supply guidance only for the tools available on this model call."""
+    tools = request.tools or []
+    names = {tool.name for tool in tools}
+    calendar_names = {tool.name for tool in CALENDAR_TOOLS} & names
+    has_world_view = search_world_view.name in names
+    has_user_info = search_user_info_tool.name in names
+    guidance = []
+
+    if calendar_names:
+        guidance.append("""
+            SCHEDULE
+            The responder relies on the conversation and accumulated schedule results for Rachel's plans. Reuse earlier results that already cover the requested day or time. It is NOT compulsory to fetch her current activity and today's overview every time. Only fetch schedule info when the conversation or responder's request actually calls for it:
+            - Fetch what Rachel is doing RIGHT NOW and/or an overview of TODAY when the conversation is about the present moment, what she's up to, or whether she's free now.
+            - Fetch a DIFFERENT day when the conversation references one (e.g. "free this Saturday?", "what you doing tmr?", "wanna meet Friday?").
+            - Fetch the full detail of a particular day (who she's with, where, why) when plans are being made.
+            - Fetch what she's doing at a specific time on some day when that comes up.
+            - When the messages reference a date or relative day, work out which weekday it falls on yourself: use your knowledge of the current date/time below to reason about what "tomorrow", "this weekend", "next Friday", "the 5th", etc. resolve to, then pass the concrete weekday name to the tools.
+            - When the messages are pure chit-chat with nothing about her plans, time, or availability (greetings, "how are you", reacting to something), you may fetch NO schedule tools at all.
+            """)
+
+    if has_world_view:
+        guidance.append("""
+            WORLD-VIEW FACTS
+            Rachel also has a world-view knowledge base: a store of short, single-sentence general facts she has learned about the world from past conversations (brands, places, people, events, and other topics — NOT her schedule and NOT per-user info). Search when a factual gap matters to the reply and stored knowledge could help, including when the responder asks for it. Check previous results first:
+            - Use a focused search for the unresolved topic or entity. On a subsequent pass, refine the query only if the responder's request and prior results reveal a distinct gap that a new search could resolve.
+            - Generate a focused search query that captures what the conversation is ABOUT (the topic/entity you're unsure of), NOT a verbatim copy of the latest message.
+            - When the messages are pure chit-chat with nothing factual to look up (greetings, "how are you", plans about her own schedule), do NOT call the world-view tool.
+            """)
+
+    if has_user_info:
+        guidance.append("""
+            PER-USER FACTS
+            Rachel also keeps a personal memory of each individual she talks to: durable facts and preferences learned from past conversations (their relationships, plans, likes/dislikes, ongoing situations), together with a structured profile. The responder relies on the conversation and accumulated lookup results for this memory. Use the per-user facts search tool when personal context would clearly help the reply or the responder requests a missing personal detail:
+            - Search a participant when the conversation touches THEIR life — their plans, feelings, work/school, relationships, food, or anything they previously shared that might be relevant now.
+            - Use at most one focused lookup per relevant participant in this pass (e.g. "internship and job hunt", "food preferences"), not a verbatim copy of the message. A later pass may look up the same participant only for a distinct unresolved detail with a meaningfully different query. The lookup returns both facts and profile, so reuse the profile already collected rather than fetching it again unnecessarily.
+            - Pass the participant's name EXACTLY as listed below. Never guess or invent a name.
+            - For pure chit-chat needing no personal recall, you may skip it entirely.
+            """)
+
+
+    context: ContextFetcherPromptContext = request.runtime.context
+    return CONTEXT_FETCHER_SYSTEM_PROMPT.format(
+        tool_guidance="\n\n".join(guidance),
+        tools=format_tools(tools),
+        participants=context["participants"],
+        datetime=context["datetime"],
+    )
+
+
 _context_tools_by_name = {t.name: t for t in CONTEXT_TOOLS}
 
 
@@ -388,7 +444,7 @@ async def _get_context_fetcher_llm():
     model = await _current_main_model()
     key = f"context_fetcher:{model}"
     if key not in _client_cache:
-        _client_cache[key] = _base_chat(model, 0.0, reasoning_effort="medium").bind_tools(CONTEXT_TOOLS)
+        _client_cache[key] = _base_chat(model, 0.0, reasoning_effort="medium")
     return _client_cache[key]
 
 
@@ -596,17 +652,6 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
         f"the current time is {now.strftime('%H:%M')}"
     )
     participants = ", ".join(senders.values()) or "(unknown)"
-    # Normalized-name -> user_id map used to resolve the model's name output back
-    # to a concrete id downstream (the model only ever sees/emits names).
-    name_to_id = _build_name_to_id(senders)
-    system_msgs = ChatPromptTemplate.from_messages(
-        [("system", CONTEXT_FETCHER_SYSTEM_PROMPT)]
-    ).format_messages(
-        datetime=formatted_datetime,
-        tools=format_tools(CONTEXT_TOOLS),
-        participants=participants,
-    )
-
     pass_number = state.get("context_passes", 0) + 1
     # Supply all earlier results and failures for the agent to evaluate.
     # This handoff is not a user turn.
@@ -617,7 +662,20 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
         "previous_observations": observations,
     }, ensure_ascii=False))
     
-    ai: AIMessage = await (await _get_context_fetcher_llm()).ainvoke([*system_msgs, handoff, *history_msgs])
+    request = ModelRequest(
+        model=await _get_context_fetcher_llm(),
+        messages=[handoff, *history_msgs],
+        tools=CONTEXT_TOOLS,
+        runtime=Runtime(context={"participants": participants, "datetime": formatted_datetime}),
+    )
+
+    async def call_model(model_request: ModelRequest) -> AIMessage:
+        assert model_request.system_message is not None
+        return await model_request.model.bind_tools(model_request.tools).ainvoke(
+            [model_request.system_message, *model_request.messages]
+        )
+
+    ai: AIMessage = await context_fetcher_dynamic_prompt.awrap_model_call(request, call_model)
     for tc in getattr(ai, "tool_calls", None) or []:
         name = tc["name"]
         arguments = tc["args"]

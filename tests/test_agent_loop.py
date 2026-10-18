@@ -54,6 +54,16 @@ class Model:
         return output
 
 
+class FetcherModel(Model):
+    def __init__(self, outputs):
+        super().__init__(outputs)
+        self.bound_tool_names = []
+
+    def bind_tools(self, tools):
+        self.bound_tool_names = [tool.name for tool in tools]
+        return self
+
+
 class AgentContractTests(unittest.TestCase):
     def test_response_requires_decision_and_request(self):
         with self.assertRaises(ValidationError):
@@ -65,7 +75,7 @@ class AgentContractTests(unittest.TestCase):
 
     def test_budget_default_and_inclusive_bounds(self):
         credentials = dict(telegram_api_id=1, telegram_api_hash="test", telegram_bot_token="test", merge_gateway_api_key="test", _env_file=None)
-        self.assertEqual(Settings(**credentials).agent_max_context_passes, 2)
+        self.assertEqual(Settings(**credentials).agent_max_context_passes, 3)
         for count in (1, 5, 10):
             self.assertEqual(Settings(**credentials, agent_max_context_passes=count).agent_max_context_passes, count)
         for count in (0, 11):
@@ -100,7 +110,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         }))
 
     def models(self, fetch_outputs, response_outputs):
-        fetcher, responder = Model(fetch_outputs), Model(response_outputs)
+        fetcher, responder = FetcherModel(fetch_outputs), Model(response_outputs)
         self.stack.enter_context(patch.object(llm, "_get_context_fetcher_llm", AsyncMock(return_value=fetcher)))
         self.stack.enter_context(patch.object(llm, "_get_responder_llm", AsyncMock(return_value=responder)))
         return fetcher, responder

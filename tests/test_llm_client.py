@@ -18,6 +18,60 @@ def _lookup(query: str) -> str:
 
 
 class ReplyPipelineClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_context_fetcher_sends_tool_schema_and_dynamic_prompt_once(self) -> None:
+        requests: list[dict] = []
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            requests.append(json.loads(request.content))
+            return httpx.Response(200, json={
+                "id": "chatcmpl-fetcher", "object": "chat.completion", "created": 0,
+                "model": "deepseek/deepseek-v4.1-flash",
+                "choices": [{"index": 0, "message": {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{"id": "call-1", "type": "function", "function": {
+                        "name": "get_day_overview", "arguments": '{"day":"Friday"}',
+                    }}],
+                }, "finish_reason": "tool_calls"}],
+            })
+
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle_request))
+        openai_client = AsyncOpenAI(
+            api_key="test-key", base_url="https://gateway.example/v1/openai",
+            http_client=http_client,
+        )
+        client = _base_chat("deepseek/deepseek-v4.1-flash", 0.0, reasoning_effort="medium")
+        client.async_client = openai_client.chat.completions
+        client.root_async_client = openai_client
+
+        try:
+            with patch.dict(llm._client_cache, {}, clear=True), \
+                    patch.object(llm, "_current_main_model", AsyncMock(return_value="deepseek/deepseek-v4.1-flash")), \
+                    patch.object(llm, "_base_chat", return_value=client):
+                self.assertIs(await llm._get_context_fetcher_llm(), client)
+                with patch("app.calander.get_day_summary", new=AsyncMock(return_value=[])):
+                    observations = []
+                    await llm._run_context_fetcher({
+                        "history": [{"sender": "Jamie", "content": "Free on Friday?", "telegram_message_id": 1}],
+                        "senders": {7: "Jamie"}, "context_passes": 0, "retrieval_request": "",
+                    }, observations)
+        finally:
+            await openai_client.close()
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(observations[0]["tool_name"], "get_day_overview")
+        request = requests[0]
+        self.assertEqual([tool["function"]["name"] for tool in request["tools"]],
+                         [tool.name for tool in llm.CONTEXT_TOOLS])
+        by_name = {tool["function"]["name"]: tool["function"] for tool in request["tools"]}
+        self.assertEqual(set(by_name["get_activity_at"]["parameters"]["properties"]), {"day", "hour"})
+        self.assertTrue(all(tool["description"] for tool in by_name.values()))
+        self.assertIn("query", request["tools"][-1]["function"]["parameters"]["properties"])
+        self.assertIn("SCHEDULE\n", request["messages"][0]["content"])
+        self.assertIn("WORLD-VIEW FACTS\n", request["messages"][0]["content"])
+        self.assertIn("PER-USER FACTS\n", request["messages"][0]["content"])
+        self.assertIn("Jamie", request["messages"][0]["content"])
+        self.assertEqual(request.get("reasoning_effort"), "medium")
+
     async def test_responder_uses_medium_reasoning_with_json_schema_and_no_tools(self) -> None:
         requests: list[dict] = []
         outputs = iter([

@@ -253,9 +253,9 @@ async def get_activity_at(day: str, hour: int) -> str:
 
 
 # All calendar tools exposed to the context_fetcher node. This list is the
-# single source of truth for the calendar tools: it feeds the combined tool list
-# (CONTEXT_TOOLS in app/services/llm.py) that drives both the LLM's bound tools and
-# the prompt's tool listing (via format_tools), so adding a tool here is enough.
+# single source of truth for the calendar tools: it feeds CONTEXT_TOOLS in
+# app/services/llm.py, which drives both the fetcher's bound tools and its dynamic
+# prompt's tool listing. Update the dynamic guidance for new capabilities.
 CALENDAR_TOOLS = [
     get_activity_now,
     get_today_overview,
