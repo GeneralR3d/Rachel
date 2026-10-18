@@ -298,20 +298,6 @@ class GraphState(TypedDict):
 
 
 
-def _intent_prompt(intent: str) -> str:
-    """Render proactive-only instructions without leaking them into reactive calls."""
-    intent = (intent or "").strip()
-    if not intent:
-        return ""
-    return f"""<INTENT>
-This invocation is a cron-triggered proactive outreach. Every visible chat-history item is prior context only; the outreach intent below is the sole instruction describing what to do now. Follow it very closely. Tailor tool selection and the final response primarily to this intent; use chat history only as secondary personalization/context, and never let it override or distract from the intent.
-
-Outreach intent:
-{intent}
-
-For the responder: initiate a fresh outgoing message. Never imply or pretend that the recipient asked for this outreach, and always return message content.
-</INTENT>"""
-
 #
 # The chat clients are built lazily and cached keyed on the active
 # "main" model string (from the DB, via repository.get_active_models), so an admin
@@ -359,7 +345,7 @@ async def _get_responder_llm():
         _client_cache[key] = _base_chat(model, 0.2, reasoning_effort="medium").with_structured_output(
             # Validate locally so an SDK-side schema error cannot discard the
             # visible reply before our fallback gets a chance to salvage it.
-            ResponseOutput.model_json_schema(), method="json_schema", include_raw=True
+            ResponseOutput.model_json_schema(), method="json_schema", strict=True, include_raw=True
         )
     return _client_cache[key]
 
@@ -374,6 +360,7 @@ CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool]
 class ContextFetcherPromptContext(TypedDict):
     participants: str
     datetime: str
+    intent: str
 
 
 @dynamic_prompt
@@ -387,6 +374,7 @@ def context_fetcher_dynamic_prompt(request: ModelRequest) -> str:
         available_categories={_context_category(tool.name) for tool in tools},
         participants=context["participants"],
         current_datetime=context["datetime"],
+        intent=context.get("intent", ""),
     )
 
 
@@ -622,7 +610,8 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
         model=await _get_context_fetcher_llm(),
         messages=[handoff, *history_msgs],
         tools=CONTEXT_TOOLS,
-        runtime=Runtime(context={"participants": participants, "datetime": formatted_datetime}),
+        runtime=Runtime(context={"participants": participants, "datetime": formatted_datetime,
+                                 "intent": state.get("intent", "")}),
     )
 
     async def call_model(model_request: ModelRequest) -> AIMessage:
@@ -750,8 +739,15 @@ def _salvage_reply(raw: str) -> str:
 
 def _parse_fallback(state: GraphState, raw: str, error: Exception) -> Dict:
     record_llm_error("responder", error)
-    content = _salvage_reply(raw) or state.get("response_text") or "I'm not sure yet — could you clarify what you mean?"
+    content = _salvage_reply(raw) or state.get("response_text") or _fallback_content(state)
     return _response_update(state, content, "Best-effort reply after structured-output parse failure.", status="parse_fallback")
+
+
+def _fallback_content(state: GraphState) -> str:
+    """Outreach must still initiate contact when no usable model content survives."""
+    if (state.get("intent") or "").strip():
+        return "Hey, how have you been?"
+    return "I'm not sure yet — could you clarify what you mean?"
 
 
 async def responder_node(state: GraphState) -> Dict:
@@ -774,10 +770,6 @@ async def responder_node(state: GraphState) -> Dict:
             f"the current day of week is {now.strftime('%A')}, "
             f"the current time is {now.strftime('%H:%M')}"
         )
-        # Rachel's schedule (right now / today / other days) is no longer
-        # injected here — context_fetcher_node fetches it via tools and it
-        # arrives through {schedule_context}.
-
         proactive = bool((state.get("intent") or "").strip())
         history_msgs = _build_history_messages(
             state["history"],
@@ -796,6 +788,7 @@ async def responder_node(state: GraphState) -> Dict:
             personality_traits=personality_traits,
             conversation_mood=mood,
             current_datetime=formatted_datetime,
+            intent=state.get("intent", ""),
         ))
         loop_system_message = SystemMessage(content=build_responder_loop_message(
             instructions=RESPONDER_LOOP_INSTRUCTIONS,
@@ -888,19 +881,29 @@ def _build_proactive_graph():
     return graph.compile()
 
 
-def _build_proactive_graph():
-    """Build the outreach-only graph: no checker, router, or summarizer."""
-    graph: StateGraph = StateGraph(GraphState)
-    graph.add_node("context_fetcher_node", context_fetcher_node)
-    graph.add_node("responder_node", responder_node)
-    graph.add_edge(START, "context_fetcher_node")
-    graph.add_edge("context_fetcher_node", "responder_node")
-    graph.add_edge("responder_node", END)
-    return graph.compile()
-
-
 _graph = _build_graph()
 _proactive_graph = _build_proactive_graph()
+
+
+async def _run_response_graph(graph, initial_state: GraphState, *, run_name: str) -> GraphState:
+    """Apply the same pass budget, emergency recovery and metrics to both entry points."""
+    result = initial_state
+    try:
+        async for snapshot in graph.astream(initial_state, config={
+            "run_name": run_name,
+            "recursion_limit": 2 * settings.agent_max_context_passes + 8,
+        }, stream_mode="values"):
+            result = snapshot
+    except GraphRecursionError as e:
+        record_llm_error("responder", e)
+        result = {**result, "loop_outcome": "capped"}
+        if not result.get("response_text"):
+            result.update(response_text=_fallback_content(initial_state),
+                          response_reason="Emergency graph recursion fallback.")
+    if result.get("context_passes", 0):
+        AGENT_LOOP_OUTCOMES.labels(outcome=result["loop_outcome"]).inc()
+        AGENT_CONTEXT_PASSES.observe(result["context_passes"])
+    return result
 
 
 async def get_response(
@@ -945,22 +948,7 @@ async def get_response(
         "response_reason": "",
     }
 
-    result = initial_state
-    try:
-        async for snapshot in _graph.astream(initial_state, config={
-            "run_name": "RachelReplyGraph",
-            "recursion_limit": 2 * settings.agent_max_context_passes + 8,
-        }, stream_mode="values"):
-            result = snapshot
-    except GraphRecursionError as e:
-        record_llm_error("responder", e)
-        result = {**result, "loop_outcome": "capped"}
-        if not result.get("response_text"):
-            result.update(response_text="I'm not sure yet — could you clarify what you mean?",
-                          response_reason="Emergency graph recursion fallback.")
-    if result.get("context_passes", 0):
-        AGENT_LOOP_OUTCOMES.labels(outcome=result["loop_outcome"]).inc()
-        AGENT_CONTEXT_PASSES.observe(result["context_passes"])
+    result = await _run_response_graph(_graph, initial_state, run_name="RachelReplyGraph")
 
     if chat_id is not None:
         _chat_mood[chat_id] = result["mood"]
@@ -978,6 +966,8 @@ async def get_proactive_response(
     senders: Dict[int, str] | None = None,
 ) -> Tuple[str, str, float]:
     """Generate an unconditional outreach without routing, summarizing, or mood writes."""
+    if not intent.strip():
+        raise ValueError("Proactive outreach requires a non-empty intent")
     start = time.time()
     current_mood = _chat_mood.get(chat_id, DEFAULT_MOOD) if chat_id is not None else DEFAULT_MOOD
     initial_state: GraphState = {
@@ -990,12 +980,12 @@ async def get_proactive_response(
         "is_private": False,
         "responded_watermark": None,
         "should_reply": True,
-        "schedule_context": "",
-        "world_view": "",
-        "user_facts": "",
-        "user_profiles": "",
+        "context_passes": 0,
+        "tool_observations": [],
+        "retrieval_request": "",
+        "responder_decision": "respond",
         "response_text": "",
         "response_reason": "",
     }
-    result = await _proactive_graph.ainvoke(initial_state)
+    result = await _run_response_graph(_proactive_graph, initial_state, run_name="RachelProactiveGraph")
     return result["response_text"], result["response_reason"], time.time() - start

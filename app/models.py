@@ -157,7 +157,7 @@ class History(Base):
     __tablename__ = "history"
 
     # Telegram message IDs are unique per chat, so the PK is composite.
-    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     telegram_message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     # References users.telegram_user_id — no FK constraint to avoid cascade issues.
     sender_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)

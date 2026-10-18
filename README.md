@@ -507,6 +507,8 @@ node --test tests/test_proactive_dashboard.cjs
 
 Set `TEST_DATABASE_URL` to a disposable PostgreSQL database to include repeat-limit integration tests; each test uses and removes its own isolated schema. Without it, database integration tests are skipped. There is no lint configuration or CI workflow. The original Telethon/SQLite implementation remains under [`Reference/`](Reference/) as a porting reference.
 
+The integration suite also covers schedule HTTP endpoints, scheduler shutdown, the outreach agent loop through message persistence, and migration data preservation. Migration `0a7e2c9d4b61` aligns the existing history timestamp field with the database. Existing rows receive migration time when the column is added; deployments that already have the column retain their timestamps.
+
 ## Deployment
 
 Two deployment guides are included:
@@ -518,12 +520,11 @@ The guides contain some pre-Merge-Gateway environment names; use the `MERGE_GATE
 
 ## Known Limitations
 
-- A documented race in `_flush_chat` can drop a message that arrives between the persistence write and buffer removal.
 - A multi-burst reply is persisted as one history row keyed to the first Telegram message ID, so an interleaved user message can be ordered differently after a database re-seed.
 - Timed silence, indefinite mute state, and reply watermarks are process-local; the durable memory-extraction watermark is persisted.
 - Switching to an embedding model with a different vector dimensionality does not automatically re-embed existing Neo4j data.
 - The admin HTTP surface does not implement its own authentication.
-- Tests, linting, CI, and a ready-made Prometheus/Grafana deployment are not yet included.
+- Linting, CI, and a ready-made Prometheus/Grafana deployment are not yet included.
 
 ## License
 

@@ -165,6 +165,7 @@ async def _seed_chat_buffer_locked(chat_id: int, me_id: int) -> List[BufferedMes
             )
         )
     current_messages_buffer[chat_id] = buffer
+    burst_sessions.setdefault(chat_id, uuid.uuid4().hex)
     return buffer
 
 
@@ -481,7 +482,6 @@ async def _reply(event):
     Persistence is handled by finalize_conversation().
     """
     chat_id = event.chat_id
-    buffer = current_messages_buffer[chat_id]
     session_id = burst_sessions.get(chat_id)
     chat_name = _chat_display_name(getattr(event, "chat", None))
     me = await client.get_me()
@@ -588,18 +588,6 @@ async def _generate_response_with_retry(
             return await get_response(**response_kwargs)
 
 
-async def _generate_response_with_retry(
-    response_kwargs: Dict[str, Any], session_id: str | None, chat_id: int, chat_name: str | None = None
-):
-    """Keep a failed first graph run and its retry in one response trace."""
-    with traced_workflow("telegram_reply", session_id, chat_id, chat_name):
-        try:
-            return await get_response(**response_kwargs)
-        except Exception as e:
-            print(f"[{chat_id}] get_response failed ({type(e).__name__}: {e}), retrying once...")
-            return await get_response(**response_kwargs)
-
-
 async def wait_before_reply(event, delay: int):
     """Wait ``delay`` seconds, then reply (awaited so it completes in-task)."""
     try:
@@ -617,6 +605,10 @@ async def wait_before_reply(event, delay: int):
 async def _wait_for_reactive_and_silence(chat_id: int) -> None:
     """Wait until no delayed reactive reply or group silent period is active."""
     while True:
+        if chat_id in muted_chats:
+            # Indefinite mute cannot be deferred: scheduler shutdown drains
+            # active runs, so waiting here could prevent shutdown forever.
+            raise RuntimeError("Proactive outreach blocked: chat is muted")
         reactive = wait_tasks.get(chat_id)
         if reactive is not None and reactive is not asyncio.current_task() and not reactive.done():
             await asyncio.gather(asyncio.shield(reactive), return_exceptions=True)
@@ -639,6 +631,9 @@ async def send_proactive_message(chat_id: int, intent: str, schedule_id: int) ->
     # reactive task or silence appeared, release and defer before trying again.
     while True:
         await lock.acquire()
+        if chat_id in muted_chats:
+            lock.release()
+            raise RuntimeError("Proactive outreach blocked: chat is muted")
         reactive = wait_tasks.get(chat_id)
         if (
             (reactive is not None and reactive is not asyncio.current_task() and not reactive.done())
@@ -704,14 +699,13 @@ async def _flush_chat(
             await set_summary(chat_id, pending_summaries.pop(chat_id), get_chat_mood(chat_id))
             print(f"[{chat_id}] Flushed summary + mood to DB")
 
-    #TODO: fix this gap. Any messages that arrive between these will be lost.
+        current_messages_buffer.pop(chat_id, None)
+        burst_sessions.pop(chat_id, None)
+        last_message_time.pop(chat_id, None)
+        return conversation, summary
 
-    current_messages_buffer.pop(chat_id, None)
-    burst_sessions.pop(chat_id, None)
-    last_message_time.pop(chat_id, None)
 
-
-async def finalize_conversation(chat_id: int, delay: float, chat_name: str | None):
+async def finalize_conversation(chat_id: int, delay: float, chat_name: str | None = None):
     """After ``delay`` seconds of inactivity, treat the conversation as finished:
     persist unpersisted buffer messages to DB and extract world-view facts.
 
@@ -723,10 +717,6 @@ async def finalize_conversation(chat_id: int, delay: float, chat_name: str | Non
     """
     await asyncio.sleep(delay)
     session_id = burst_sessions.get(chat_id)
-    conversation = [m.to_llm_dict_full() for m in current_messages_buffer.get(chat_id, [])]
-    # Snapshot the conversation summary before _flush_chat pops it from
-    # pending_summaries; falls back to the persisted summary in DB.
-    summary = pending_summaries.get(chat_id) or await get_summary(chat_id)
     # Memory-pipeline watermark: only messages newer than this are extracted from
     # (older ones were already processed in a previous finalize). Read before the
     # pipelines run and passed in; both share this single per-chat value.
@@ -851,28 +841,6 @@ async def new_message(event):
     chat_id = event.chat_id
     print(f"[{chat_id}] new message received")
 
-    # On first contact for this chat, pre-load recent history into the buffer
-    if chat_id not in current_messages_buffer:
-        current_messages_buffer[chat_id] = []
-        burst_sessions[chat_id] = uuid.uuid4().hex
-        # Tag Rachel's own past messages by id, not by resolved name: get_history
-        # resolves her turns to her Telegram first name (via COALESCE), which need
-        # not equal BOT_NAME. The downstream partition/AIMessage logic keys off
-        # sender == BOT_NAME, so normalize her seeded turns to BOT_NAME here.
-        me = await client.get_me()
-        past = await get_history(chat_id, N_PAST_MSG_REQUIRED)
-        for h in past:
-            is_bot = h["sender_user_id"] == me.id
-            current_messages_buffer[chat_id].append(
-                BufferedMessage(
-                    telegram_message_id=h["telegram_message_id"],
-                    sender_user_id=h["sender_user_id"],
-                    sender_name=BOT_NAME if is_bot else h["sender"],
-                    content=h["content"],
-                    is_persisted=True,
-                )
-            )
-
     sender = await event.get_sender()
     # Prioritize first name, better for summary and fact extraction
     # Might cause conflicts if 2 ppl in same chat have exact same first name, which is unlikely
@@ -899,6 +867,7 @@ async def new_message(event):
         print(f"[{chat_id}] empty message skipped")
         return
 
+    me = await client.get_me()
     buffer_len = await _append_to_buffer(
         chat_id,
         BufferedMessage(

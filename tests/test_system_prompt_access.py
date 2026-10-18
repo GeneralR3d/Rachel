@@ -69,6 +69,8 @@ class SystemPromptAccessTests(unittest.IsolatedAsyncioTestCase):
             for name in ("ensure_traits_seeded", "ensure_schedule_seeded", "ensure_models_seeded", "upsert_user"):
                 stack.enter_context(patch.object(repository, name, AsyncMock()))
             stack.enter_context(patch("app.database.dispose_engine", AsyncMock()))
+            stack.enter_context(patch("app.services.proactive.start_proactive_scheduler", AsyncMock()))
+            stack.enter_context(patch("app.services.proactive.stop_proactive_scheduler", AsyncMock()))
             namespace = runpy.run_path(str(ROOT / "app/main.py"))
             async with namespace["lifespan"](namespace["app"]):
                 client.start.assert_awaited_once()
