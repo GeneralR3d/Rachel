@@ -19,8 +19,15 @@ class DropSystemPromptsMigrationTests(unittest.TestCase):
         self.scripts = ScriptDirectory.from_config(config)
 
     def test_migration_extends_the_existing_head(self):
-        self.assertEqual(self.scripts.get_heads(), ["f9c6a1d4b3e8"])
+        self.assertEqual(self.scripts.get_heads(), ["0a7e2c9d4b61"])
+        self.assertEqual(self.scripts.get_revision("0a7e2c9d4b61").down_revision, "f9c6a1d4b3e8")
         self.assertEqual(self.scripts.get_revision("f9c6a1d4b3e8").down_revision, "e8b5d0f3a2c7")
+
+    def test_database_at_proactive_revision_can_upgrade_to_head(self):
+        # A deployed DB can already be stamped at this feature-branch revision.
+        # Resolving only main's head misses the missing applied-revision failure.
+        steps = list(self.scripts.iterate_revisions("heads", "e8b5d0f3a2c7"))
+        self.assertEqual([step.revision for step in steps], ["0a7e2c9d4b61", "f9c6a1d4b3e8"])
 
     def test_upgrade_removes_table_and_downgrade_restores_its_empty_schema(self):
         migration = self.scripts.get_revision("f9c6a1d4b3e8").module
