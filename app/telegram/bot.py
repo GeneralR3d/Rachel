@@ -1,4 +1,4 @@
-"""Admin Telethon bot — manage Rachel's system prompt from within Telegram.
+"""Admin Telethon bot — inspect prompts and manage Rachel from within Telegram.
 
 Ported from Reference/app/bot.py. Repository calls are now awaited, and the bot
 is started/stopped by app.main's lifespan rather than here.
@@ -7,7 +7,7 @@ is started/stopped by app.main's lifespan rather than here.
 from telethon import TelegramClient, events
 
 from app.config import get_settings
-from app.prompts import USER_PROFILE_FIELDS
+from app.prompts import RESPONDER_SYSTEM_PROMPT, SUMMARIZER_SYSTEM_PROMPT, USER_PROFILE_FIELDS
 from app.services.userfacts import add_user_facts, get_user_facts
 from app.repository import (
     add_model,
@@ -20,15 +20,11 @@ from app.repository import (
     get_all_models,
     get_all_users,
     get_history,
-    get_summarizer_system_prompt,
     get_summary,
-    get_responder_system_prompt,
     get_traits,
     get_user_profile,
     reset_traits,
     set_active_model,
-    set_summarizer_system_prompt,
-    set_responder_system_prompt,
     set_trait_value,
     set_user_profile,
 )
@@ -44,21 +40,10 @@ ADMIN = settings.admin_id
     events.NewMessage(incoming=True, from_users=[ADMIN], pattern="\\/get_responder_system_prompt")
 )
 async def on_get_responder_system_prompt(event):
-    prompt = await get_responder_system_prompt()
+    prompt = RESPONDER_SYSTEM_PROMPT
     chunk_size = 4000
     for i in range(0, len(prompt), chunk_size):
         await event.reply(prompt[i : i + chunk_size])
-
-
-@bot.on(
-    events.NewMessage(
-        incoming=True, from_users=[ADMIN], pattern="\\/set_responder_system_prompt\\s.*"
-    )
-)
-async def on_set_responder_system_prompt(event):
-    new_system_prompt = event.raw_text.replace("/set_responder_system_prompt ", "")
-    await set_responder_system_prompt(new_system_prompt)
-    await event.reply("System prompt set!")
 
 
 @bot.on(
@@ -67,21 +52,10 @@ async def on_set_responder_system_prompt(event):
     )
 )
 async def on_get_summarizer_system_prompt(event):
-    prompt = await get_summarizer_system_prompt()
+    prompt = SUMMARIZER_SYSTEM_PROMPT
     chunk_size = 4000
     for i in range(0, len(prompt), chunk_size):
         await event.reply(prompt[i : i + chunk_size])
-
-
-@bot.on(
-    events.NewMessage(
-        incoming=True, from_users=[ADMIN], pattern="\\/set_summarizer_system_prompt\\s.*"
-    )
-)
-async def on_set_summarizer_system_prompt(event):
-    new_summarizer_system_prompt = event.raw_text.replace("/set_summarizer_system_prompt ", "")
-    await set_summarizer_system_prompt(new_summarizer_system_prompt)
-    await event.reply("Summarizer system prompt set!")
 
 
 @bot.on(

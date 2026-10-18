@@ -1,7 +1,6 @@
 """SQLAlchemy ORM models mirroring the original SQLite schema.
 
 Original SQLite tables (see Reference/app/db.py):
-    SystemPrompt(SystemPrompt TEXT)
     Summary(chat_id INTEGER PK, summary TEXT)  # now ChatState(chat_id, summary, mood, last_processed_message_id)
     History(message_id INTEGER PK AUTOINCREMENT, chat_id INTEGER, sender TEXT, content TEXT)
 """
@@ -17,15 +16,6 @@ from sqlalchemy.sql import func
 
 class Base(DeclarativeBase):
     pass
-
-
-class SystemPrompt(Base):
-    __tablename__ = "system_prompts"
-
-    # Single-row table; surrogate PK added (SQLite version had no explicit PK).
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    responder_system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
-    summarizer_system_prompt: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
 
 
 class ChatState(Base):

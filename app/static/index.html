@@ -206,10 +206,10 @@
 </nav>
 
 <main>
-    <!-- PROMPTS (editable system prompts + read-only workflow prompts) -->
+    <!-- PROMPTS (read-only system and workflow prompts) -->
     <section id="prompts">
       <h2>Prompts</h2>
-      <div class="desc">Pick a prompt on the left. The responder &amp; summarizer prompts are stored in the database and editable. The rest are workflow-node prompts hard-coded in <span class="mono">app/prompts.py</span>, shown read-only.</div>
+      <div class="desc">Browse Rachel's system and workflow prompts. All prompts are read-only and updated with the application.</div>
       <div class="userlayout">
         <div class="userlist">
           <div class="btns"><button onclick="loadPrompts()" class="ghost">Reload</button></div>
@@ -226,7 +226,6 @@
             </div>
             <div class="spacer"></div>
             <textarea id="promptText" style="min-height:60vh"></textarea>
-            <div class="btns" id="promptBtns"></div>
           </div>
         </div>
       </div>
@@ -440,23 +439,26 @@ async function checkHealth() {
   }
 }
 
-// --- prompts (editable DB prompts + read-only workflow prompts) ---------
-// Editable prompts stored in the DB, each with its own GET/PUT endpoint.
-const EDITABLE_PROMPTS = [
+// --- prompts (read-only system and workflow prompts) --------------------
+const SYSTEM_PROMPTS = [
   { id: "responder", label: "Responder", endpoint: "/responder-system-prompt" },
   { id: "summarizer", label: "Summarizer", endpoint: "/summarizer-system-prompt" },
 ];
-let PROMPTS = [];            // sidebar entries: {id, label, editable, endpoint?, text?}
+let PROMPTS = [];            // sidebar entries: {id, label, text}
 let selectedPrompt = null;   // currently selected prompt id
 
 async function loadPrompts() {
   const box = document.getElementById("promptList");
   box.innerHTML = '<div class="muted spacer">Loading…</div>';
   try {
-    const workflow = await api("/workflow-prompts");
+    const [system, workflow] = await Promise.all([
+      Promise.all(SYSTEM_PROMPTS.map(async ({ id, label, endpoint }) =>
+        ({ id, label, text: (await api(endpoint)).prompt }))),
+      api("/workflow-prompts"),
+    ]);
     PROMPTS = [
-      ...EDITABLE_PROMPTS.map(p => ({ ...p, editable: true })),
-      ...workflow.map(w => ({ id: "wf:" + w.key, label: w.label, editable: false, text: w.prompt })),
+      ...system,
+      ...workflow.map(w => ({ id: "wf:" + w.key, label: w.label, text: w.prompt })),
     ];
     box.innerHTML = "";
     for (const p of PROMPTS) {
@@ -466,7 +468,7 @@ async function loadPrompts() {
       row.onclick = () => selectPrompt(p.id);
       row.innerHTML =
         `<div class="tname">${esc(p.label)}</div>
-         <div class="tval">${p.editable ? "editable" : "read-only"}</div>`;
+         <div class="tval">read-only</div>`;
       box.appendChild(row);
     }
     if (selectedPrompt && PROMPTS.some(p => p.id === selectedPrompt)) selectPrompt(selectedPrompt);
@@ -483,7 +485,7 @@ function highlightPromptRow(id) {
     r.classList.toggle("selected", r.dataset.pid === String(id)));
 }
 
-async function selectPrompt(id) {
+function selectPrompt(id) {
   const p = PROMPTS.find(x => x.id === id);
   if (!p) return;
   selectedPrompt = id;
@@ -492,34 +494,10 @@ async function selectPrompt(id) {
   document.getElementById("promptDetailBody").style.display = "block";
   document.getElementById("promptDetailName").textContent = p.label;
   document.getElementById("promptDetailKind").textContent =
-    p.editable ? "Stored in the database — editable." : "Hard-coded in app/prompts.py — read-only.";
+    "Read-only — updated with the application.";
   const ta = document.getElementById("promptText");
-  const btns = document.getElementById("promptBtns");
-  btns.innerHTML = "";
-  if (p.editable) {
-    ta.readOnly = false;
-    ta.value = "Loading…";
-    try { ta.value = (await api(p.endpoint)).prompt; }
-    catch (e) { ta.value = ""; toast(p.label + ": " + e.message, "err"); }
-    const reload = document.createElement("button");
-    reload.className = "ghost"; reload.textContent = "Reload";
-    reload.onclick = () => selectPrompt(id);
-    const save = document.createElement("button");
-    save.textContent = "Save"; save.onclick = () => savePrompt(id);
-    btns.append(reload, save);
-  } else {
-    ta.readOnly = true;
-    ta.value = p.text;
-  }
-}
-
-async function savePrompt(id) {
-  const p = PROMPTS.find(x => x.id === id);
-  if (!p || !p.editable) return;
-  try {
-    await api(p.endpoint, { method: "PUT", body: { prompt: document.getElementById("promptText").value } });
-    toast(p.label + " prompt saved", "ok");
-  } catch (e) { toast("Save failed: " + e.message, "err"); }
+  ta.readOnly = true;
+  ta.value = p.text;
 }
 
 // --- personality --------------------------------------------------------

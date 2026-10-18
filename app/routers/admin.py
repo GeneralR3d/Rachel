@@ -25,8 +25,7 @@ router = APIRouter()
 # Workflow-node prompts that are NOT stored in the DB: they are imported
 # directly from app.prompts and surfaced read-only in the dashboard so the
 # whole pipeline's prompting is visible in one place. The responder &
-# summarizer prompts are intentionally excluded here — they live in the DB
-# and have their own editable endpoints above.
+# summarizer prompts have their own read-only endpoints below.
 WORKFLOW_PROMPTS: list[tuple[str, str, str]] = [
     ("router", "Router / reply-gating", json.dumps(prompts.ROUTER_GROUP_QUESTION, indent=2)),
     ("worldview_fact_extractor", "World-view: fact extractor", prompts.FACT_EXTRACTOR_SYSTEM_PROMPT),
@@ -36,15 +35,7 @@ WORKFLOW_PROMPTS: list[tuple[str, str, str]] = [
 ]
 
 
-class SystemPromptIn(BaseModel):
-    prompt: str
-
-
 class SystemPromptOut(BaseModel):
-    prompt: str
-
-
-class SummarizerSystemPromptIn(BaseModel):
     prompt: str
 
 
@@ -91,30 +82,12 @@ async def health() -> dict:
 
 @router.get("/responder-system-prompt", response_model=SystemPromptOut)
 async def read_system_prompt() -> SystemPromptOut:
-    prompt = await repository.get_responder_system_prompt()
-    if prompt is None:
-        raise HTTPException(status_code=404, detail="responder System prompt not seeded")
-    return SystemPromptOut(prompt=prompt)
-
-
-@router.put("/responder-system-prompt", response_model=SystemPromptOut)
-async def update_system_prompt(body: SystemPromptIn) -> SystemPromptOut:
-    await repository.set_responder_system_prompt(body.prompt)
-    return SystemPromptOut(prompt=body.prompt)
+    return SystemPromptOut(prompt=prompts.RESPONDER_SYSTEM_PROMPT)
 
 
 @router.get("/summarizer-system-prompt", response_model=SummarizerSystemPromptOut)
 async def read_summarizer_system_prompt() -> SummarizerSystemPromptOut:
-    prompt = await repository.get_summarizer_system_prompt()
-    if prompt is None:
-        raise HTTPException(status_code=404, detail="Summarizer system prompt not seeded")
-    return SummarizerSystemPromptOut(prompt=prompt)
-
-
-@router.put("/summarizer-system-prompt", response_model=SummarizerSystemPromptOut)
-async def update_summarizer_system_prompt(body: SummarizerSystemPromptIn) -> SummarizerSystemPromptOut:
-    await repository.set_summarizer_system_prompt(body.prompt)
-    return SummarizerSystemPromptOut(prompt=body.prompt)
+    return SummarizerSystemPromptOut(prompt=prompts.SUMMARIZER_SYSTEM_PROMPT)
 
 class WorkflowPromptOut(BaseModel):
     key: str
