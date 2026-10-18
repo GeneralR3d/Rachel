@@ -21,16 +21,11 @@ from app.models import (
     LLMModel,
     PersonalityTrait,
     ScheduleActivity,
-    SystemPrompt,
     User,
     UserFactsPreferences,
 )
-from app.prompts import DEFAULT_TRAITS, SUMMARIZER_SYSTEM_PROMPT, RESPONDER_SYSTEM_PROMPT
+from app.prompts import DEFAULT_TRAITS
 from app.schedule_data import DEFAULT_SCHEDULE
-
-# Cached system prompts (mirrors the original module-level global cache).
-_responder_system_prompt: Optional[str] = None
-_summarizer_system_prompt: Optional[str] = None
 
 # Cached active trait prompt block, refreshed at most every TRAIT_CACHE_TTL seconds.
 TRAIT_CACHE_TTL = 5 * 60    # 5 min
@@ -182,81 +177,6 @@ async def ensure_schedule_seeded() -> None:
 # --- weekly schedule ------------------------------------------------------
 # Schedule lookups (get_current_activity / get_day_summary / …) now live in
 # app/calander.py, alongside the LangChain tool wrappers built on top of them.
-
-
-async def ensure_system_prompts_seeded() -> None:
-    """Upsert system prompts from prompts.py on every startup.
-
-    prompts.py is the source of truth — edits there take effect on next restart.
-    Bot-side edits via /set_*_system_prompt survive until the next restart.
-    """
-    global _responder_system_prompt, _summarizer_system_prompt
-    async with session_scope() as session:
-        existing = await session.scalar(select(SystemPrompt.id).limit(1))
-        if existing is None:
-            session.add(
-                SystemPrompt(
-                    responder_system_prompt=RESPONDER_SYSTEM_PROMPT,
-                    summarizer_system_prompt=SUMMARIZER_SYSTEM_PROMPT,
-                )
-            )
-        else:
-            await session.execute(
-                update(SystemPrompt).values(
-                    responder_system_prompt=RESPONDER_SYSTEM_PROMPT,
-                    summarizer_system_prompt=SUMMARIZER_SYSTEM_PROMPT,
-                )
-            )
-    # Invalidate in-memory cache so first read picks up the new values
-    _responder_system_prompt = None
-    _summarizer_system_prompt = None
-
-
-# --- system prompt -------------------------------------------------------
-
-
-async def get_responder_system_prompt() -> str:
-    global _responder_system_prompt
-    if _responder_system_prompt:
-        return _responder_system_prompt
-
-    async with session_scope() as session:
-        _responder_system_prompt = await session.scalar(
-            select(SystemPrompt.responder_system_prompt).limit(1)
-        )
-    return _responder_system_prompt
-
-
-async def set_responder_system_prompt(new_system_prompt: str) -> None:
-    global _responder_system_prompt
-    _responder_system_prompt = new_system_prompt
-
-    async with session_scope() as session:
-        await session.execute(
-            update(SystemPrompt).values(responder_system_prompt=new_system_prompt)
-        )
-
-
-async def get_summarizer_system_prompt() -> str:
-    global _summarizer_system_prompt
-    if _summarizer_system_prompt:
-        return _summarizer_system_prompt
-
-    async with session_scope() as session:
-        _summarizer_system_prompt = await session.scalar(
-            select(SystemPrompt.summarizer_system_prompt).limit(1)
-        )
-    return _summarizer_system_prompt
-
-
-async def set_summarizer_system_prompt(new_summarizer_system_prompt: str) -> None:
-    global _summarizer_system_prompt
-    _summarizer_system_prompt = new_summarizer_system_prompt
-
-    async with session_scope() as session:
-        await session.execute(
-            update(SystemPrompt).values(summarizer_system_prompt=new_summarizer_system_prompt)
-        )
 
 
 # --- llm models ----------------------------------------------------------

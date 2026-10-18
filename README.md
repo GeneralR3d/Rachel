@@ -435,13 +435,15 @@ Rachel considers each non-empty incoming turn, but speaking behavior depends on 
 
 The single-file dashboard at `/` exposes prompts, personality traits, the model catalog, active model roles, chats, histories, user profiles and facts, world-view facts, and freshly rendered LangGraph diagrams. It has no application-level authentication; keep it on loopback locally and place an authenticated reverse proxy in front of it in production.
 
+System prompts are defined in `app/prompts.py` and are read-only in the dashboard, API, and Telegram admin bot. Edit the source and restart the service to change them. Migration `f9c6a1d4b3e8` drops the retired `system_prompts` table and its stored values. Personality levels remain adjustable.
+
 ### Telegram admin bot
 
 Only `ADMIN_ID` can use these command groups:
 
 | Area | Commands |
 |---|---|
-| Prompts | `/get_responder_system_prompt`, `/set_responder_system_prompt <text>`, `/get_summarizer_system_prompt`, `/set_summarizer_system_prompt <text>` |
+| Prompts (read-only) | `/get_responder_system_prompt`, `/get_summarizer_system_prompt` |
 | Chats | `/list_user_names`, `/list_chats`, `/get_history <chat_id>`, `/clear_history <chat_id>`, `/get_summary <chat_id>`, `/delete_summary <chat_id>` |
 | User memory | `/get_user_facts <user_id>`, `/add_user_facts <user_id> <fact>`, `/get_user_profile <user_id>`, `/delete_user_profile <user_id>` |
 | Personality | `/list_traits`, `/set_trait <id> <low\|medium\|high>`, `/reset_traits` |

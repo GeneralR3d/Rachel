@@ -575,10 +575,8 @@ async def summarizer_node(state: GraphState) -> Dict:
     # full, undivided history.
     history_msgs = _build_history_messages(state["history"])
 
-    system_prompt_str = await get_summarizer_system_prompt()
-
     system_msgs = ChatPromptTemplate.from_messages(
-        [("system", system_prompt_str)]
+        [("system", SUMMARIZER_SYSTEM_PROMPT)]
     ).format_messages(
         mood_list=MOOD_LABELS,
         old_summary=state.get("current_summary") or "")
@@ -822,8 +820,7 @@ def _parse_fallback(state: GraphState, raw: str, error: Exception) -> Dict:
 
 async def responder_node(state: GraphState) -> Dict:
     try:
-        system_prompt_str = await get_responder_system_prompt()
-        print(f"[responder] system prompt fetched (tokens={_count_tokens(system_prompt_str)})")
+        print(f"[responder] system prompt loaded (tokens={_count_tokens(RESPONDER_SYSTEM_PROMPT)})")
 
         personality_traits = await get_active_trait_prompts()
         print(f"[responder] personality traits fetched (tokens={_count_tokens(personality_traits)})")
