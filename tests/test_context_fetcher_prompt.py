@@ -1,5 +1,8 @@
 """The fetcher prompt follows the tools supplied to its model call."""
 
+from copy import deepcopy
+from datetime import datetime
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -9,7 +12,8 @@ from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
-from app.services import llm
+from app import prompts
+from app.services import llm, prompt_builders
 
 
 class PromptRequest:
@@ -36,6 +40,47 @@ def rendered_prompt(tools):
 
 
 class ContextFetcherPromptTests(unittest.TestCase):
+    def test_delegates_request_capabilities_and_runtime_context(self):
+        tools = [llm.search_world_view, llm.CALENDAR_TOOLS[-1]]
+        request = PromptRequest(tools)
+        request.runtime.context = {"participants": "Jamie {茶}", "datetime": "Sunday {noon}"}
+        template = "{participants}|{datetime}|{tools}|{tool_guidance}"
+        with (
+            patch.object(llm, "CONTEXT_FETCHER_SYSTEM_PROMPT", template),
+            patch.object(llm, "build_context_fetcher_prompt",
+                         wraps=prompt_builders.build_context_fetcher_prompt, create=True) as build,
+        ):
+            prompt = llm.context_fetcher_dynamic_prompt.wrap_model_call(
+                request, lambda updated: updated.system_message.content
+            )
+        self.assertTrue(prompt.startswith("Jamie {茶}|Sunday {noon}|- search_world_view(query):"))
+        self.assertIn("SCHEDULE\n", prompt)
+        self.assertIn("WORLD-VIEW FACTS\n", prompt)
+        self.assertNotIn("PER-USER FACTS\n", prompt)
+        self.assertNotIn("- search_user_info(", prompt)
+        build.assert_called_once_with(
+            system_prompt=template, tools=tools, available_categories={"worldview", "schedule"},
+            participants="Jamie {茶}", current_datetime="Sunday {noon}",
+        )
+
+    def test_guidance_registry_order_and_capability_selection(self):
+        guidance = prompts.CONTEXT_FETCHER_TOOL_GUIDANCE
+        self.assertEqual(list(guidance), ["schedule", "worldview", "user_info"])
+        for tools, categories in (
+            (list(reversed(llm.CONTEXT_TOOLS)), ["schedule", "worldview", "user_info"]),
+            ([llm.search_world_view, llm.CALENDAR_TOOLS[-1]], ["schedule", "worldview"]),
+            ([], []),
+        ):
+            with self.subTest(categories=categories):
+                prompt = rendered_prompt(tools)
+                for category, text in guidance.items():
+                    if category in categories:
+                        self.assertIn(text, prompt)
+                    else:
+                        self.assertNotIn(text, prompt)
+                positions = [prompt.index(guidance[category]) for category in categories]
+                self.assertEqual(positions, sorted(positions))
+
     def test_full_tool_set_preserves_guidance_and_tool_listing(self):
         prompt = rendered_prompt(llm.CONTEXT_TOOLS)
         self.assertLess(prompt.index("SCHEDULE\n"), prompt.index("WORLD-VIEW FACTS\n"))
@@ -101,6 +146,49 @@ class RecordingToolModel(BaseChatModel):
 
 
 class ContextFetcherNodeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_handoff_and_history_remain_separate_ordered_messages(self):
+        observations = [{
+            "pass_number": 1, "tool_name": "search_world_view", "arguments": {"query": "茶"},
+            "result_category": "worldview", "status": "error", "raw_result": "unavailable {value}",
+        }]
+        original = deepcopy(observations)
+        model = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content="")))
+        model.bind_tools = lambda tools: model
+        fixed_time = datetime(2026, 10, 18, 12, 0, tzinfo=llm.SGT)
+        with (
+            patch.object(llm, "_get_context_fetcher_llm", AsyncMock(return_value=model)),
+            patch.object(llm.settings, "agent_max_context_passes", 3),
+            patch.object(llm, "datetime") as clock,
+            patch.object(llm, "build_context_fetcher_handoff",
+                         wraps=prompt_builders.build_context_fetcher_handoff, create=True) as build,
+        ):
+            clock.now.return_value = fixed_time
+            await llm._run_context_fetcher({
+                "history": [
+                    {"sender": "Jamie", "content": "Earlier", "telegram_message_id": 1},
+                    {"sender": llm.BOT_NAME, "content": "hey", "telegram_message_id": 2},
+                    {"sender": "Jamie", "content": "Free {茶}?", "telegram_message_id": 3},
+                ],
+                "senders": {7: "Jamie"}, "context_passes": 1,
+                "retrieval_request": "Friday {value}", "responded_watermark": 2,
+            }, observations)
+        messages = model.ainvoke.call_args.args[0]
+        self.assertEqual([msg.type for msg in messages], ["system", "system", "human", "ai", "human", "human"])
+        self.assertIn("Jamie", messages[0].content)
+        self.assertIn("The current date is 18 October 2026, the current day of week is Sunday, the current time is 12:00", messages[0].content)
+        self.assertEqual(json.loads(messages[1].content.split("\n", 1)[1]), {
+            "context_pass": 2, "max_context_passes": 3, "retrieval_request": "Friday {value}",
+            "previous_observations": original,
+        })
+        self.assertEqual([msg.content for msg in messages[2:]], [
+            "Jamie: Earlier", f"{llm.BOT_NAME}: hey", llm.CONTEXT_NODE_DIVIDER, "Jamie: Free {茶}?",
+        ])
+        self.assertEqual(observations, original)
+        build.assert_called_once_with(
+            context_pass=2, max_context_passes=3, retrieval_request="Friday {value}",
+            observations=original,
+        )
+
     async def test_fetcher_injects_every_tool_and_executes_call_once_in_existing_path(self):
         model = RecordingToolModel()
         with patch.dict(llm._client_cache, {}, clear=True), \

@@ -1,6 +1,8 @@
 """Responder context assembly without database, network, or model calls."""
 
 import json
+from copy import deepcopy
+from datetime import datetime
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -8,8 +10,8 @@ from unittest.mock import AsyncMock, patch
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.prompts import RESPONDER_SYSTEM_PROMPT, USER_PROFILE_ATTRIBUTE_GUIDE
-from app.services import context as responder_context
-from app.services import llm
+from app.services import prompt_builders as responder_context
+from app.services import llm, prompt_builders
 
 
 def observation(category, result, status="success", pass_number=1):
@@ -20,6 +22,81 @@ def observation(category, result, status="success", pass_number=1):
 
 
 class ResponderPromptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delegates_resolved_values_and_preserves_system_history_order(self):
+        observations = [
+            observation("worldview", "Cafe 茶 {value}"),
+            observation("schedule", "unavailable {value}", status="error"),
+        ]
+        original = deepcopy(observations)
+        template = (
+            "{personality_traits}|{communication_style}|{conversation_mood}|"
+            "{current_summary}|{datetime}|{tool_results}"
+        )
+        model = SimpleNamespace(ainvoke=AsyncMock(return_value=llm.ResponseOutput(
+            decision="respond", content="hey", reason="Enough context.", retrieval_request="",
+        )))
+        fixed_time = datetime(2026, 10, 18, 12, 0, tzinfo=llm.SGT)
+        with (
+            patch.object(llm, "RESPONDER_SYSTEM_PROMPT", template),
+            patch.object(llm, "RESPONDER_LOOP_INSTRUCTIONS", "Loop instructions {茶}"),
+            patch.object(llm, "get_active_trait_prompts", AsyncMock(return_value="friendly {茶}")),
+            patch.object(llm, "CONVERSATION_STYLE", {"default": "casual", "reflective": "thoughtful {茶}"}),
+            patch.object(llm, "_get_responder_llm", AsyncMock(return_value=model)),
+            patch.object(llm.settings, "agent_max_context_passes", 3),
+            patch.object(llm, "datetime") as clock,
+            patch.object(llm, "build_responder_context",
+                         wraps=prompt_builders.build_responder_context) as normalize,
+            patch.object(llm, "build_responder_prompt",
+                         wraps=prompt_builders.build_responder_prompt, create=True) as build,
+            patch.object(llm, "build_responder_loop_message",
+                         wraps=prompt_builders.build_responder_loop_message, create=True) as loop,
+        ):
+            clock.now.return_value = fixed_time
+            await llm.responder_node({
+                "history": [
+                    {"sender": "Jamie", "content": "Earlier", "telegram_message_id": 1},
+                    {"sender": llm.BOT_NAME, "content": "hey", "telegram_message_id": 2},
+                    {"sender": "Jamie", "content": "What about {茶}?", "telegram_message_id": 3},
+                ],
+                "current_summary": "Earlier {conversation}.", "mood": "reflective",
+                "tool_observations": observations, "context_passes": 2, "remaining_steps": 9,
+                "responded_watermark": 2,
+            })
+        messages = model.ainvoke.call_args.args[0]
+        self.assertEqual([msg.type for msg in messages], ["system", "system", "human", "ai", "human", "human"])
+        self.assertTrue(messages[0].content.startswith(
+            "friendly {茶}|thoughtful {茶}|reflective|Earlier {conversation}.|"
+            "The current date is 18 October 2026, the current month is October, "
+            "the current day of week is Sunday, the current time is 12:00|"
+        ))
+        self.assertIn("Cafe 茶 {value}", messages[0].content)
+        self.assertNotIn("unavailable {value}", messages[0].content)
+        self.assertTrue(messages[1].content.startswith("Loop instructions {茶}\nLoop state: "))
+        self.assertEqual(json.loads(messages[1].content.split("Loop state: ", 1)[1]), {
+            "context_passes": 2, "max_context_passes": 3, "remaining_steps": 9,
+            "retrieval_status": json.dumps(original[1], ensure_ascii=False),
+        })
+        self.assertEqual([msg.content for msg in messages[2:]], [
+            "Jamie: Earlier", f"{llm.BOT_NAME}: hey", llm.RESPONDER_NODE_DIVIDER, "Jamie: What about {茶}?",
+        ])
+        normalize.assert_called_once_with(observations)
+        build.assert_called_once()
+        build.assert_called_once_with(
+            system_prompt=template, context=build.call_args.kwargs["context"],
+            personality_traits="friendly {茶}", communication_style="thoughtful {茶}",
+            conversation_mood="reflective", current_summary="Earlier {conversation}.",
+            current_datetime=(
+                "The current date is 18 October 2026, the current month is October, "
+                "the current day of week is Sunday, the current time is 12:00"
+            ),
+        )
+        loop.assert_called_once_with(
+            instructions="Loop instructions {茶}", context_passes=2, max_context_passes=3,
+            remaining_steps=9, context=build.call_args.kwargs["context"],
+        )
+        self.assertIs(build.call_args.kwargs["context"], loop.call_args.kwargs["context"])
+        self.assertEqual(observations, original)
+
     async def render(self, observations, template=RESPONDER_SYSTEM_PROMPT):
         model = SimpleNamespace(ainvoke=AsyncMock(return_value=llm.ResponseOutput(
             decision="respond", content="hey", reason="Enough context.", retrieval_request="",
