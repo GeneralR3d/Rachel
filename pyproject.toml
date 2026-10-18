@@ -19,7 +19,7 @@ dependencies = [
     # Replaced by langchain-openai (Merge Gateway speaks the OpenAI API).
     # "langchain-openrouter>=0.1",
     "langchain-openai>=0.3",
-    "langgraph>=0.2",
+    "langgraph>=1.2,<2",
     "tiktoken>=0.13.0",
     "graphiti-core>=0.3",
     "prometheus-client>=0.20",

@@ -1,6 +1,6 @@
 """Prometheus metrics for the LLM pipeline.
 
-Exposes two counters, scraped from the FastAPI ``/metrics`` endpoint mounted in
+Exposes counters and a histogram, scraped from the FastAPI ``/metrics`` endpoint mounted in
 ``app.main``:
 
 - ``rachel_llm_calls_total{node}`` — every LLM attempt, per graph node. The
@@ -10,6 +10,9 @@ Exposes two counters, scraped from the FastAPI ``/metrics`` endpoint mounted in
   stays small: e.g. ``upstream_504``, ``rate_limit_429``, ``upstream_5xx``,
   ``response_validation`` (the pydantic ``.../v/missing`` shape), ``timeout``,
   ``output_parse``, ``other``.
+- ``rachel_agent_loop_outcomes_total{outcome}`` — completed reply loops, using
+  only ``first_pass``, ``retried``, and ``capped``.
+- ``rachel_agent_context_passes`` — retrieval-pass histogram with buckets 1–10.
 
 These are incremented at exactly the ``except`` sites in ``llm.py`` that today
 already ``print`` the failure and fail open, so the counters are the ground
@@ -18,7 +21,19 @@ truth even for requests OpenRouter never bills/records on its side.
 
 import re
 
-from prometheus_client import Counter
+from prometheus_client import Counter, Histogram
+
+AGENT_LOOP_OUTCOMES = Counter(
+    "rachel_agent_loop_outcomes_total",
+    "Completed reply loops by termination outcome",
+    ["outcome"],
+)
+
+AGENT_CONTEXT_PASSES = Histogram(
+    "rachel_agent_context_passes",
+    "Total context retrieval passes per completed reply loop",
+    buckets=tuple(range(1, 11)),
+)
 
 LLM_CALLS = Counter(
     "rachel_llm_calls_total",

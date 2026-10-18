@@ -128,9 +128,9 @@ def reset_extractor_clients() -> None:
 # --- Retrieval ---------------------------------------------------------------
 
 
-async def search_worldview(query: str | None = None) -> str:
+async def search_worldview(query: str | None = None, *, raise_on_error: bool = False) -> str:
     """Search the world-view partition; see ``graphiti.search_graph`` for semantics."""
-    return await search_graph(query, _WORLDVIEW_GROUP_ID, "[worldview]")
+    return await search_graph(query, _WORLDVIEW_GROUP_ID, "[worldview]", raise_on_error=raise_on_error)
 
 
 @tool

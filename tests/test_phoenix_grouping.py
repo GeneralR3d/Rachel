@@ -92,11 +92,18 @@ class PhoenixGroupingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({span.context.trace_id for span in spans}, {roots[0].context.trace_id})
 
     async def test_reply_graph_has_a_stable_name(self):
-        fake_graph = AsyncMock()
-        fake_graph.ainvoke.return_value = {"mood": "default", "current_summary": "", "response_text": "hi", "response_reason": "ok"}
-        with patch.object(llm, "_graph", fake_graph):
-            await llm.get_response([], current_summary="")
-        self.assertEqual(fake_graph.ainvoke.call_args.kwargs["config"]["run_name"], "RachelReplyGraph")
+        configs = []
+
+        class FakeGraph:
+            async def astream(self, initial_state, config, stream_mode):
+                configs.append(config)
+                yield {**initial_state, "response_text": "hi", "response_reason": "ok"}
+
+        with patch.object(llm, "_graph", FakeGraph()):
+            result = await llm.get_response([], current_summary="")
+        self.assertEqual(configs[0]["run_name"], "RachelReplyGraph")
+        self.assertGreater(configs[0]["recursion_limit"], 2 * llm.settings.agent_max_context_passes + 3)
+        self.assertEqual(result[:3], ("hi", "ok", None))
 
     async def test_workflow_starts_a_new_trace_even_with_an_active_parent(self):
         with self.tracer.start_as_current_span("unrelated_event"):

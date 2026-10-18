@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     )
     # Decision model used only by the reply-gating router.
     decisions_llm: str = "typesafe/jev-1.13"
+    # Total retrieval passes within a single reply, including the initial fetch.
+    agent_max_context_passes: int = Field(default=2, ge=1, le=10)
     # Smaller/cheaper model Graphiti uses for its internal helper + reranker calls.
     llm_small_model: str = Field(
         "deepseek/deepseek-v4-flash",
