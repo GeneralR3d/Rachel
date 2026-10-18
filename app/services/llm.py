@@ -621,7 +621,12 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
         )
 
     ai: AIMessage = await context_fetcher_dynamic_prompt.awrap_model_call(request, call_model)
-    for tc in getattr(ai, "tool_calls", None) or []:
+    tool_calls = getattr(ai, "tool_calls", None) or []
+    print(f"[context_fetcher] LLM requested {len(tool_calls)} tool call(s):")
+    for tc in tool_calls:
+        print(f"[context_fetcher]   -> {tc['name']}({tc['args']})")
+
+    for tc in tool_calls:
         name = tc["name"]
         arguments = tc["args"]
         observation: ToolObservation = {

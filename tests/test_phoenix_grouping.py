@@ -1,11 +1,12 @@
 import asyncio
 import json
 import unittest
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
+from openai import AsyncOpenAI
 from langgraph.graph import END, START, StateGraph
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -14,6 +15,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace.status import StatusCode
 from openinference.instrumentation import get_attributes_from_context
 from openinference.instrumentation.langchain import LangChainInstrumentor
+from openinference.instrumentation.openai import OpenAIInstrumentor
 
 from app.services import llm, memory
 from app.services.tracing import traced_workflow
@@ -32,6 +34,115 @@ class PhoenixGroupingTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.tracer_patch.stop()
         self.provider.shutdown()
+
+    @contextmanager
+    def proactive_delivery(self):
+        @asynccontextmanager
+        async def typing(*args):
+            yield
+
+        with ExitStack() as stack:
+            for name in (
+                "current_messages_buffer", "burst_sessions", "wait_tasks", "reply_locks",
+                "buffer_locks", "last_message_time", "silent_until", "muted_chats",
+            ):
+                stack.enter_context(patch.dict(getattr(telegram_client, name), {}, clear=True))
+            stack.enter_context(patch.dict(llm._chat_mood, {}, clear=True))
+            stack.enter_context(patch.object(telegram_client.client, "is_connected", return_value=True))
+            stack.enter_context(patch.object(telegram_client.client, "get_me", AsyncMock(return_value=SimpleNamespace(id=99))))
+            stack.enter_context(patch.object(telegram_client.client, "action", side_effect=typing))
+            stack.enter_context(patch.object(telegram_client, "get_history", AsyncMock(return_value=[])))
+            stack.enter_context(patch.object(telegram_client, "_load_summary_and_mood", AsyncMock(return_value="")))
+            stack.enter_context(patch.object(telegram_client, "_send_paragraphs", AsyncMock(return_value=10)))
+            stack.enter_context(patch.object(telegram_client, "_reset_flush_timer"))
+            stack.enter_context(patch("builtins.print"))
+            yield
+
+    async def test_proactive_graph_and_openai_calls_share_one_trace_across_passes(self):
+        for instrumentor in (LangChainInstrumentor(), OpenAIInstrumentor()):
+            instrumentor.instrument(tracer_provider=self.provider)
+            self.addCleanup(instrumentor.uninstrument)
+
+        for passes in (1, 2):
+            with self.subTest(passes=passes):
+                self.exporter.clear()
+                responder_calls = 0
+
+                def handle_request(request):
+                    nonlocal responder_calls
+                    if json.loads(request.content).get("tools"):
+                        content = ""
+                    else:
+                        responder_calls += 1
+                        content = json.dumps({
+                            "decision": "fetch_more" if responder_calls < passes else "respond",
+                            "retrieval_request": "Exam background" if responder_calls < passes else "",
+                            "content": "How was the exam?", "reason": "Checking in",
+                        })
+                    return httpx.Response(200, json={
+                        "id": "chatcmpl-test", "object": "chat.completion", "created": 0,
+                        "model": "test-model", "choices": [{"index": 0, "message": {
+                            "role": "assistant", "content": content,
+                        }, "finish_reason": "stop"}],
+                    })
+
+                api = AsyncOpenAI(api_key="test", base_url="https://gateway.example/v1",
+                    http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle_request)))
+                model = llm._base_chat("test-model", 0)
+                model.async_client = api.chat.completions
+                model.root_async_client = api
+                responder = model.with_structured_output(
+                    llm.ResponseOutput.model_json_schema(), method="json_schema", strict=True, include_raw=True
+                )
+                try:
+                    with self.proactive_delivery(), patch.object(
+                        llm, "_get_context_fetcher_llm", AsyncMock(return_value=model)
+                    ), patch.object(llm, "_get_responder_llm", AsyncMock(return_value=responder)), patch.object(
+                        llm, "get_active_trait_prompts", AsyncMock(return_value="Friendly")
+                    ), patch.object(llm.settings, "agent_max_context_passes", 3):
+                        if passes == 2:
+                            telegram_client.burst_sessions[42] = "existing-burst"
+                        await telegram_client.send_proactive_message(42, "Ask about the exam", 1)
+                        session_id = telegram_client.burst_sessions[42]
+                        if passes == 2:
+                            self.assertEqual(session_id, "existing-burst")
+                        self.assertEqual(telegram_client.current_messages_buffer[42][0].content, "How was the exam?")
+                finally:
+                    await api.close()
+
+                spans = self.exporter.get_finished_spans()
+                roots = [span for span in spans if span.parent is None]
+                self.assertEqual([span.name for span in roots], ["telegram_proactive"])
+                root = roots[0]
+                self.assertEqual(root.attributes["session.id"], session_id)
+                self.assertEqual(json.loads(root.attributes["metadata"]), {"telegram_chat_id": 42})
+                self.assertEqual({span.context.trace_id for span in spans}, {root.context.trace_id})
+                graph = next(span for span in spans if span.name == "RachelProactiveGraph")
+                self.assertEqual(graph.parent.span_id, root.context.span_id)
+                completions = [span for span in spans if span.name == "ChatCompletion"]
+                self.assertEqual(len(completions), 2 * passes)
+                for span in [graph, *completions]:
+                    self.assertEqual(span.parent.span_id, root.context.span_id)
+                    self.assertEqual(span.attributes["session.id"], session_id)
+                    self.assertEqual(json.loads(span.attributes["metadata"])["telegram_chat_id"], 42)
+
+    async def test_proactive_failure_restores_tracing_context_and_releases_lock(self):
+        with self.proactive_delivery(), patch.object(
+            telegram_client, "get_proactive_response", AsyncMock(side_effect=RuntimeError("generation failed"))
+        ), self.tracer.start_as_current_span("unrelated_event") as parent:
+            attributes = dict(get_attributes_from_context())
+            with self.assertRaisesRegex(RuntimeError, "generation failed"):
+                await telegram_client.send_proactive_message(42, "Check in", 1)
+            self.assertEqual(trace.get_current_span().get_span_context(), parent.get_span_context())
+            self.assertEqual(dict(get_attributes_from_context()), attributes)
+            self.assertFalse(telegram_client.reply_locks[42].locked())
+
+        spans = {span.name: span for span in self.exporter.get_finished_spans()}
+        self.assertIn("telegram_proactive", spans)
+        root = spans["telegram_proactive"]
+        self.assertIsNone(root.parent)
+        self.assertNotEqual(root.context.trace_id, spans["unrelated_event"].context.trace_id)
+        self.assertEqual(root.status.status_code, StatusCode.ERROR)
 
     async def test_retry_and_parallel_children_share_one_response_trace(self):
         calls = 0

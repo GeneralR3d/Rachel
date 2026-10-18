@@ -650,14 +650,15 @@ async def send_proactive_message(chat_id: int, intent: str, schedule_id: int) ->
         me = await client.get_me()
         current_summary = await _load_summary_and_mood(chat_id)
         _context_msgs, context, senders = await _snapshot_context(chat_id, me.id)
-        async with client.action(chat_id, "typing"):
-            response, response_reason, _load_time = await get_proactive_response(
-                history=context,
-                intent=intent,
-                current_summary=current_summary,
-                chat_id=chat_id,
-                senders=senders,
-            )
+        with traced_workflow("telegram_proactive", burst_sessions.get(chat_id), chat_id):
+            async with client.action(chat_id, "typing"):
+                response, response_reason, _load_time = await get_proactive_response(
+                    history=context,
+                    intent=intent,
+                    current_summary=current_summary,
+                    chat_id=chat_id,
+                    senders=senders,
+                )
         if not response.strip():
             raise RuntimeError("Proactive responder returned empty content")
         message_id = await _send_paragraphs(chat_id, response)
