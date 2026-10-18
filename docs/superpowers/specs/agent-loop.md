@@ -13,7 +13,7 @@
                                             ↑       │
                                             └───────┘
 
-  The responder evaluates context sufficiency, but only the context fetcher may select and execute tools. The loop accumulates observations and stops gracefully when it succeeds, stalls, or reaches its
+  The responder evaluates context sufficiency, but only the context fetcher may select and execute tools. The loop accumulates observations and stops gracefully when it succeeds or reaches its
   configured budget.
 
   This follows LangGraph’s documented evaluator–optimizer workflow (https://docs.langchain.com/oss/python/langgraph/workflows-agents), raw-state guidance, and proactive recursion-limit handling
@@ -35,35 +35,32 @@
       - context_passes
       - retrieval_request
       - tool_observations
-      - retrieval_stalled
       - remaining_steps: RemainingSteps
       - responder decision/status fields
 
   - Update the context fetcher so every subsequent pass receives:
       - The responder’s retrieval request.
       - Previously collected observations.
-      - Previously attempted tool name/argument combinations.
       - The original conversation and participant list.
 
   - Preserve all successful results across passes. Record tool errors and timeouts as observations so the responder can adapt instead of seeing silently empty context.
-  - Reject duplicate tool calls with identical normalized arguments. If a pass produces no novel call or usable result, mark the loop stalled and finish with the responder’s best-effort clarification rather than
-    burning the remaining budget.
+  - Allow the agent to repeat tool calls and retry empty, failed, or timed-out lookups. Every pass counts toward the configured budget regardless of its results; the application does not attempt to detect retrieval progress.
 
   - Teach the responder about available capability categories without letting it choose tool calls directly. It must request another pass only when an existing tool could plausibly supply the missing
     information; unsupported questions should immediately receive an honest answer or clarification request.
 
   - Add a conditional edge after responder_node:
       - respond → END
-      - fetch_more with budget and progress remaining → context_fetcher_node
-      - fetch_more at the cap, near the LangGraph recursion limit, or after stalled retrieval → END using the already-generated fallback content
+      - fetch_more with budget remaining → context_fetcher_node
+      - fetch_more at the cap, near the LangGraph recursion limit → END using the already-generated fallback content
 
   - Keep the summarizer outside the loop: it runs once and is not repeated during retrieval refinement.
-  - Add AGENT_MAX_CONTEXT_PASSES to Settings, validated from 1–5 and defaulting to 2. Count the initial context fetch as pass 1.
+  - Add AGENT_MAX_CONTEXT_PASSES to Settings, validated from 1–10 and defaulting to 2. Count the initial context fetch as pass 1.
   - Invoke the graph with an explicit recursion_limit safely above the configured pass budget. Use RemainingSteps for graceful internal termination; retain GraphRecursionError handling only as an emergency
     fallback. LangGraph explicitly recommends this proactive approach.
 
   - Keep the public get_response() tuple unchanged. No database migration, checkpointer, or Telegram-client contract change is required.
-  - Add low-cardinality observability for loop outcome (first_pass, retried, capped, stalled) and context-pass count, alongside the existing per-node LLM metrics.
+  - Add low-cardinality observability for loop outcome (first_pass, retried, capped) and context-pass count, alongside the existing per-node LLM metrics.
 
   ## LangGraph Version and Resources
 
@@ -87,7 +84,7 @@
   - Responder answers after the initial context pass.
   - Responder requests one refinement, receives accumulated results, then answers.
   - Maximum passes are enforced exactly and produce the best-effort clarification reply.
-  - Duplicate or empty retrieval attempts terminate as stalled.
+  - Repeated calls execute within and across passes, including previously failed calls. Empty or failed retrieval passes may continue until the responder answers or the configured pass cap is reached.
   - Tool errors and timeouts remain visible to the responder without crashing the run.
   - Unsupported information requests do not loop.
   - Previously collected schedule, worldview, facts, and profiles survive later passes.
