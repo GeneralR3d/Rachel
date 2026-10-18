@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections.abc import Awaitable
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -67,15 +68,17 @@ async def start_proactive_scheduler() -> None:
 
 
 async def stop_proactive_scheduler() -> None:
-    """Stop new occurrences, await active executions, then tear down the scheduler."""
+    """Stop occurrences, drain executions/mutations, then tear down the scheduler."""
     global _scheduler, _accepting_runs
     _accepting_runs = False
     scheduler = _scheduler
+    if scheduler is not None:
+        scheduler.pause()
+    # An active outreach may itself start a schedule mutation while we drain it.
+    while _active_tasks:
+        await asyncio.gather(*list(_active_tasks), return_exceptions=True)
     if scheduler is None:
         return
-    scheduler.pause()
-    if _active_tasks:
-        await asyncio.gather(*list(_active_tasks), return_exceptions=True)
     scheduler.shutdown(wait=False)
     _scheduler = None
     logger.info("Proactive scheduler stopped")
@@ -92,6 +95,36 @@ def remove_schedule_job(schedule_id: int) -> None:
     job = _scheduler.get_job(_job_id(schedule_id))
     if job is not None:
         _scheduler.remove_job(job.id)
+
+
+def _mutation_finished(task: asyncio.Task) -> None:
+    _active_tasks.discard(task)
+    if not task.cancelled() and (error := task.exception()) is not None:
+        # Consume exceptions even if the context-pass deadline detached the caller.
+        logger.error("Proactive schedule change failed", exc_info=(type(error), error, error.__traceback__))
+
+
+async def apply_schedule_mutation(
+    operation: Awaitable[dict | bool | None], *, delete_schedule_id: int | None = None,
+) -> dict | bool | None:
+    """Finish persistence plus job synchronization even if the tool caller times out.
+
+    The caller may stop awaiting at its deadline; a strongly referenced task keeps
+    the durable row and live scheduler consistent and is drained during shutdown.
+    """
+    async def finish():
+        result = await operation
+        if delete_schedule_id is not None:
+            if result:
+                remove_schedule_job(delete_schedule_id)
+        elif result is not None:
+            sync_schedule_job(result)
+        return result
+
+    task = asyncio.create_task(finish())
+    _active_tasks.add(task)
+    task.add_done_callback(_mutation_finished)
+    return await asyncio.shield(task)
 
 
 async def _remove_ineligible_schedule_job(schedule_id: int) -> None:

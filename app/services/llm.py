@@ -27,6 +27,7 @@ from app.services.context import ToolObservation
 from app.services.prompt_builders import (
     build_context_fetcher_handoff,
     build_context_fetcher_prompt,
+    build_proactive_trigger,
     build_responder_context,
     build_responder_loop_message,
     build_responder_prompt,
@@ -62,6 +63,7 @@ from app.prompts import (
     ROUTER_PRIVATE_QUESTION,
 )
 from app.calander import CALENDAR_TOOLS
+from app.services.proactive_tools import PROACTIVE_TOOLS
 from app.services.userfacts import search_user_info, search_user_info_tool
 from app.services.worldview import search_world_view, search_worldview
 from app.repository import (
@@ -257,10 +259,10 @@ class SummarizerOutput(BaseModel):
 
 class ResponseOutput(BaseModel):
     decision: Literal["respond", "fetch_more"] = Field(
-        ..., description="Respond now, or request one more supported context retrieval pass."
+        ..., description="Respond now, or request one more supported context/schedule-action pass."
     )
     retrieval_request: str = Field(
-        ..., description="Precise missing information for the context fetcher; empty for respond. Do not select tools."
+        ..., description="Missing information or desired proactive schedule action for the context fetcher; empty for respond. Do not select tools."
     )
     model_config = ConfigDict(extra="forbid")
     reason: str = Field(
@@ -275,6 +277,7 @@ class ResponseOutput(BaseModel):
 
 class GraphState(TypedDict):
     history: List[Dict[str, Any]]
+    chat_id: int | None
     intent: str
     current_summary: str | None
     mood: str
@@ -354,7 +357,7 @@ async def _get_responder_llm():
 # some models — each pass has a hard timeout below and records failures as
 # observations, so a hang/error can never stall the pipeline.) CONTEXT_TOOLS is the
 # single source of truth for both the agent's tools and its dynamic prompt.
-CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool]
+CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool, *PROACTIVE_TOOLS]
 
 
 class ContextFetcherPromptContext(TypedDict):
@@ -571,6 +574,8 @@ def _resolve_name_to_id(
 
 
 def _context_category(name: str) -> str:
+    if name in {tool.name for tool in PROACTIVE_TOOLS}:
+        return "proactive_schedules"
     if name == search_world_view.name:
         return "worldview"
     if name == search_user_info_tool.name:
@@ -589,6 +594,9 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
         divider_text=None if proactive else CONTEXT_NODE_DIVIDER,
         watermark=None if proactive else state.get("responded_watermark"),
     )
+    if proactive:
+        # End the old transcript with the fired job, not the earlier setup request.
+        history_msgs.append(SystemMessage(content=build_proactive_trigger(state["intent"])))
     now = datetime.now(SGT)
     formatted_datetime = (
         f"The current date is {now.strftime('%d %B %Y')}, "
@@ -652,7 +660,12 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
                 tool = _context_tools_by_name.get(name)
                 if tool is None:
                     raise ValueError(f"Unknown tool '{name}'")
-                result = await tool.ainvoke(arguments)
+                if _context_category(name) == "proactive_schedules":
+                    result = await tool.ainvoke(arguments, config={
+                        "configurable": {"current_chat_id": state.get("chat_id")},
+                    })
+                else:
+                    result = await tool.ainvoke(arguments)
                 usable = result is not None and bool(str(result).strip())
             observation.update(status="success" if usable else "empty", raw_result=result)
         except asyncio.TimeoutError as e:
@@ -781,6 +794,8 @@ async def responder_node(state: GraphState) -> Dict:
             divider_text=None if proactive else RESPONDER_NODE_DIVIDER,
             watermark=None if proactive else state.get("responded_watermark"),
         )
+        if proactive:
+            history_msgs.append(SystemMessage(content=build_proactive_trigger(state["intent"])))
         history_tokens = sum(_count_tokens(f"{m.type}: {m.content}") for m in history_msgs)
         print(f"[responder] history fetched (count={len(history_msgs)}, tokens={history_tokens})")
         pprint(history_msgs)
@@ -937,6 +952,7 @@ async def get_response(
 
     initial_state: GraphState = {
         "history": history,
+        "chat_id": chat_id,
         "intent": "",
         "current_summary": current_summary,
         "mood": current_mood,
@@ -977,6 +993,7 @@ async def get_proactive_response(
     current_mood = _chat_mood.get(chat_id, DEFAULT_MOOD) if chat_id is not None else DEFAULT_MOOD
     initial_state: GraphState = {
         "history": history,
+        "chat_id": chat_id,
         "intent": intent,
         "current_summary": current_summary,
         "mood": current_mood,

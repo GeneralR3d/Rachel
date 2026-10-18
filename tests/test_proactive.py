@@ -58,7 +58,8 @@ class ProactiveServiceTests(unittest.IsolatedAsyncioTestCase):
         proactive._schedule_locks.clear()
 
     async def asyncTearDown(self):
-        self.scheduler.shutdown(wait=False)
+        if self.scheduler.running:
+            self.scheduler.shutdown(wait=False)
         self.scheduler_patch.stop()
         self.accepting_patch.stop()
 
@@ -71,6 +72,32 @@ class ProactiveServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(proactive.next_run_at(1))
         proactive.sync_schedule_job(schedule_row(enabled=False))
         self.assertIsNone(proactive.next_run_at(1))
+
+    async def test_shutdown_drains_a_mutation_after_its_caller_is_cancelled(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def persist():
+            entered.set()
+            await release.wait()
+            return schedule_row(repeat_completed=0)
+
+        run = asyncio.create_task(proactive.apply_schedule_mutation(persist()))
+        stop = None
+        try:
+            await entered.wait()
+            run.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await run
+            stop = asyncio.create_task(proactive.stop_proactive_scheduler())
+            await asyncio.sleep(0)
+            self.assertFalse(stop.done())
+            release.set()
+            await asyncio.wait_for(stop, timeout=1)
+            self.assertFalse(proactive._active_tasks)
+            self.assertIsNone(proactive._scheduler)
+        finally:
+            release.set()
+            await asyncio.gather(*(t for t in (run, stop) if t is not None), return_exceptions=True)
 
     async def test_final_attempt_is_consumed_and_unscheduled_before_send(self):
         row = schedule_row()
@@ -335,7 +362,9 @@ class ProactivePostgresTests(unittest.IsolatedAsyncioTestCase):
                 sent.assert_awaited_once_with(42, "Hey Jamie, how did your exam go?")
                 self.assertEqual(len(fetcher.messages), 2)
                 self.assertIn("Ask how the exam went", responder.messages[-1][0].content)
-                self.assertIn("Jamie: My exam is tomorrow", responder.messages[-1][-1].content)
+                self.assertIn("Jamie: My exam is tomorrow", [m.content for m in responder.messages[-1]])
+                self.assertEqual(responder.messages[-1][-1].type, "system")
+                self.assertIn("Ask how the exam went", responder.messages[-1][-1].content)
                 self.assertNotIn(42, telegram.responded_watermark)
                 await telegram._flush_chat(42)
                 history = await repository.get_history(42, 40)

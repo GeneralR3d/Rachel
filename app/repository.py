@@ -198,8 +198,12 @@ def _proactive_schedule_dict(row: ProactiveSchedule) -> dict:
     }
 
 
-async def get_proactive_schedules(*, enabled_only: bool = False) -> list[dict]:
+async def get_proactive_schedules(
+    *, enabled_only: bool = False, chat_id: int | None = None
+) -> list[dict]:
     stmt = select(ProactiveSchedule).order_by(ProactiveSchedule.id)
+    if chat_id is not None:
+        stmt = stmt.where(ProactiveSchedule.chat_id == chat_id)
     if enabled_only:
         stmt = stmt.where(ProactiveSchedule.enabled.is_(True))
     async with session_scope() as session:
@@ -207,9 +211,12 @@ async def get_proactive_schedules(*, enabled_only: bool = False) -> list[dict]:
     return [_proactive_schedule_dict(row) for row in rows]
 
 
-async def get_proactive_schedule(schedule_id: int) -> dict | None:
+async def get_proactive_schedule(schedule_id: int, *, chat_id: int | None = None) -> dict | None:
+    stmt = select(ProactiveSchedule).where(ProactiveSchedule.id == schedule_id)
+    if chat_id is not None:
+        stmt = stmt.where(ProactiveSchedule.chat_id == chat_id)
     async with session_scope() as session:
-        row = await session.get(ProactiveSchedule, schedule_id)
+        row = (await session.execute(stmt)).scalar_one_or_none()
         return _proactive_schedule_dict(row) if row is not None else None
 
 
@@ -222,24 +229,26 @@ async def create_proactive_schedule(data: dict) -> dict:
         return _proactive_schedule_dict(row)
 
 
-async def update_proactive_schedule(schedule_id: int, data: dict) -> dict | None:
+async def update_proactive_schedule(
+    schedule_id: int, data: dict, *, chat_id: int | None = None
+) -> dict | None:
+    if chat_id is not None and data.get("chat_id", chat_id) != chat_id:
+        raise ValueError("A scoped proactive schedule cannot be moved to another chat")
+    stmt = update(ProactiveSchedule).where(ProactiveSchedule.id == schedule_id)
+    if chat_id is not None:
+        stmt = stmt.where(ProactiveSchedule.chat_id == chat_id)
+    stmt = stmt.values({**data, "updated_at": func.now()}).returning(ProactiveSchedule)
     async with session_scope() as session:
-        row = await session.get(ProactiveSchedule, schedule_id)
-        if row is None:
-            return None
-        for key, value in data.items():
-            setattr(row, key, value)
-        row.updated_at = func.now()
-        await session.flush()
-        await session.refresh(row)
-        return _proactive_schedule_dict(row)
+        row = (await session.execute(stmt)).scalar_one_or_none()
+        return _proactive_schedule_dict(row) if row is not None else None
 
 
-async def delete_proactive_schedule(schedule_id: int) -> bool:
+async def delete_proactive_schedule(schedule_id: int, *, chat_id: int | None = None) -> bool:
+    stmt = delete(ProactiveSchedule).where(ProactiveSchedule.id == schedule_id)
+    if chat_id is not None:
+        stmt = stmt.where(ProactiveSchedule.chat_id == chat_id)
     async with session_scope() as session:
-        result = await session.execute(
-            delete(ProactiveSchedule).where(ProactiveSchedule.id == schedule_id)
-        )
+        result = await session.execute(stmt)
     return result.rowcount > 0
 
 

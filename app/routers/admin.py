@@ -10,11 +10,9 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 import json
 from typing import Any, Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
-from apscheduler.triggers.cron import CronTrigger
+from pydantic import BaseModel
 from telethon import utils
 
 from app import repository
@@ -23,6 +21,10 @@ from app.prompts import USER_PROFILE_FIELDS
 from app.services import userfacts
 from app.services import worldview
 from app.services import proactive
+from app.services.proactive_schemas import (
+    ProactiveScheduleIn, ProactiveScheduleOut, schedule_out as _schedule_out,
+    validated_schedule_data,
+)
 from app.telegram.client import client
 from scripts.draw_graphs import GRAPHS, render_graphs
 
@@ -35,6 +37,7 @@ router = APIRouter()
 # summarizer prompts have their own read-only endpoints below.
 WORKFLOW_PROMPTS: list[tuple[str, str, str]] = [
     ("router", "Router / reply-gating", json.dumps(prompts.ROUTER_GROUP_QUESTION, indent=2)),
+    ("proactive_schedule_tools", "Proactive reach-out tools", prompts.PROACTIVE_SCHEDULE_TOOL_PROMPT),
     ("worldview_fact_extractor", "World-view: fact extractor", prompts.FACT_EXTRACTOR_SYSTEM_PROMPT),
     ("worldview_consolidation", "World-view: consolidation", prompts.CONSOLIDATION_SYSTEM_PROMPT),
     ("userfacts_fact_extractor", "User facts: fact extractor", prompts.USER_FACT_EXTRACTOR_SYSTEM_PROMPT),
@@ -154,73 +157,15 @@ async def get_all_chat_ids() -> list[AllChats]:
 # --- proactive outreach --------------------------------------------------
 
 
-class ProactiveScheduleIn(BaseModel):
-    name: str
-    chat_id: int
-    cron_expression: str
-    timezone: str = "Asia/Singapore"
-    intent: str
-    enabled: bool = True
-    repeat_times: int | None = Field(default=None, strict=True, gt=0, le=9223372036854775807)
-
-
 class ProactiveEnabledIn(BaseModel):
     enabled: bool
 
 
-class ProactiveScheduleOut(ProactiveScheduleIn):
-    id: int
-    repeat_completed: int
-    last_run_at: datetime | None = None
-    last_status: str | None = None
-    last_error: str | None = None
-    created_at: datetime
-    updated_at: datetime
-    next_run_at: datetime | None = None
-
-
-def _schedule_out(row: dict) -> ProactiveScheduleOut:
-    return ProactiveScheduleOut(
-        **row, next_run_at=(
-            None if proactive.is_schedule_exhausted(row) else proactive.next_run_at(row["id"])
-        )
-    )
-
-
 async def _validated_schedule_data(body: ProactiveScheduleIn) -> dict:
-    name = body.name.strip()
-    intent = body.intent.strip()
-    cron_expression = " ".join(body.cron_expression.split())
-    timezone_name = body.timezone.strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="name must not be empty")
-    if not intent:
-        raise HTTPException(status_code=422, detail="intent must not be empty")
     try:
-        zone = ZoneInfo(timezone_name)
-    except (ZoneInfoNotFoundError, ValueError):
-        raise HTTPException(status_code=422, detail=f"Invalid IANA timezone: {timezone_name!r}")
-    try:
-        CronTrigger.from_crontab(cron_expression, timezone=zone)
+        return await validated_schedule_data(body, client.get_entity)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid five-field cron expression: {exc}")
-    try:
-        await client.get_entity(body.chat_id)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Rachel cannot access Telegram chat {body.chat_id}: {exc}",
-        )
-    return {
-        "name": name,
-        "chat_id": body.chat_id,
-        "cron_expression": cron_expression,
-        "timezone": timezone_name,
-        "intent": intent,
-        "enabled": body.enabled,
-        # Omitted on PUT preserves the existing limit; explicit null clears it.
-        **({"repeat_times": body.repeat_times} if "repeat_times" in body.model_fields_set else {}),
-    }
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/proactive-schedules", response_model=list[ProactiveScheduleOut])

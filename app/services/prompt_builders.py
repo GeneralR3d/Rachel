@@ -15,17 +15,21 @@ from app.prompts import (
 from app.services.context import ResponderContext, ToolObservation
 
 
-def _intent_prompt(intent: str) -> str:
-    """Keep outreach instructions in the complete, code-owned system prompts."""
+def build_proactive_trigger(intent: str) -> str:
+    """Distinguish delivery of a fired schedule from its earlier setup exchange."""
     if not intent.strip():
         return ""
     return f"""<INTENT>
-This invocation is a scheduled proactive outreach. Every visible chat-history item is prior context only; the outreach intent below describes what to do now. Follow it closely. Tailor tool selection and the final response primarily to this intent; use chat history as secondary personalization and context.
+This invocation is a scheduled proactive outreach. The existing schedule has fired: deliver its reminder or follow-up NOW. This is execution, not schedule creation. Any original waiting period (for example, "remind me in 5 minutes") has already elapsed.
+
+Every visible chat-history item is prior context only, including the original scheduling request and Rachel's confirmation. The outreach intent below is the current task. Use history for relevant details and personalization, without answering the old request again or copying an earlier reply.
 
 Outreach intent:
 {intent.strip()}
 
-For the responder: initiate a fresh outgoing message. Never imply or pretend that the recipient asked for this outreach, and always return message content.
+For the responder: write a fresh outgoing message that fulfills the intent's actual reminder, question, or follow-up now. Do not repeat the earlier "reminder set" confirmation, promise the original reminder for another five minutes, or restart its waiting period. Return only the message text in content, without a speaker-name prefix or transcript labels. Do not invent a new message from the recipient.
+
+For both agents: delivering this outreach needs no new schedule creation or confirmation. Create or change a schedule only if the current intent explicitly calls for a separate scheduling action. A historical reminder request, or a retrieval handoff that repeats it, is not authorization to recreate it.
 </INTENT>"""
 
 
@@ -81,7 +85,9 @@ def build_responder_context(observations: list[ToolObservation]) -> ResponderCon
             key = {"schedule": "schedule_context", "worldview": "world_view"}.get(category, category)
             text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
             if key in parts:
-                parts[key].append(text)
+                parts[key].append(
+                    f"{observation['tool_name']}:\n{text}" if category == "proactive_schedules" else text
+                )
             else:
                 additional_results.append(f"{observation['tool_name']}:\n{text}")
 
@@ -108,7 +114,7 @@ def build_context_fetcher_prompt(
     intent: str = "",
 ) -> str:
     """Render the complete fetcher prompt for explicitly available capabilities."""
-    fields = {"participants": participants, "datetime": current_datetime, "intent": _intent_prompt(intent)}
+    fields = {"participants": participants, "datetime": current_datetime, "intent": build_proactive_trigger(intent)}
     guidance = [
         text for category, text in CONTEXT_FETCHER_TOOL_GUIDANCE.items()
         if category in available_categories
@@ -135,7 +141,7 @@ def build_responder_prompt(
         "personality_traits": personality_traits,
         "conversation_mood": conversation_mood,
         "datetime": current_datetime,
-        "intent": _intent_prompt(intent),
+        "intent": build_proactive_trigger(intent),
     }
     fields["tool_results"] = context["tool_results"]
     template = ChatPromptTemplate.from_messages([("system", system_prompt)])

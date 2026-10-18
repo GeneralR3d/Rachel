@@ -65,7 +65,20 @@ class ReplyPipelineClientTests(unittest.IsolatedAsyncioTestCase):
         by_name = {tool["function"]["name"]: tool["function"] for tool in request["tools"]}
         self.assertEqual(set(by_name["get_activity_at"]["parameters"]["properties"]), {"day", "hour"})
         self.assertTrue(all(tool["description"] for tool in by_name.values()))
-        self.assertIn("query", request["tools"][-1]["function"]["parameters"]["properties"])
+        self.assertIn("query", by_name["search_user_info"]["parameters"]["properties"])
+        for name in (
+            "create_proactive_schedule", "list_proactive_schedules",
+            "update_proactive_schedule", "delete_proactive_schedule",
+        ):
+            properties = by_name[name]["parameters"]["properties"]
+            for hidden in ("chat_id", "enabled", "config", "repeat_completed"):
+                self.assertNotIn(hidden, properties)
+        self.assertIn("repeat_times", by_name["create_proactive_schedule"]["parameters"]["required"])
+        toggle = by_name["set_proactive_schedule_enabled"]["parameters"]
+        self.assertEqual(set(toggle["properties"]), {"schedule_id", "enabled"})
+        self.assertEqual(set(toggle["required"]), {"schedule_id", "enabled"})
+        self.assertEqual(toggle["properties"]["enabled"]["type"], "boolean")
+        self.assertIn("PROACTIVE REACH-OUT SCHEDULES", request["messages"][0]["content"])
         self.assertIn("SCHEDULE\n", request["messages"][0]["content"])
         self.assertIn("WORLD-VIEW FACTS\n", request["messages"][0]["content"])
         self.assertIn("PER-USER FACTS\n", request["messages"][0]["content"])

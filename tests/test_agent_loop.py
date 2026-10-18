@@ -407,11 +407,42 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         for messages in fetcher.messages + responder.messages:
             self.assertIn(intent, messages[0].content)
             self.assertIn("prior context only", messages[0].content)
-            self.assertEqual([m.content for m in messages[-3:]], [
+            self.assertEqual([m.content for m in messages if m.type in ("human", "ai")], [
                 "Jamie: Old question", f"{llm.BOT_NAME}: Already answered", "Jamie: Thanks!",
             ])
         self.assertIn("Jamie likes tea.", responder.messages[-1][0].content)
         self.assertIn("Friday: class until 5.", responder.messages[-1][0].content)
+
+    async def test_due_reminder_is_current_task_after_prior_schedule_confirmation(self):
+        intent = (
+            "One-time nudge to Ding Ren in this chat: he asked Rachel to remind him in "
+            "5 minutes because he needed to check his calendar. Ask him to check his "
+            "calendar and confirm which slot works for the Japanese food meetup — "
+            "Tuesday next week (20 Oct) after 5pm, or Wednesday dinner. Rachel has "
+            "class 2-5pm on Tuesday and cheerleading practice from 9pm, so Tuesday "
+            "after 5pm or Wednesday dinner are the options."
+        )
+        history = [
+            {"sender": "Ding Ren", "content": "Remind me in 5 minutes to check my calendar", "telegram_message_id": 1},
+            {"sender": llm.BOT_NAME, "content": "okay reminder set, i'll ping you in 5 mins", "telegram_message_id": 2},
+        ]
+        fetcher, responder = self.models([calls(), calls()], [
+            reply("fetch_more", "Time to check your calendar!", "Relevant meetup background"),
+            reply(content="eh check your calendar — Tuesday after 5pm or Wednesday dinner for Japanese food?"),
+        ])
+        with patch.object(llm, "_proactive_graph", llm._build_proactive_graph()):
+            await llm.get_proactive_response(history, intent, chat_id=-128, senders={7: "Ding Ren"})
+
+        for stage, invocations in (("fetcher", fetcher.messages), ("responder", responder.messages)):
+            for pass_number, messages in enumerate(invocations, 1):
+                with self.subTest(stage=stage, pass_number=pass_number):
+                    # The old assistant confirmation must not be the generation prompt's last turn.
+                    self.assertEqual(messages[-1].type, "system")
+                    self.assertIn(intent, messages[-1].content)
+                    self.assertEqual([m.content for m in messages if m.type in ("human", "ai")], [
+                        "Ding Ren: Remind me in 5 minutes to check my calendar",
+                        f"{llm.BOT_NAME}: okay reminder set, i'll ping you in 5 mins",
+                    ])
 
     async def test_proactive_caps_all_configured_budgets(self):
         for budget in range(1, 11):

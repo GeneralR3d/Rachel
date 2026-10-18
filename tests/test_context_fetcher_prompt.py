@@ -66,9 +66,9 @@ class ContextFetcherPromptTests(unittest.TestCase):
 
     def test_guidance_registry_order_and_capability_selection(self):
         guidance = prompts.CONTEXT_FETCHER_TOOL_GUIDANCE
-        self.assertEqual(list(guidance), ["schedule", "worldview", "user_info"])
+        self.assertEqual(list(guidance), ["schedule", "worldview", "user_info", "proactive_schedules"])
         for tools, categories in (
-            (list(reversed(llm.CONTEXT_TOOLS)), ["schedule", "worldview", "user_info"]),
+            (list(reversed(llm.CONTEXT_TOOLS)), ["schedule", "worldview", "user_info", "proactive_schedules"]),
             ([llm.search_world_view, llm.CALENDAR_TOOLS[-1]], ["schedule", "worldview"]),
             ([], []),
         ):
@@ -119,8 +119,20 @@ class ContextFetcherPromptTests(unittest.TestCase):
 
     def test_partial_calendar_set_uses_registered_category_guidance(self):
         prompt = rendered_prompt([llm.CALENDAR_TOOLS[-1], llm.search_world_view, llm.search_user_info_tool])
-        for guidance in prompts.CONTEXT_FETCHER_TOOL_GUIDANCE.values():
+        for category in ("schedule", "worldview", "user_info"):
+            guidance = prompts.CONTEXT_FETCHER_TOOL_GUIDANCE[category]
             self.assertIn(guidance, prompt)
+
+    def test_proactive_policy_is_combined_and_only_added_with_capability(self):
+        from app.services.proactive_tools import PROACTIVE_TOOLS
+
+        prompt = rendered_prompt(PROACTIVE_TOOLS)
+        self.assertIn(prompts.PROACTIVE_SCHEDULE_TOOL_PROMPT, prompt)
+        for guidance in ("repeat_times=1", "unlimited", "follow-up", "current chat", "Asia/Singapore"):
+            self.assertIn(guidance, prompt)
+        self.assertNotIn(prompts.PROACTIVE_SCHEDULE_TOOL_PROMPT, rendered_prompt([]))
+        for tool in PROACTIVE_TOOLS:
+            self.assertIn(f"- {tool.name}(", prompt)
 
 
 class RecordingToolModel(BaseChatModel):
