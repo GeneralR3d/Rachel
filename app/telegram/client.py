@@ -38,6 +38,7 @@ from app.services.llm import get_chat_mood, get_proactive_response, get_response
 from app.services.memory import update_memories
 from app.services.tracing import traced_workflow
 from app.telegram.bot import ADMIN
+from app.telegram.message_content import render_message_content
 from app.utils import parse_history
 
 settings = get_settings()
@@ -294,36 +295,8 @@ def _reset_flush_timer(chat_id: int) -> None:
 
 
 def _message_content(event) -> str:
-    """Text to buffer/feed the LLM for an incoming message.
-
-    Returns the message text when present. When a message has no text (sticker,
-    photo, gif, …) it falls back to a short placeholder so non-text turns aren't
-    fed to the LLM as empty ``name:`` noise (and don't waste a context slot). For
-    stickers we surface the emoji "alt" (``DocumentAttributeSticker.alt``, exposed
-    by Telethon as ``event.file.emoji``) as the closest available description.
-    Returns "" only when there's genuinely nothing to show.
-    """
-    text = (event.raw_text or "").strip()
-    if text:
-        return text
-    if event.sticker is not None:
-        emoji = getattr(event.file, "emoji", None)
-        return f"[sticker: {emoji}]" if emoji else "[sticker]"
-    if event.gif is not None:
-        return "[gif]"
-    if event.video_note is not None:
-        return "[video note]"
-    if event.video is not None:
-        return "[video]"
-    if event.voice is not None:
-        return "[voice message]"
-    if event.audio is not None:
-        return "[audio]"
-    if event.photo is not None:
-        return "[photo]"
-    if event.document is not None:
-        return "[file]"
-    return ""
+    """Render incoming content consistently with Telegram history imports."""
+    return render_message_content(event.message)
 
 
 # Matches only a direct "BOT_NAME <quiet-word>" command (exact order),
@@ -819,7 +792,7 @@ async def on_update_history(event):
         chat_id, min_id=min_id - 1, max_id=event.message.id
     ):  # ignore command message
         sender_id = message.from_id.user_id if message.from_id else 0
-        chat_log.insert(0, (sender_id, message.text, message.id))
+        chat_log.insert(0, (sender_id, render_message_content(message), message.id))
 
     parsed_history = parse_history(chat_log)
     print(f"{my_id=}")

@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
 class ToolObservation(TypedDict):
@@ -12,6 +12,7 @@ class ToolObservation(TypedDict):
     result_category: str
     status: Literal["success", "empty", "error", "timeout"]
     raw_result: Any
+    url_attempted: NotRequired[bool]
 
 
 class ResponderContext(TypedDict):
