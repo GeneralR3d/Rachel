@@ -64,7 +64,6 @@ class ResponderOutputTests(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch.object(llm, "get_active_trait_prompts", AsyncMock(return_value="Friendly")))
         self.stack.enter_context(patch.object(llm, "_run_context_fetcher", AsyncMock()))
         self.stack.enter_context(patch("builtins.print"))
-        self.stack.enter_context(patch.object(llm, "pprint"))
         self.stack.enter_context(redirect_stderr(StringIO()))
 
     async def asyncTearDown(self):

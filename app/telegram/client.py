@@ -35,6 +35,7 @@ from app.repository import (
     upsert_user,
 )
 from app.services.llm import get_chat_mood, get_proactive_response, get_response, set_chat_mood
+from app.services.scratchpad import ScratchpadScope, scratchpads
 from app.services.memory import update_memories
 from app.services.tracing import traced_workflow
 from app.telegram.bot import ADMIN
@@ -166,7 +167,8 @@ async def _seed_chat_buffer_locked(chat_id: int, me_id: int) -> List[BufferedMes
             )
         )
     current_messages_buffer[chat_id] = buffer
-    burst_sessions.setdefault(chat_id, uuid.uuid4().hex)
+    session_id = burst_sessions.setdefault(chat_id, uuid.uuid4().hex)
+    scratchpads.activate(chat_id, session_id)
     return buffer
 
 
@@ -208,13 +210,14 @@ async def _load_summary_and_mood(chat_id: int) -> str:
     return current_summary
 
 
-async def _snapshot_context(chat_id: int, me_id: int) -> tuple[List[BufferedMessage], List[dict], Dict[int, str]]:
+async def _snapshot_context(chat_id: int, me_id: int) -> tuple[List[BufferedMessage], List[dict], Dict[int, str], ScratchpadScope]:
     """Return the latest context and participant map from an atomically seeded buffer."""
     async with buffer_locks.setdefault(chat_id, asyncio.Lock()):
         buffer = current_messages_buffer.get(chat_id)
         if buffer is None:
             buffer = await _seed_chat_buffer_locked(chat_id, me_id)
         context_msgs = list(buffer[-N_PAST_MSG_REQUIRED:])
+        scope = scratchpads.activate(chat_id, burst_sessions.setdefault(chat_id, uuid.uuid4().hex))
     context = [m.to_llm_dict() for m in context_msgs]
     # Unique senders in the context (excluding Rachel herself) as an
     # id -> name map, so the responder can pull each participant's stored
@@ -225,7 +228,7 @@ async def _snapshot_context(chat_id: int, me_id: int) -> tuple[List[BufferedMess
         for m in context_msgs
         if m.sender_user_id and m.sender_user_id != me_id
     }
-    return context_msgs, context, senders
+    return context_msgs, context, senders, scope
 
 
 async def _send_paragraphs(chat_id: int, response: str) -> int | None:
@@ -465,7 +468,8 @@ async def _reply(event):
 
     async with client.action(event.chat_id, "typing"):  # pyright: ignore
         current_summary = await _load_summary_and_mood(chat_id)
-        context_msgs, context, senders = await _snapshot_context(chat_id, me.id)
+        context_msgs, context, senders, scope = await _snapshot_context(chat_id, me.id)
+        session_id = scope.session_id
         # Causal watermark for the divider: the highest id in the context Rachel
         # is about to respond against. Anything that arrives later (even mid-send,
         # which by send-time id sorts behind her reply) counts as new next time.
@@ -519,6 +523,7 @@ async def _reply(event):
                 "history": context,
                 "current_summary": current_summary,
                 "chat_id": chat_id,
+                "scratchpad_scope": scope,
                 "senders": senders,
                 "must_reply": must_reply,
                 "is_private": is_private,
@@ -622,14 +627,15 @@ async def send_proactive_message(chat_id: int, intent: str, schedule_id: int) ->
             raise RuntimeError("Telegram client is disconnected")
         me = await client.get_me()
         current_summary = await _load_summary_and_mood(chat_id)
-        _context_msgs, context, senders = await _snapshot_context(chat_id, me.id)
-        with traced_workflow("telegram_proactive", burst_sessions.get(chat_id), chat_id):
+        _context_msgs, context, senders, scope = await _snapshot_context(chat_id, me.id)
+        with traced_workflow("telegram_proactive", scope.session_id, chat_id):
             async with client.action(chat_id, "typing"):
                 response, response_reason, _load_time = await get_proactive_response(
                     history=context,
                     intent=intent,
                     current_summary=current_summary,
                     chat_id=chat_id,
+                    scratchpad_scope=scope,
                     senders=senders,
                 )
         if not response.strip():
@@ -670,10 +676,16 @@ async def _flush_chat(
             print(f"[{chat_id}] Flushed {len(to_persist)} messages to DB")
 
         if chat_id in pending_summaries:
-            await set_summary(chat_id, pending_summaries.pop(chat_id), get_chat_mood(chat_id))
+            saved_summary = pending_summaries[chat_id]
+            await set_summary(chat_id, saved_summary, get_chat_mood(chat_id))
+            # Generation does not hold the buffer lock and may finish while the
+            # database write awaits. Retain any newer summary for the next flush.
+            if pending_summaries.get(chat_id) == saved_summary:
+                pending_summaries.pop(chat_id, None)
             print(f"[{chat_id}] Flushed summary + mood to DB")
 
         current_messages_buffer.pop(chat_id, None)
+        scratchpads.invalidate(chat_id)
         burst_sessions.pop(chat_id, None)
         last_message_time.pop(chat_id, None)
         return conversation, summary
@@ -750,27 +762,31 @@ def _chat_display_name(chat) -> str | None:
     return f"@{username}" if username else None
 
 
+async def clear_chat_history(chat_id: int, *, clear_summary: bool = False) -> None:
+    """Reset a chat and invalidate in-flight scratchpad access under its lock."""
+    if chat_id in wait_tasks and wait_tasks[chat_id]:
+        wait_tasks[chat_id].cancel()
+    if chat_id in flush_tasks and flush_tasks[chat_id]:
+        flush_tasks[chat_id].cancel()
+
+    async with buffer_locks.setdefault(chat_id, asyncio.Lock()):
+        await clear_history(chat_id)
+        if clear_summary:
+            await delete_summary(chat_id)
+        scratchpads.invalidate(chat_id)
+        for state in (current_messages_buffer, burst_sessions, pending_summaries, last_message_time, wait_tasks, flush_tasks):
+            state.pop(chat_id, None)
+
+
 @client.on(events.NewMessage(pattern="\\/clear_history"))
 async def on_clear_history(event):
     print(f"[{event.chat_id}] clear history command received")
 
     if event.is_group:
         await event.respond("I can't clear history in groups yet.")
-        return  # ignore group messages
+        return
 
-    chat_id = event.chat_id
-
-    if chat_id in wait_tasks and wait_tasks[chat_id]:
-        wait_tasks[chat_id].cancel()
-    if chat_id in flush_tasks and flush_tasks[chat_id]:
-        flush_tasks[chat_id].cancel()
-
-    await clear_history(chat_id)
-    await delete_summary(chat_id)
-
-    for state in (current_messages_buffer, burst_sessions, pending_summaries, last_message_time, wait_tasks, flush_tasks):
-        state.pop(chat_id, None)
-
+    await clear_chat_history(event.chat_id, clear_summary=True)
     await event.respond("History cleared.")
     raise events.StopPropagation
 

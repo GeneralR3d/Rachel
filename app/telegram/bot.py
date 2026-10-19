@@ -11,7 +11,6 @@ from app.prompts import RESPONDER_SYSTEM_PROMPT, SUMMARIZER_SYSTEM_PROMPT, USER_
 from app.services.userfacts import add_user_facts, get_user_facts
 from app.repository import (
     add_model,
-    clear_history,
     delete_model,
     delete_summary,
     delete_user_profile,
@@ -118,7 +117,9 @@ async def on_clear_history(event):
         await event.reply("Usage: /clear_history <chat_id>")
         return
     chat_id = int(event.pattern_match.group(2))
-    await clear_history(chat_id)
+    from app.telegram.client import clear_chat_history
+
+    await clear_chat_history(chat_id)
     await event.reply(f"History cleared for chat {chat_id}.")
 
 

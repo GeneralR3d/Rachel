@@ -66,9 +66,9 @@ class ContextFetcherPromptTests(unittest.TestCase):
 
     def test_guidance_registry_order_and_capability_selection(self):
         guidance = prompts.CONTEXT_FETCHER_TOOL_GUIDANCE
-        self.assertEqual(list(guidance), ["schedule", "worldview", "user_info", "proactive_schedules", "url_content"])
+        self.assertEqual(list(guidance), ["scratchpad", "schedule", "worldview", "user_info", "proactive_schedules", "url_content"])
         for tools, categories in (
-            (list(reversed(llm.CONTEXT_TOOLS)), ["schedule", "worldview", "user_info", "proactive_schedules", "url_content"]),
+            (list(reversed(llm.CONTEXT_TOOLS)), ["scratchpad", "schedule", "worldview", "user_info", "proactive_schedules", "url_content"]),
             ([llm.search_world_view, llm.CALENDAR_TOOLS[-1]], ["schedule", "worldview"]),
             ([llm.fetch_url], ["url_content"]),
             ([llm.fetch_url, llm.CALENDAR_TOOLS[0]], ["schedule", "url_content"]),
@@ -189,7 +189,7 @@ class ContextFetcherNodeTests(unittest.IsolatedAsyncioTestCase):
                 "retrieval_request": "Friday {value}", "responded_watermark": 2,
             }, observations)
         messages = model.ainvoke.call_args.args[0]
-        self.assertEqual([msg.type for msg in messages], ["system", "system", "human", "ai", "human", "human"])
+        self.assertEqual([msg.type for msg in messages], ["system", "human", "human", "ai", "human", "human"])
         self.assertIn("Jamie", messages[0].content)
         self.assertIn("The current date is 18 October 2026, the current day of week is Sunday, the current time is 12:00", messages[0].content)
         self.assertEqual(json.loads(messages[1].content.split("\n", 1)[1]), {

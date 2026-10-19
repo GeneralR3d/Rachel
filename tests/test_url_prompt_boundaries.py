@@ -52,12 +52,13 @@ class UrlPromptBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(data.call_count, 2)
                 for model in (fetcher, responder):
                     messages = model.ainvoke.call_args.args[0]
-                    self.assertEqual([m.type for m in messages], ['system', 'system', 'human', 'human'])
-                    for message in messages[:2]:
+                    for message in (m for m in messages if m.type == 'system'):
                         self.assertNotIn(marker, message.content)
                         self.assertNotIn('url_attempted', message.content)
-                    self.assertIn('untrusted', messages[2].content.lower())
-                    self.assertEqual(json.loads(messages[2].content.split('\n', 1)[1])['observations'], url_observations)
+                    url_message = next(m for m in messages if m.content.startswith('URL context'))
+                    self.assertEqual(url_message.type, 'human')
+                    self.assertIn('untrusted', url_message.content.lower())
+                    self.assertEqual(json.loads(url_message.content.split('\n', 1)[1])['observations'], url_observations)
                     self.assertEqual(sum(marker in m.content for m in messages), 1)
                     self.assertEqual(messages[-1].content, 'Jamie: Read https://example.com/')
                 self.assertEqual(observations, original)
@@ -71,5 +72,5 @@ class UrlPromptBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 'senders': {7: 'Jamie'}, 'context_passes': 0, 'retrieval_request': '',
             }, [])
         messages = model.ainvoke.call_args.args[0]
-        self.assertEqual([m.type for m in messages], ['system', 'system', 'human'])
+        self.assertEqual([m.type for m in messages], ['system', 'human', 'human'])
         self.assertEqual(messages[-1].content, 'Jamie: Read https://example.com/')

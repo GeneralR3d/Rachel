@@ -137,8 +137,9 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(llm._context_tools_by_name, {"lookup_weather": SimpleNamespace(ainvoke=lookup)}):
             result = await self.run_graph()
         self.assertEqual(result["tool_observations"][0]["result_category"], "lookup_weather")
-        prompt = responder.messages[0][0].content
-        self.assertIn("lookup_weather:\nForecast: literal {sunshine}.", prompt)
+        prompt = "\n".join(m.content for m in responder.messages[0])
+        context = json.loads(responder.messages[0][2].content.split("\n", 1)[1])
+        self.assertIn("lookup_weather:\nForecast: literal {sunshine}.", context["tool_results"])
         self.assertIn("No schedule context was fetched.", prompt)
         schedule = prompt.split("Rachel's schedule context:", 1)[1].split("People in this conversation:", 1)[0]
         self.assertNotIn("sunshine", schedule)
@@ -407,11 +408,13 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         for messages in fetcher.messages + responder.messages:
             self.assertIn(intent, messages[0].content)
             self.assertIn("prior context only", messages[0].content)
-            self.assertEqual([m.content for m in messages if m.type in ("human", "ai")], [
+            self.assertEqual([m.content for m in messages if m.type in ("human", "ai")
+                              and not m.content.startswith(("Retrieval state", "Tool context", "URL context"))], [
                 "Jamie: Old question", f"{llm.BOT_NAME}: Already answered", "Jamie: Thanks!",
             ])
-        self.assertIn("Jamie likes tea.", responder.messages[-1][0].content)
-        self.assertIn("Friday: class until 5.", responder.messages[-1][0].content)
+        tool_context = json.loads(responder.messages[-1][2].content.split("\n", 1)[1])
+        self.assertIn("Jamie likes tea.", tool_context["tool_results"])
+        self.assertIn("Friday: class until 5.", tool_context["tool_results"])
 
     async def test_due_reminder_is_current_task_after_prior_schedule_confirmation(self):
         intent = (
@@ -439,7 +442,8 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
                     # The old assistant confirmation must not be the generation prompt's last turn.
                     self.assertEqual(messages[-1].type, "system")
                     self.assertIn(intent, messages[-1].content)
-                    self.assertEqual([m.content for m in messages if m.type in ("human", "ai")], [
+                    self.assertEqual([m.content for m in messages if m.type in ("human", "ai")
+                                      and not m.content.startswith(("Retrieval state", "Tool context", "URL context"))], [
                         "Ding Ren: Remind me in 5 minutes to check my calendar",
                         f"{llm.BOT_NAME}: okay reminder set, i'll ping you in 5 mins",
                     ])
@@ -625,7 +629,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
             url_data = [m for m in messages if m.type == 'human' and m.content.startswith('URL context')]
             self.assertEqual(len(url_data), 1)
             self.assertIn(marker, url_data[0].content)
-        self.assertIn('HTTP 403', responder.messages[-1][2].content)
+        self.assertTrue(any('HTTP 403' in m.content for m in responder.messages[-1] if m.type == 'human'))
 
 
 if __name__ == "__main__":

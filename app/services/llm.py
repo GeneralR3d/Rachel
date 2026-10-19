@@ -17,7 +17,6 @@ from datetime import datetime, timedelta, timezone
 
 SGT = timezone(timedelta(hours=8))
 from typing import Any, Dict, List, Literal, Optional, Tuple
-from pprint import pprint
 
 import tiktoken
 import httpx
@@ -26,6 +25,8 @@ from app.services import worldview
 from app.services.metrics import AGENT_CONTEXT_PASSES, AGENT_LOOP_OUTCOMES, LLM_CALLS, record_llm_error
 from app.services.context import ToolObservation
 from app.services.url_fetch import fetch_url, normalize_url
+from app.services.scratchpad import ScratchpadScope
+from app.services.scratchpad_tools import SCRATCHPAD_TOOLS, scratchpad_metadata
 from app.services.prompt_builders import (
     build_context_fetcher_handoff,
     build_context_fetcher_prompt,
@@ -34,6 +35,7 @@ from app.services.prompt_builders import (
     build_responder_loop_message,
     build_responder_prompt,
     build_url_context_message,
+    build_tool_context_message,
     split_url_observations,
 )
 from app.services.tracing import traced_jev_decision, traced_tool_call
@@ -48,6 +50,7 @@ from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.errors import GraphRecursionError
@@ -361,7 +364,7 @@ async def _get_responder_llm():
 # some models — each pass has a hard timeout below and records failures as
 # observations, so a hang/error can never stall the pipeline.) CONTEXT_TOOLS is the
 # single source of truth for both the agent's tools and its dynamic prompt.
-CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool, *PROACTIVE_TOOLS, fetch_url]
+CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool, *PROACTIVE_TOOLS, fetch_url, *SCRATCHPAD_TOOLS]
 
 
 class ContextFetcherPromptContext(TypedDict):
@@ -578,6 +581,8 @@ def _resolve_name_to_id(
 
 
 def _context_category(name: str) -> str:
+    if name in {tool.name for tool in SCRATCHPAD_TOOLS}:
+        return "scratchpad"
     if name in {tool.name for tool in PROACTIVE_TOOLS}:
         return "proactive_schedules"
     if name == fetch_url.name:
@@ -591,7 +596,37 @@ def _context_category(name: str) -> str:
     return name if name in _context_tools_by_name else "retrieval"
 
 
-async def _run_context_fetcher(state: GraphState, observations: List[ToolObservation]) -> None:
+def _scratchpad_config(state: GraphState, config: RunnableConfig | None) -> RunnableConfig:
+    """Bind trusted scope to this invocation's application-supplied chat ID."""
+    return {"configurable": {
+        "current_chat_id": state.get("chat_id"),
+        "scratchpad_scope": (config or {}).get("configurable", {}).get("scratchpad_scope"),
+    }}
+
+
+def _scratchpad_status(config: RunnableConfig) -> str:
+    return "\nScratchpad status (contents available only through get_scratchpad): " + json.dumps(scratchpad_metadata(config))
+
+
+def _url_results(observations: List[ToolObservation]) -> dict[str, str]:
+    """Only this graph invocation's successful URL observations are copyable."""
+    results = {}
+    for observation in observations:
+        if observation["tool_name"] != fetch_url.name or observation["status"] != "success":
+            continue
+        result = observation["raw_result"]
+        if not isinstance(result, dict) or not isinstance(result.get("content"), str):
+            continue
+        for url in (observation["arguments"].get("url"), result.get("final_url")):
+            try:
+                results[normalize_url(url)] = result["content"]
+            except (ValueError, TypeError):
+                continue
+    return results
+
+
+async def _run_context_fetcher(state: GraphState, observations: List[ToolObservation],
+                               config: RunnableConfig | None = None) -> None:
     """Append each raw observation immediately, preserving partial work on timeout."""
     senders = state.get("senders") or {}
     proactive = bool((state.get("intent") or "").strip())
@@ -611,9 +646,10 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
     )
     participants = ", ".join(senders.values()) or "(unknown)"
     pass_number = state.get("context_passes", 0) + 1
-    # Keep URL payloads and failures out of the system-message handoff.
+    tool_config = _scratchpad_config(state, config)
+    # All observation text and responder handoffs are untrusted data.
     other_observations, url_observations = split_url_observations(observations)
-    handoff = SystemMessage(content=build_context_fetcher_handoff(
+    handoff = HumanMessage(content=build_context_fetcher_handoff(
         context_pass=pass_number,
         max_context_passes=settings.agent_max_context_passes,
         retrieval_request=state.get("retrieval_request", ""),
@@ -632,15 +668,17 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
 
     async def call_model(model_request: ModelRequest) -> AIMessage:
         assert model_request.system_message is not None
+        system_message = SystemMessage(content=model_request.system_message.content + _scratchpad_status(tool_config))
         return await model_request.model.bind_tools(model_request.tools).ainvoke(
-            [model_request.system_message, *model_request.messages]
+            [system_message, *model_request.messages]
         )
 
     ai: AIMessage = await context_fetcher_dynamic_prompt.awrap_model_call(request, call_model)
     tool_calls = getattr(ai, "tool_calls", None) or []
     print(f"[context_fetcher] LLM requested {len(tool_calls)} tool call(s):")
     for tc in tool_calls:
-        print(f"[context_fetcher]   -> {tc['name']}({tc['args']})")
+        # Arguments can contain note bodies copied through any tool category.
+        print(f"[context_fetcher]   -> {tc['name']}")
 
     for tc in tool_calls:
         name = tc["name"]
@@ -694,7 +732,12 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
                     tool = _context_tools_by_name.get(name)
                     if tool is None:
                         raise ValueError(f"Unknown tool '{name}'")
-                    if _context_category(name) == "proactive_schedules":
+                    if _context_category(name) == "scratchpad":
+                        result = await tool.ainvoke(arguments, config={"configurable": {
+                            **tool_config["configurable"],
+                            "scratchpad_url_results": _url_results(observations),
+                        }})
+                    elif _context_category(name) == "proactive_schedules":
                         result = await tool.ainvoke(arguments, config={
                             "configurable": {"current_chat_id": state.get("chat_id")},
                         })
@@ -708,7 +751,7 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
                 observation.update(status="error", raw_result=f"{type(e).__name__}: {e}")
 
 
-async def context_fetcher_node(state: GraphState) -> Dict:
+async def context_fetcher_node(state: GraphState, config: RunnableConfig = None) -> Dict:
     """One deadline-bounded retrieval pass, accumulating successes and failures."""
     LLM_CALLS.labels(node="context_fetcher").inc()
     # Copy records so a timed-out task cannot mutate an earlier graph snapshot.
@@ -716,7 +759,7 @@ async def context_fetcher_node(state: GraphState) -> Dict:
     previous_count = len(observations)
     pass_number = state.get("context_passes", 0) + 1
     try:
-        await asyncio.wait_for(_run_context_fetcher(state, observations), timeout=CONTEXT_FETCHER_TIMEOUT)
+        await asyncio.wait_for(_run_context_fetcher(state, observations, config), timeout=CONTEXT_FETCHER_TIMEOUT)
     except Exception as e:
         record_llm_error("context_fetcher", e)
         # If a tool was in-flight, its timeout observation is already present.
@@ -802,7 +845,7 @@ def _fallback_content(state: GraphState) -> str:
     return "I'm not sure yet — could you clarify what you mean?"
 
 
-async def responder_node(state: GraphState) -> Dict:
+async def responder_node(state: GraphState, config: RunnableConfig = None) -> Dict:
     try:
         print(f"[responder] system prompt loaded (tokens={_count_tokens(RESPONDER_SYSTEM_PROMPT)})")
 
@@ -815,6 +858,11 @@ async def responder_node(state: GraphState) -> Dict:
 
         other_observations, url_observations = split_url_observations(state.get("tool_observations", []))
         context = build_responder_context(other_observations)
+        # Preserve result guidance, NIL slots and raw failures outside system
+        # messages, without claiming that a successful lookup did not happen.
+        system_context = {"tool_results": "Read the separate untrusted tool context for retrieved results and status. No tool action is confirmed without a successful result.",
+                          "retrieval_status": ""}
+        tool_messages = [HumanMessage(content=build_tool_context_message(context))]
         url_data = build_url_context_message(observations=url_observations)
         url_messages = [HumanMessage(content=url_data)] if url_data else []
 
@@ -835,26 +883,25 @@ async def responder_node(state: GraphState) -> Dict:
             history_msgs.append(SystemMessage(content=build_proactive_trigger(state["intent"])))
         history_tokens = sum(_count_tokens(f"{m.type}: {m.content}") for m in history_msgs)
         print(f"[responder] history fetched (count={len(history_msgs)}, tokens={history_tokens})")
-        pprint(history_msgs)
 
         main_system_message = SystemMessage(content=build_responder_prompt(
             system_prompt=RESPONDER_SYSTEM_PROMPT,
-            context=context,
+            context=system_context,
             communication_style=communication_style,
             current_summary=state.get("current_summary") or "",
             personality_traits=personality_traits,
             conversation_mood=mood,
             current_datetime=formatted_datetime,
             intent=state.get("intent", ""),
-        ))
+        ) + _scratchpad_status(_scratchpad_config(state, config)))
         loop_system_message = SystemMessage(content=build_responder_loop_message(
             instructions=RESPONDER_LOOP_INSTRUCTIONS,
             context_passes=state.get("context_passes", 0),
             max_context_passes=settings.agent_max_context_passes,
             remaining_steps=state.get("remaining_steps"),
-            context=context,
+            context=system_context,
         ))
-        msgs = [main_system_message, loop_system_message, *url_messages, *history_msgs]
+        msgs = [main_system_message, loop_system_message, *tool_messages, *url_messages, *history_msgs]
         msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
         print(f"[responder] TOTAL context: {len(msgs)} messages, {msgs_tokens} tokens")
 
@@ -874,7 +921,7 @@ async def responder_node(state: GraphState) -> Dict:
                 return _parse_fallback(state, content, e)
         if result is None:
             return _parse_fallback(state, "", ValueError("Responder LLM returned no parsed response"))
-        print(f"[responder] LLM returned: content={result.content[:80]!r} | reason={result.reason!r}")
+        print(f"[responder] LLM returned decision={result.decision}")
         return _response_update(state, result.content, result.reason, result.decision, result.retrieval_request)
     except BaseException as e:
         import traceback
@@ -942,13 +989,15 @@ _graph = _build_graph()
 _proactive_graph = _build_proactive_graph()
 
 
-async def _run_response_graph(graph, initial_state: GraphState, *, run_name: str) -> GraphState:
+async def _run_response_graph(graph, initial_state: GraphState, *, run_name: str,
+                              scratchpad_scope: ScratchpadScope | None = None) -> GraphState:
     """Apply the same pass budget, emergency recovery and metrics to both entry points."""
     result = initial_state
     try:
         async for snapshot in graph.astream(initial_state, config={
             "run_name": run_name,
             "recursion_limit": 2 * settings.agent_max_context_passes + 8,
+            "configurable": {"scratchpad_scope": scratchpad_scope},
         }, stream_mode="values"):
             result = snapshot
     except GraphRecursionError as e:
@@ -971,6 +1020,7 @@ async def get_response(
     must_reply: bool = False,
     is_private: bool = False,
     responded_watermark: int | None = None,
+    scratchpad_scope: ScratchpadScope | None = None,
 ) -> Tuple[str, str, str | None, float]:
     """Run the LangGraph pipeline and return ``(response_text, reason, new_summary, elapsed_seconds)``.
 
@@ -1006,7 +1056,7 @@ async def get_response(
         "response_reason": "",
     }
 
-    result = await _run_response_graph(_graph, initial_state, run_name="RachelReplyGraph")
+    result = await _run_response_graph(_graph, initial_state, run_name="RachelReplyGraph", scratchpad_scope=scratchpad_scope)
 
     if chat_id is not None:
         _chat_mood[chat_id] = result["mood"]
@@ -1022,6 +1072,7 @@ async def get_proactive_response(
     current_summary: str | None = None,
     chat_id: int | None = None,
     senders: Dict[int, str] | None = None,
+    scratchpad_scope: ScratchpadScope | None = None,
 ) -> Tuple[str, str, float]:
     """Generate an unconditional outreach without routing, summarizing, or mood writes."""
     if not intent.strip():
@@ -1046,5 +1097,5 @@ async def get_proactive_response(
         "response_text": "",
         "response_reason": "",
     }
-    result = await _run_response_graph(_proactive_graph, initial_state, run_name="RachelProactiveGraph")
+    result = await _run_response_graph(_proactive_graph, initial_state, run_name="RachelProactiveGraph", scratchpad_scope=scratchpad_scope)
     return result["response_text"], result["response_reason"], time.time() - start

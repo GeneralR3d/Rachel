@@ -244,7 +244,9 @@ async def read_history(chat_id: int) -> list[HistoryItem]:
 
 @router.delete("/history/{chat_id}", status_code=204)
 async def delete_chat_history(chat_id: int) -> None:
-    await repository.clear_history(chat_id)
+    from app.telegram.client import clear_chat_history
+
+    await clear_chat_history(chat_id)
 
 
 @router.get("/summary/{chat_id}", response_model=SummaryOut)
