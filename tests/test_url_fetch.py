@@ -76,6 +76,10 @@ class UrlFetchTests(unittest.IsolatedAsyncioTestCase):
         for media, body, expected in (
             ('text/markdown; charset=utf-8', '# 茶 {value}'.encode(), '# 茶 {value}'),
             ('text/x-markdown', b'## tea', '## tea'),
+            ('text/markdown', b'Read [the guide](https://example.org/tea).',
+             'Read [the guide](https://example.org/tea).'),
+            ('text/plain', b'Read https://example.org/tea for more.',
+             'Read https://example.org/tea for more.'),
             ('text/plain; charset=iso-8859-1', b'caf\xe9', 'café'),
             ('text/plain; charset=unknown-charset', '茶'.encode(), '茶'),
             ('application/json', b'{"tea": true}', '{"tea": true}'),
@@ -113,6 +117,60 @@ class UrlFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('$3', result['content'])
         self.assertNotIn('secret-script-marker', result['content'])
         self.assertNotIn('<p>', result['content'])
+
+    async def test_preserves_html_links_and_visible_urls_without_fetching_targets(self):
+        html = '''<html><body><article><h1>A guide to tea</h1>
+            <p>Tea is brewed from leaves using warm water. Read the
+            <a href="https://example.org/tea?type=green&amp;size=2#brewing">brewing guide</a>
+            to learn how water temperature and steeping time affect the flavour.</p>
+            <p>Friends share tea and stories at the cafe. More tasting notes are
+            available at https://example.net/tasting for anyone interested in tea.</p>
+            </article></body></html>'''
+        self.serve(lambda req: httpx.Response(200, headers={'content-type': 'text/html'}, text=html))
+        result = await self.fetch()
+        self.assertEqual([str(req.url) for req in self.requests], ['https://example.com/article'])
+        self.assertIn('[brewing guide](https://example.org/tea?type=green&size=2#brewing)', result['content'])
+        self.assertIn('https://example.net/tasting', result['content'])
+
+    async def test_resolves_html_links_against_final_redirect_url(self):
+        html = '''<html><body><article><h1>A guide to tea</h1>
+            <p>Tea is brewed from leaves using warm water. Read our
+            <a href="../guides/brewing?type=green&amp;size=2#steps">brewing instructions</a>
+            to learn how water temperature and steeping time affect the flavour.</p>
+            <p>Friends share tea and stories at the cafe. Visit our
+            <a href="/shops">tea shops</a> to find a comfortable place to try a new drink.</p>
+            </article></body></html>'''
+
+        def handler(req):
+            if req.url.path == '/article':
+                return httpx.Response(302, headers={'location': '/tea/articles/current'})
+            return httpx.Response(200, headers={'content-type': 'text/html'}, text=html)
+
+        self.serve(handler)
+        result = await self.fetch()
+        self.assertEqual(result['final_url'], 'https://example.com/tea/articles/current')
+        self.assertEqual([req.url.path for req in self.requests], ['/article', '/tea/articles/current'])
+        self.assertIn('[brewing instructions](https://example.com/tea/guides/brewing?type=green&size=2#steps)',
+                      result['content'])
+        self.assertIn('[tea shops](https://example.com/shops)', result['content'])
+
+    async def test_resolves_html_links_using_document_base(self):
+        for base, target in (
+            ('../docs/', 'https://example.com/tea/docs/brewing'),
+            ('https://example.org/guides/', 'https://example.org/guides/brewing'),
+        ):
+            with self.subTest(base=base):
+                html = f'''<html><head><base href="{base}"></head><body><article>
+                    <h1>A guide to tea</h1>
+                    <p>Tea is brewed from leaves using warm water. Read our
+                    <a href="brewing">brewing instructions</a> to learn how water
+                    temperature and steeping time affect the flavour.</p>
+                    </article></body></html>'''
+                self.requests.clear()
+                self.serve(lambda req: httpx.Response(200, headers={'content-type': 'text/html'}, text=html))
+                result = await self.fetch('https://example.com/tea/articles/current')
+                self.assertEqual([req.url.path for req in self.requests], ['/tea/articles/current'])
+                self.assertIn(f'[brewing instructions]({target})', result['content'])
 
     async def test_empty_html_does_not_turn_metadata_into_content(self):
         self.serve(lambda req: httpx.Response(200, headers={'content-type': 'application/xhtml+xml'},
