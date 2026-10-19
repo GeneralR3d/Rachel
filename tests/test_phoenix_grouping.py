@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 from openai import AsyncOpenAI
+from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -34,6 +35,205 @@ class PhoenixGroupingTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.tracer_patch.stop()
         self.provider.shutdown()
+
+    @contextmanager
+    def tool_retrieval(self, tool_batches):
+        """Run real graph/tool tracing with only model and storage boundaries replaced."""
+        instrumentor = LangChainInstrumentor()
+        instrumentor.instrument(tracer_provider=self.provider)
+        batches = iter(tool_batches)
+
+        async def select_tools(messages):
+            return AIMessage(content="", tool_calls=next(batches))
+
+        model = SimpleNamespace(ainvoke=select_tools)
+        model.bind_tools = lambda tools: model
+        with ExitStack() as stack:
+            stack.callback(instrumentor.uninstrument)
+            stack.enter_context(patch.object(llm, "_get_context_fetcher_llm", AsyncMock(return_value=model)))
+            stack.enter_context(patch("app.calander.get_day_summary", AsyncMock(return_value=[
+                {"name": "Dinner", "duration_hours": 2, "location": "Café"},
+            ])))
+            stack.enter_context(patch.object(llm, "search_worldview", AsyncMock(return_value="Café closes at 9.")))
+            stack.enter_context(patch.object(llm, "search_user_info", AsyncMock(return_value=(
+                "Jamie likes tea.", {"occupation": "student", "likes": "茶"},
+            ))))
+            stack.enter_context(patch("builtins.print"))
+            yield
+
+    @staticmethod
+    def retrieval_state(**overrides):
+        return {
+            "history": [{"sender": "Jamie", "content": "Free on Friday?", "telegram_message_id": 2}],
+            "chat_id": -42, "senders": {7: "Jamie"}, "current_summary": "Dinner plans",
+            "mood": "default", "must_reply": True, "is_private": False,
+            "responded_watermark": 1, "should_reply": True, "context_passes": 0,
+            "tool_observations": [], "retrieval_request": "", "intent": "",
+            **overrides,
+        }
+
+    async def test_memory_results_have_tool_spans_in_both_graphs_across_passes(self):
+        batches = [
+            [
+                {"id": "schedule-1", "name": "get_day_overview", "args": {"day": "Friday"}},
+                {"id": "world-1", "name": "search_world_view", "args": {"query": "café"}},
+                {"id": "user-1", "name": "search_user_info", "args": {"name": "Jamie", "query": "drinks"}},
+            ],
+            [{"id": "world-2", "name": "search_world_view", "args": {"query": "café"}}],
+        ]
+        for proactive in (False, True):
+            with self.subTest(proactive=proactive):
+                self.exporter.clear()
+                responses = iter([
+                    {"decision": "fetch_more", "retrieval_request": "Confirm café hours", "content": "Which café?", "reason": "Need details"},
+                    {"decision": "respond", "retrieval_request": "", "content": "Tea at six?", "reason": "Have details"},
+                ])
+
+                async def respond(messages):
+                    return llm.ResponseOutput(**next(responses))
+
+                with self.tool_retrieval(batches), patch.object(
+                    llm, "_get_responder_llm", AsyncMock(return_value=SimpleNamespace(ainvoke=respond))
+                ), patch.object(llm, "get_active_trait_prompts", AsyncMock(return_value="friendly")), patch.object(
+                    llm, "summarizer_node", AsyncMock(return_value={})
+                ), patch.object(llm.settings, "agent_max_context_passes", 3):
+                    graph = llm._build_proactive_graph() if proactive else llm._build_graph()
+                    workflow = "telegram_proactive" if proactive else "telegram_reply"
+                    with traced_workflow(workflow, "tool-burst", chat_id=-42, chat_name="Study Group"):
+                        result = await graph.ainvoke(self.retrieval_state(
+                            intent="Ask about dinner" if proactive else "",
+                        ))
+                        self.assertEqual(trace.get_current_span().name, workflow)
+
+                self.assertEqual(result["response_text"], "Tea at six?")
+                spans = self.exporter.get_finished_spans()
+                root = next(span for span in spans if span.name == workflow)
+                fetchers = [span for span in spans if span.name == "context_fetcher_node"]
+                tools = [span for span in spans if span.attributes.get("openinference.span.kind") == "TOOL"]
+                self.assertEqual([span.name for span in tools], [
+                    "get_day_overview", "search_world_view", "search_user_info", "search_world_view",
+                ])
+                self.assertEqual({span.context.trace_id for span in spans}, {root.context.trace_id})
+                for span in tools:
+                    self.assertIn(span.parent.span_id, {fetcher.context.span_id for fetcher in fetchers})
+                    self.assertEqual(span.attributes["session.id"], "tool-burst")
+                    metadata = json.loads(span.attributes["metadata"])
+                    self.assertEqual(metadata["telegram_chat_id"], -42)
+                    self.assertEqual(metadata["telegram_chat_name"], "Study Group")
+                self.assertEqual(tools[0].attributes["output.value"], "Overview of Rachel's Friday:\n- Dinner (2h) @ Café")
+                for tool, call_id, pass_number in ((tools[1], "world-1", 1), (tools[3], "world-2", 2)):
+                    self.assertEqual(tool.parent.span_id, fetchers[pass_number - 1].context.span_id)
+                    self.assertEqual(tool.attributes["tool.name"], "search_world_view")
+                    self.assertEqual(tool.attributes["tool.id"], call_id)
+                    self.assertEqual(json.loads(tool.attributes["input.value"]), {"query": "café"})
+                    self.assertEqual(tool.attributes["output.mime_type"], "text/plain")
+                    self.assertEqual(tool.attributes["output.value"], "Café closes at 9.")
+                    self.assertEqual(tool.attributes["tool.pass_number"], pass_number)
+                    self.assertEqual(tool.attributes["tool.result_category"], "worldview")
+                    self.assertEqual(tool.attributes["tool.status"], "success")
+                user = tools[2]
+                self.assertEqual(user.attributes["tool.id"], "user-1")
+                self.assertEqual(user.attributes["tool.result_category"], "user_info")
+                self.assertEqual(json.loads(user.attributes["input.value"]), {"name": "Jamie", "query": "drinks"})
+                self.assertEqual(user.attributes["output.mime_type"], "application/json")
+                self.assertEqual(json.loads(user.attributes["output.value"]), {
+                    "user_id": 7, "name": "Jamie", "facts": "Jamie likes tea.",
+                    "profile": {"occupation": "student", "likes": "茶"},
+                })
+
+    async def test_memory_tool_spans_record_empty_results_and_failures(self):
+        cases = (
+            ("search_world_view", {"query": "café"}, "", None, "empty", ""),
+            ("search_user_info", {"name": "Jamie", "query": "drinks"}, ("", {}), None, "empty",
+             {"user_id": 7, "name": "Jamie", "facts": "", "profile": {}}),
+            ("search_world_view", {"query": "café"}, RuntimeError("memory offline"), None, "error", "RuntimeError: memory offline"),
+            ("search_user_info", {"name": "Jamie", "query": "drinks"}, RuntimeError("profile offline"), None, "error", "RuntimeError: profile offline"),
+            ("search_user_info", {"name": "Jamie", "query": "drinks"}, ("", {}), {7: "Jamie", 8: " Jamie "},
+             "error", "ValueError: Unknown or ambiguous participant name"),
+            ("search_user_info", {"name": "Unknown", "query": "drinks"}, ("", {}), None,
+             "error", "ValueError: Unknown or ambiguous participant name"),
+            ("search_world_view", {"query": "café"}, TimeoutError("backend deadline"), None, "timeout", "TimeoutError: backend deadline"),
+        )
+        for name, arguments, outcome, senders, status, output in cases:
+            with self.subTest(name=name, status=status, outcome=outcome):
+                self.exporter.clear()
+                lookup = "search_worldview" if name == "search_world_view" else "search_user_info"
+                mock = AsyncMock(side_effect=outcome) if isinstance(outcome, Exception) else AsyncMock(return_value=outcome)
+                with self.tool_retrieval([[{"id": "lookup", "name": name, "args": arguments}]]), patch.object(
+                    llm, lookup, mock
+                ), traced_workflow("telegram_reply", "tool-burst"):
+                    result = await llm.context_fetcher_node(self.retrieval_state(senders=senders or {7: "Jamie"}))
+                    self.assertEqual(trace.get_current_span().name, "telegram_reply")
+                observation = result["tool_observations"][0]
+                self.assertEqual(observation["status"], status)
+                self.assertEqual(observation["raw_result"], output)
+                tools = [span for span in self.exporter.get_finished_spans()
+                         if span.attributes.get("openinference.span.kind") == "TOOL"]
+                self.assertEqual(len(tools), 1)
+                attrs = tools[0].attributes
+                self.assertEqual(attrs["tool.status"], status)
+                recorded = json.loads(attrs["output.value"]) if isinstance(output, dict) else attrs["output.value"]
+                self.assertEqual(recorded, output)
+                self.assertEqual(tools[0].status.status_code, StatusCode.OK if status == "empty" else StatusCode.ERROR)
+
+    async def test_memory_deadline_exports_partial_results_and_restores_context(self):
+        calls = [
+            {"id": "done", "name": "search_world_view", "args": {"query": "café"}},
+            {"id": "slow", "name": "search_user_info", "args": {"name": "Jamie", "query": "drinks"}},
+        ]
+
+        async def slow_lookup(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        with self.tool_retrieval([calls]), patch.object(llm, "search_user_info", slow_lookup), patch.object(
+            llm, "CONTEXT_FETCHER_TIMEOUT", 0.05
+        ), traced_workflow("telegram_reply", "tool-burst"):
+            result = await llm.context_fetcher_node(self.retrieval_state())
+            self.assertEqual(trace.get_current_span().name, "telegram_reply")
+
+        self.assertEqual([observation["status"] for observation in result["tool_observations"]], ["success", "timeout"])
+        tools = [span for span in self.exporter.get_finished_spans()
+                 if span.attributes.get("openinference.span.kind") == "TOOL"]
+        self.assertEqual([span.name for span in tools], ["search_world_view", "search_user_info"])
+        self.assertEqual(tools[0].attributes["output.value"], "Café closes at 9.")
+        self.assertEqual(tools[1].attributes["output.value"], "Tool call exceeded the retrieval pass deadline.")
+        self.assertEqual(tools[1].attributes["tool.status"], "timeout")
+        self.assertEqual(tools[1].status.status_code, StatusCode.ERROR)
+
+    async def test_large_memory_results_are_not_truncated_without_call_ids(self):
+        facts = "Café 世界 " * 2000
+        profile = {"occupation": "student", "likes": "茶" * 10000}
+        calls = [
+            {"id": None, "name": "search_world_view", "args": {"query": "café"}},
+            {"id": None, "name": "search_user_info", "args": {"name": "Jamie", "query": "drinks"}},
+        ]
+        with self.tool_retrieval([calls]), patch.object(
+            llm, "search_worldview", AsyncMock(return_value=facts)
+        ), patch.object(llm, "search_user_info", AsyncMock(return_value=(facts, profile))), traced_workflow(
+            "telegram_reply", "tool-burst"
+        ):
+            await llm.context_fetcher_node(self.retrieval_state())
+        tools = [span for span in self.exporter.get_finished_spans()
+                 if span.attributes.get("openinference.span.kind") == "TOOL"]
+        self.assertEqual(len(tools), 2)
+        self.assertNotIn("tool.id", tools[0].attributes)
+        self.assertEqual(tools[0].attributes["output.value"], facts)
+        self.assertEqual(json.loads(tools[1].attributes["output.value"]), {
+            "user_id": 7, "name": "Jamie", "facts": facts, "profile": profile,
+        })
+
+    async def test_proactive_schedule_results_keep_one_automatic_tool_span(self):
+        with self.tool_retrieval([[
+            {"id": "delete-1", "name": "delete_proactive_schedule", "args": {"schedule_id": 9}},
+        ]]), patch("app.repository.delete_proactive_schedule", AsyncMock(return_value=True)), patch(
+            "app.services.proactive._scheduler", None
+        ), traced_workflow("telegram_reply", "tool-burst"):
+            result = await llm.context_fetcher_node(self.retrieval_state())
+        self.assertEqual(result["tool_observations"][0]["raw_result"], {"deleted": True, "schedule_id": 9})
+        tools = [span for span in self.exporter.get_finished_spans()
+                 if span.attributes.get("openinference.span.kind") == "TOOL"]
+        self.assertEqual([span.name for span in tools], ["delete_proactive_schedule"])
+        self.assertEqual(json.loads(tools[0].attributes["output.value"]), {"deleted": True, "schedule_id": 9})
 
     @contextmanager
     def proactive_delivery(self):

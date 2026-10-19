@@ -5,10 +5,13 @@ import math
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator
 
-from openinference.instrumentation import using_attributes
+from openinference.instrumentation import get_attributes_from_context, using_attributes
 from openinference.instrumentation.langchain import get_current_span as get_langchain_span
 from openinference.semconv.trace import SpanAttributes
 from opentelemetry import context, trace
+from opentelemetry.trace import StatusCode
+
+from app.services.context import ToolObservation
 
 
 @contextmanager
@@ -37,6 +40,51 @@ def traced_workflow(
                 yield
     finally:
         context.detach(token)
+
+
+@contextmanager
+def traced_tool_call(observation: ToolObservation, call_id: str | None = None) -> Iterator[None]:
+    """Trace a direct lookup using its final observation, including cancellation.
+
+    The caller updates the observation before exiting. An interrupted retrieval
+    keeps its reserved timeout result, so even a cancelled call exports output.
+    LangChain tools already have automatic spans and must not use this helper.
+    """
+    parent = get_langchain_span()
+    parent_context = trace.set_span_in_context(parent) if parent is not None else None
+    with trace.get_tracer(__name__).start_as_current_span(
+        observation["tool_name"], context=parent_context,
+    ) as span:
+        span.set_attributes(dict(get_attributes_from_context()))
+        span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, "TOOL")
+        span.set_attribute(SpanAttributes.TOOL_NAME, observation["tool_name"])
+        if call_id:
+            span.set_attribute(SpanAttributes.TOOL_ID, call_id)
+        span.set_attribute(SpanAttributes.INPUT_MIME_TYPE, "application/json")
+        span.set_attribute(
+            SpanAttributes.INPUT_VALUE,
+            json.dumps(observation["arguments"], ensure_ascii=False, default=str),
+        )
+        span.set_attribute("tool.pass_number", observation["pass_number"])
+        span.set_attribute("tool.result_category", observation["result_category"])
+        try:
+            yield
+        finally:
+            result = observation["raw_result"]
+            status = observation["status"]
+            span.set_attribute("tool.status", status)
+            span.set_attribute(
+                SpanAttributes.OUTPUT_MIME_TYPE,
+                "text/plain" if isinstance(result, str) else "application/json",
+            )
+            span.set_attribute(
+                SpanAttributes.OUTPUT_VALUE,
+                result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str),
+            )
+            if status in {"error", "timeout"}:
+                span.set_status(StatusCode.ERROR, str(result))
+            else:
+                span.set_status(StatusCode.OK)
 
 
 @contextmanager

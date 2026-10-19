@@ -191,6 +191,8 @@ The admin bot supports prompt getters, user/chat inspection, history/summary get
 
 `rachel_agent_loop_outcomes_total{outcome}` and the `rachel_agent_context_passes` histogram cover admitted reactive/proactive loops. Phoenix workflow spans (`telegram_reply`, `telegram_proactive`, `memory_update`) are separate roots, grouped with a `burst_sessions` session ID when available and Telegram chat metadata. The direct JEV call has a manual LLM span including validated probability, model/provider, and available usage/cost.
 
+Direct world-view and user-memory lookups use `traced_tool_call` in `app/services/tracing.py` to create `TOOL` spans under the active context-fetcher span in both reply graphs. Spans preserve session/chat metadata and record tool name/call ID, arguments, retrieval pass/category/status, and complete results (text or JSON, including personal facts and the structured profile). Empty results, errors, and deadline cancellations retain their observation status/output; errors and timeouts mark the tool span as failed without changing reply handling. Calendar, proactive-schedule, and URL tools keep their automatic LangChain spans to avoid duplicates.
+
 ## Known limitations
 
 - Run one app process: Telethon sessions, timers, caches, locks, and APScheduler are process-local; Prometheus uses the default single-process registry. Multiple workers would duplicate scheduling and require coordination.

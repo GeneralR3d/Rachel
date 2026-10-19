@@ -12,6 +12,7 @@ import json
 import math
 import re
 import time
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 
 SGT = timezone(timedelta(hours=8))
@@ -35,7 +36,7 @@ from app.services.prompt_builders import (
     build_url_context_message,
     split_url_observations,
 )
-from app.services.tracing import traced_jev_decision
+from app.services.tracing import traced_jev_decision, traced_tool_call
 
 _tokenizer = tiktoken.get_encoding("cl100k_base")
 
@@ -670,36 +671,41 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
             observation['url_attempted'] = True
         # Reserve attempts before awaiting so a cancelled pass still consumes them.
         observations.append(observation)
-        try:
-            if name == fetch_url.name:
-                result = await _context_tools_by_name[name].ainvoke(observation['arguments'])
-                usable = bool(result['content'].strip())
-            elif name == search_world_view.name:
-                result = await search_worldview(arguments.get("query", ""), raise_on_error=True)
-                usable = bool(result and result.strip())
-            elif name == search_user_info_tool.name:
-                uid = _resolve_name_to_id(arguments.get("name", ""), _build_name_to_id(senders))
-                if uid is None:
-                    raise ValueError("Unknown or ambiguous participant name")
-                facts, profile = await search_user_info(uid, arguments.get("query", ""), raise_on_error=True)
-                result = {"user_id": uid, "name": senders[uid], "facts": facts, "profile": profile}
-                usable = bool(facts.strip() or any(str(v).strip() for v in profile.values() if v is not None))
-            else:
-                tool = _context_tools_by_name.get(name)
-                if tool is None:
-                    raise ValueError(f"Unknown tool '{name}'")
-                if _context_category(name) == "proactive_schedules":
-                    result = await tool.ainvoke(arguments, config={
-                        "configurable": {"current_chat_id": state.get("chat_id")},
-                    })
+        # Memory lookups bypass LangChain's tool wrappers; trace those explicitly.
+        tool_trace = traced_tool_call(observation, tc.get("id")) if name in {
+            search_world_view.name, search_user_info_tool.name,
+        } else nullcontext()
+        with tool_trace:
+            try:
+                if name == fetch_url.name:
+                    result = await _context_tools_by_name[name].ainvoke(observation['arguments'])
+                    usable = bool(result['content'].strip())
+                elif name == search_world_view.name:
+                    result = await search_worldview(arguments.get("query", ""), raise_on_error=True)
+                    usable = bool(result and result.strip())
+                elif name == search_user_info_tool.name:
+                    uid = _resolve_name_to_id(arguments.get("name", ""), _build_name_to_id(senders))
+                    if uid is None:
+                        raise ValueError("Unknown or ambiguous participant name")
+                    facts, profile = await search_user_info(uid, arguments.get("query", ""), raise_on_error=True)
+                    result = {"user_id": uid, "name": senders[uid], "facts": facts, "profile": profile}
+                    usable = bool(facts.strip() or any(str(v).strip() for v in profile.values() if v is not None))
                 else:
-                    result = await tool.ainvoke(arguments)
-                usable = result is not None and bool(str(result).strip())
-            observation.update(status="success" if usable else "empty", raw_result=result)
-        except asyncio.TimeoutError as e:
-            observation.update(status="timeout", raw_result=f"TimeoutError: {e}")
-        except Exception as e:
-            observation.update(status="error", raw_result=f"{type(e).__name__}: {e}")
+                    tool = _context_tools_by_name.get(name)
+                    if tool is None:
+                        raise ValueError(f"Unknown tool '{name}'")
+                    if _context_category(name) == "proactive_schedules":
+                        result = await tool.ainvoke(arguments, config={
+                            "configurable": {"current_chat_id": state.get("chat_id")},
+                        })
+                    else:
+                        result = await tool.ainvoke(arguments)
+                    usable = result is not None and bool(str(result).strip())
+                observation.update(status="success" if usable else "empty", raw_result=result)
+            except asyncio.TimeoutError as e:
+                observation.update(status="timeout", raw_result=f"TimeoutError: {e}")
+            except Exception as e:
+                observation.update(status="error", raw_result=f"{type(e).__name__}: {e}")
 
 
 async def context_fetcher_node(state: GraphState) -> Dict:
