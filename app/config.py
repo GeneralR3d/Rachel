@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # single-key setups keep working; see graphiti_api_key.
     merge_gateway_graphiti_api_key: str | None = None
 
+    # Optional: startup and non-search tools work without an Exa key.
+    exa_api_key: str | None = None
+
     # Replaced by the MERGE_GATEWAY_* settings above; kept for reference.
     # openrouter_api_key: str
     # openrouter_graphiti_api_key: str | None = None
@@ -55,7 +58,9 @@ class Settings(BaseSettings):
     # Decision model used only by the reply-gating router.
     decisions_llm: str = "typesafe/jev-1.13"
     # Total retrieval passes within a single reply, including the initial fetch.
-    agent_max_context_passes: int = Field(default=3, ge=1, le=10)
+    agent_max_context_passes: int = Field(default=8, ge=1, le=10)
+    # Distinct Exa attempts across all retrieval passes; zero disables attempts.
+    agent_max_search_attempts: int = Field(default=4, ge=0)
     # Smaller/cheaper model Graphiti uses for its internal helper + reranker calls.
     llm_small_model: str = Field(
         "deepseek/deepseek-v4-flash",

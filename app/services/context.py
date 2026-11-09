@@ -13,6 +13,7 @@ class ToolObservation(TypedDict):
     status: Literal["success", "empty", "error", "timeout"]
     raw_result: Any
     url_attempted: NotRequired[bool]
+    search_attempted: NotRequired[bool]
 
 
 class ResponderContext(TypedDict):

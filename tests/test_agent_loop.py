@@ -83,6 +83,17 @@ class AgentContractTests(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 Settings(**credentials, agent_max_context_passes=count)
 
+    def test_search_budget_environment_and_validation(self):
+        credentials = dict(telegram_api_id=1, telegram_api_hash="test", telegram_bot_token="test",
+                           merge_gateway_api_key="test", _env_file=None)
+        with patch.dict('os.environ', {'AGENT_MAX_SEARCH_ATTEMPTS': '4'}):
+            self.assertEqual(Settings(**credentials).agent_max_search_attempts, 4)
+        for count in (0, 1, 3, 20):
+            self.assertEqual(Settings(**credentials, agent_max_search_attempts=count).agent_max_search_attempts, count)
+        for count in (-1, 1.5, 'invalid'):
+            with self.assertRaises(ValidationError):
+                Settings(**credentials, agent_max_search_attempts=count)
+
 
 class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -251,9 +262,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         result = await self.run_graph()
         self.assertEqual(result["context_passes"], 1)
         self.assertIn("live flights", result["response_text"])
-        prompt = "\n".join(str(m.content) for m in responder.messages[0])
-        self.assertIn("capabilities", prompt.lower())
-        self.assertIn("not web search", prompt.lower())
+        self.assertEqual(len(responder.messages), 1)
 
     async def test_recursion_guard_uses_prepared_reply(self):
         self.models([calls(("get_day_overview", {"day": "Friday"}))], [reply("fetch_more", "Which time?", "Friday details")])
@@ -626,6 +635,180 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(url_data), 1)
             self.assertIn(marker, url_data[0].content)
         self.assertIn('HTTP 403', responder.messages[-1][2].content)
+
+
+    async def test_search_then_page_read_in_both_graphs(self):
+        for proactive in (False, True):
+            with self.subTest(proactive=proactive):
+                fetcher, responder = self.models([
+                    calls(('search_web', {'query': ' tea sources '})),
+                    calls(('fetch_url', {'url': 'https://example.com/tea'})),
+                ], [reply('fetch_more', 'Which tea?', 'Read the source for brewing details'),
+                    reply(content='The source says to brew for two minutes.')])
+                search = AsyncMock(return_value={'query': 'tea sources', 'mode': 'urls',
+                                                'results': ['https://example.com/tea']})
+                fetch = AsyncMock(return_value={'content': 'Brew for two minutes.'})
+                with patch.dict(llm._context_tools_by_name, {
+                    'search_web': SimpleNamespace(ainvoke=search), 'fetch_url': SimpleNamespace(ainvoke=fetch),
+                }):
+                    if proactive:
+                        result = await llm._build_proactive_graph().ainvoke(
+                            state(intent='Share a tea brewing tip'), {'recursion_limit': 30})
+                    else:
+                        result = await self.run_graph(budget=3)
+                self.assertEqual(result['context_passes'], 2)
+                self.assertEqual([o['result_category'] for o in result['tool_observations']],
+                                 ['web_search', 'url_content'])
+                self.assertEqual([o['status'] for o in result['tool_observations']], ['success', 'success'])
+                self.assertEqual(result['response_text'], 'The source says to brew for two minutes.')
+                self.assertIn('Brew for two minutes.', responder.messages[-1][2].content)
+                self.assertIn('https://example.com/tea', fetcher.messages[-1][2].content)
+                self.assertIn('search_web', fetcher.bound_tool_names)
+                search.assert_awaited_once_with({'query': 'tea sources', 'num_results': 5})
+
+    async def test_configured_search_results_do_not_trigger_automatic_page_fetch(self):
+        for mode, sources in (('text', [{'url': 'https://example.com', 'highlights': ['Tea is brewed.'],
+                                        'truncated': False}]), ('urls', ['https://example.com'])):
+            for proactive in (False, True):
+                with self.subTest(mode=mode, proactive=proactive):
+                    self.models([calls(('search_web', {'query': 'tea'}))],
+                                [reply(content='Here is a source: https://example.com')])
+                    search = AsyncMock(return_value={'query': 'tea', 'mode': mode, 'results': sources})
+                    fetch = AsyncMock(side_effect=AssertionError('Unrequested page fetch'))
+                    with patch.dict(llm._context_tools_by_name, {
+                        'search_web': SimpleNamespace(ainvoke=search), 'fetch_url': SimpleNamespace(ainvoke=fetch),
+                    }):
+                        result = (await llm._build_proactive_graph().ainvoke(state(intent='Share tea sources'))
+                                  if proactive else await self.run_graph())
+                    self.assertEqual(result['context_passes'], 1)
+                    self.assertEqual(len(result['tool_observations']), 1)
+                    self.assertEqual(result['tool_observations'][0]['status'], 'success')
+                    fetch.assert_not_awaited()
+
+    async def test_search_attempt_limit_is_configurable_in_both_graphs(self):
+        for proactive in (False, True):
+            for limit in (0, 1, 3):
+                with self.subTest(proactive=proactive, limit=limit):
+                    fetcher, responder = self.models([
+                        calls(('search_web', {'query': 'tea'}),
+                              ('search_web', {'query': 'coffee'})),
+                        calls(('search_web', {'query': ' tea ', 'num_results': 5}),
+                              ('search_web', {'query': 'cocoa'}),
+                              ('search_web', {'query': 'water'})),
+                    ], [reply('fetch_more', 'Which drink?', 'Find another source'), reply()])
+                    search = AsyncMock(return_value={'query': 'drink', 'mode': 'urls',
+                                                    'results': ['https://example.com']})
+                    with patch.object(llm.settings, 'agent_max_search_attempts', limit), \
+                            patch.dict(llm._context_tools_by_name, {
+                                'search_web': SimpleNamespace(ainvoke=search),
+                            }):
+                        result = (await llm._build_proactive_graph().ainvoke(state(intent='Share drink sources'))
+                                  if proactive else await self.run_graph())
+                    observations = result['tool_observations']
+                    self.assertEqual(sum(bool(o.get('search_attempted')) for o in observations), limit)
+                    self.assertEqual([o['arguments']['query'] for o in observations if o['status'] == 'success'],
+                                     ['tea', 'coffee', 'cocoa'][:limit])
+                    self.assertEqual(observations[-1]['status'], 'error')
+                    self.assertIn('limit', observations[-1]['raw_result'])
+                    for model in (fetcher, responder):
+                        self.assertTrue(any(
+                            f'Web search attempt limit for this graph run: {limit}.' in message.content
+                            for message in model.messages[0] if message.type == 'system'
+                        ))
+
+    async def test_search_dedup_defaults_limit_failures_and_invalid_arguments(self):
+        self.models([
+            calls(('search_web', {'query': ' '}), ('search_web', {'query': 'tea', 'num_results': 0}),
+                  ('search_web', {'query': ' tea '}), ('search_web', {'query': 'tea', 'num_results': 5})),
+            calls(('search_web', {'query': 'tea'}), ('search_web', {'query': 'coffee'}),
+                  ('search_web', {'query': 'other'})),
+            calls(('search_web', {'query': 'coffee'}), ('search_web', {'query': 'other'})),
+        ], [reply('fetch_more', 'Which tea?', 'Need sources')] * 3)
+        search = AsyncMock(side_effect=[ValueError('No credentials'), TimeoutError('Search deadline')])
+        with patch.dict(llm._context_tools_by_name, {'search_web': SimpleNamespace(ainvoke=search)}):
+            result = await self.run_graph(budget=3)
+        self.assertEqual(search.await_count, 2)
+        observations = result['tool_observations']
+        self.assertEqual(len(observations), 5)
+        self.assertEqual([o['status'] for o in observations], ['error', 'error', 'error', 'timeout', 'error'])
+        self.assertEqual([o.get('search_attempted') for o in observations], [False, False, True, True, False])
+        self.assertIn('limit', observations[-1]['raw_result'])
+        self.assertEqual(result['loop_outcome'], 'capped')
+        self.assertEqual(result['response_text'], 'Which tea?')
+
+    async def test_telegram_graph_retry_can_repeat_web_searches_and_url_reads(self):
+        from app.telegram import client as telegram
+        outputs = [calls(('search_web', {'query': 'tea'}), ('search_web', {'query': 'coffee'}),
+                         ('fetch_url', {'url': 'https://example.com/source'})),
+                   calls(('search_web', {'query': ' tea '}), ('search_web', {'query': 'third'}),
+                         ('fetch_url', {'url': 'https://example.com/source'}))]
+        fetcher, responder = self.models(outputs, [RuntimeError('temporary responder failure'), reply()])
+        search = AsyncMock(return_value={'query': 'tea', 'mode': 'urls', 'results': ['https://example.com']})
+        fetch = AsyncMock(return_value={'content': 'Brew tea.'})
+        kwargs = {'history': state()['history'], 'must_reply': True, 'senders': {7: 'Jamie'}}
+        with patch.dict(llm._context_tools_by_name, {'search_web': SimpleNamespace(ainvoke=search),
+                                                  'fetch_url': SimpleNamespace(ainvoke=fetch)}), \
+                patch.object(telegram, 'get_response', llm.get_response), \
+                patch.object(llm, '_graph', llm._build_graph()):
+            result = await telegram._generate_response_with_retry(kwargs, None, 7)
+            self.assertEqual(result[0], 'Can meet at six!')
+            self.assertEqual(search.await_count, 4)
+            self.assertEqual(fetch.await_count, 2)
+            data = responder.messages[-1][2].content
+            self.assertIn('Brew tea.', data)
+            self.assertNotIn('Web search attempt limit', data)
+            self.assertFalse(any('Brew tea.' in m.content for m in responder.messages[-1] if m.type == 'system'))
+            # A later reply (even the same chat/query) has its own allowance.
+            self.models([calls(('search_web', {'query': 'tea'}))], [reply()])
+            await telegram._generate_response_with_retry(kwargs, None, 7)
+        self.assertEqual(search.await_count, 5)
+
+    async def test_successful_and_empty_searches_are_reused_across_passes(self):
+        for sources, expected_status in ((['https://example.com'], 'success'), ([], 'empty')):
+            with self.subTest(status=expected_status):
+                self.models([
+                    calls(('search_web', {'query': ' tea '})),
+                    calls(('search_web', {'query': 'tea', 'num_results': 5})),
+                ], [reply('fetch_more', 'Which tea?', 'Need details'), reply()])
+                search = AsyncMock(return_value={'query': 'tea', 'mode': 'urls', 'results': sources})
+                with patch.dict(llm._context_tools_by_name, {'search_web': SimpleNamespace(ainvoke=search)}):
+                    result = await self.run_graph(budget=3)
+                self.assertEqual(len(result['tool_observations']), 1)
+                self.assertEqual(result['tool_observations'][0]['status'], expected_status)
+                self.assertEqual(result['tool_observations'][0]['pass_number'], 1)
+                search.assert_awaited_once_with({'query': 'tea', 'num_results': 5})
+
+    async def test_search_pass_deadline_reserves_attempt_and_preserves_prior_work(self):
+        self.models([
+            calls(('search_web', {'query': 'tea'}), ('search_web', {'query': 'tea details'})),
+            calls(('search_web', {'query': ' tea details '}), ('search_web', {'query': 'third'})),
+        ], [reply('fetch_more', 'Which tea?', 'Check tea details'), reply()])
+        async def search(args):
+            if args['query'] == 'tea':
+                return {'query': 'tea', 'mode': 'urls', 'results': ['https://example.com']}
+            await asyncio.Event().wait()
+        search_mock = AsyncMock(side_effect=search)
+        with patch.dict(llm._context_tools_by_name, {'search_web': SimpleNamespace(ainvoke=search_mock)}), \
+                patch.object(llm, 'CONTEXT_FETCHER_TIMEOUT', 0.03):
+            result = await self.run_graph(budget=3)
+        self.assertEqual(search_mock.await_count, 2)
+        observations = result['tool_observations']
+        self.assertEqual([o['status'] for o in observations], ['success', 'timeout', 'error'])
+        self.assertTrue(observations[1]['search_attempted'])
+        self.assertEqual(observations[0]['raw_result']['results'], ['https://example.com'])
+        self.assertIn('limit', observations[-1]['raw_result'])
+
+    async def test_search_empty_results_and_missing_excerpts_have_distinct_status(self):
+        self.models([calls(('search_web', {'query': 'empty'}), ('search_web', {'query': 'links'}))],
+                    [reply()])
+        search = AsyncMock(side_effect=[
+            {'query': 'empty', 'mode': 'urls', 'results': []},
+            {'query': 'links', 'mode': 'text', 'results': [{'url': 'https://example.com',
+                                                        'highlights': [], 'truncated': False}]},
+        ])
+        with patch.dict(llm._context_tools_by_name, {'search_web': SimpleNamespace(ainvoke=search)}):
+            result = await self.run_graph()
+        self.assertEqual([o['status'] for o in result['tool_observations']], ['empty', 'success'])
 
 
 if __name__ == "__main__":

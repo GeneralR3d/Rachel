@@ -188,11 +188,13 @@ class PromptBuilderTests(unittest.TestCase):
             {'tool_name': 'fetch_url', 'result_category': 'other'},
             {'tool_name': 'memory', 'result_category': 'worldview'},
             {'tool_name': 'alias', 'result_category': 'url_content'},
+            {'tool_name': 'search_web', 'result_category': 'other'},
+            {'tool_name': 'alias', 'result_category': 'web_search'},
         ]
         original = deepcopy(observations)
         other, urls = prompt_builders.split_url_observations(observations)
         self.assertEqual(other, [original[0], original[2]])
-        self.assertEqual(urls, [original[1], original[3]])
+        self.assertEqual(urls, [original[1], original[3], original[4], original[5]])
         self.assertEqual(observations, original)
 
     def test_url_data_serializes_all_statuses_and_omits_empty_input(self):
