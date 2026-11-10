@@ -142,16 +142,27 @@ Set `AGENT_MAX_CONTEXT_PASSES` to **1–10** (default **3**, including the initi
 
 The Mermaid above documents the current reply flow. The PNG renderer registers four workflows, but its required `scripts/graph_llm.mmd` source is absent from this checkout. Consequently, `scripts.draw_graphs` fails and `GET /architecture` returns HTTP 502 until that file is restored. The checked-in workflow PNGs may be stale.
 
+### Web search
+
+`search_web(query, num_results=5)` uses the official async Exa SDK to find missing public facts. Set optional `EXA_API_KEY` in `.env` to enable requests; startup works without it and searches report a clear configuration error. Queries must be nonblank and result counts range from **1–10**.
+
+- Rachel receives source URL strings and cannot select the output format. Developers can change `SEARCH_MODE` in `app/services/web_search.py` from `"urls"` to `"text"` to request source highlights with URLs, optional titles, excerpts, and a local truncation flag. Combined excerpts are capped at **2,000 characters per source**. Links remain available when excerpts are missing. No generated answers or summaries are requested.
+- At most **`AGENT_MAX_SEARCH_ATTEMPTS` Exa attempts per graph run** (default **2**, **0** disables attempts), across all passes. Both agents receive the configured limit in runtime instructions. Trimmed query and result count define an attempt; omitted defaults normalize identically. Failures and timeouts consume attempts and are reused; invalid arguments consume none. Restarting the whole graph starts fresh, so the Telegram retry can repeat searches and URL reads.
+- A **15-second total deadline** and a **15-second SDK network timeout** bound each search inside the existing 30-second pass deadline. Clients are created lazily and closed after use. Errors are sanitized; there are no application-level automatic retries.
+- The fetcher selects tools once per pass. The responder can return source links or request a later pass to read selected search-discovered URLs when it needs page contents. Searches do not trigger automatic page fetches and do not replace participant memory.
+
+Search and fetched-page payloads, including titles, excerpts and failures, are explicitly untrusted data supplied to both agents separately from system instructions. Earlier observations survive later failures. The three-pass default and separate two-URL allowance apply within each graph run.
+
 ### URL reading
 
 `fetch_url` performs GET requests for public HTML, plain text, Markdown, and JSON, including JSON media types ending in `+json`. HTML is converted to readable Markdown with links and tables; extraction runs off the event loop. Results include the requested/final URL, media type, optional title, source content, and a truncation flag.
 
-- At most **two distinct normalized URL attempts per reply**, across all retrieval passes; successful and failed attempts are reused.
+- At most **two distinct normalized URL attempts per graph run**, across all retrieval passes; successful and failed attempts are reused.
 - A **10-second** overall fetch deadline, at most **three redirects**, a **2 MiB** decoded response limit, and **12,000 characters** of returned content.
 - Standard HTTP/HTTPS ports only; credentials in URLs, private or special-purpose destinations, and DNS answers containing non-public addresses are rejected. Redirect targets are revalidated and connections use a pinned address.
 - Fetches do not use environment proxies or application authentication; cookies do not carry between redirect hops.
 
-This is a source reader, without web search, crawling, JavaScript execution, login, PDF parsing, or binary downloads. URL payloads are explicitly labeled untrusted and supplied separately from system instructions.
+This source reader complements Exa search; it does not crawl, execute JavaScript, log in, parse PDFs, or download binary files. URL payloads are explicitly labeled untrusted and supplied separately from system instructions.
 
 ### Memory workflows
 
@@ -176,6 +187,7 @@ History uses the composite key `(chat_id, telegram_message_id)`, since Telegram 
 | Operational data | PostgreSQL 16 · SQLAlchemy 2 · asyncpg | Histories, summaries, moods, watermarks, profiles, traits, activities, outreach, and active models |
 | Schema changes | Alembic | Versioned PostgreSQL migrations |
 | Structured data | Pydantic 2 · pydantic-settings | Validated model output, API bodies, and environment configuration |
+| Public web search | Exa Python SDK (`AsyncExa`) | Source links or bounded relevant excerpts |
 | Public URL content | HTTPX · Trafilatura | Bounded HTTP retrieval and HTML-to-Markdown extraction |
 | Observability | Prometheus · Phoenix OTEL · OpenInference | Model/loop metrics, workflow traces, router decisions, and tool evidence |
 | Admin UI | Vanilla HTML/CSS/JavaScript | Single-file dashboard with no frontend build step |
@@ -189,7 +201,7 @@ History uses the composite key `(chat_id, telegram_message_id)`, since Telegram 
 - Media placeholders for stickers, GIFs, photos, videos, voice messages, audio, and files
 - Seven conversation moods, with successful summarizer updates available in the current reply
 - Twelve live-tunable personality sliders and a seeded weekly schedule in Singapore time
-- Bounded retrieval across calendar, world-view, user facts/profiles, public URLs, and schedule tools
+- Bounded retrieval across calendar, world-view, user facts/profiles, public web search, public URLs, and schedule tools
 - Proactive reminders and check-ins with cron, timezone, lifetime attempt limits, and run status
 - Chat-scoped schedule creation and management through conversation
 - Temporal world and per-user knowledge graphs with scoped Graphiti group IDs
@@ -314,6 +326,10 @@ Default: `openai/text-embedding-3-small`
 **`AGENT_MAX_CONTEXT_PASSES`** *(optional)*
 Sets the total retrieval-pass budget for each reactive or proactive reply, including the initial pass. Choose an integer from **1–10**; values outside that range fail settings validation.
 Default: `3`
+
+**`AGENT_MAX_SEARCH_ATTEMPTS`** *(optional)*
+Sets the maximum number of distinct Exa searches per reactive or proactive graph run, across all retrieval passes. Choose a nonnegative integer; **0** disables attempts. Failed and timed-out attempts count; identical normalized searches are reused. Restart the application after changing this setting. This budget is separate from `AGENT_MAX_CONTEXT_PASSES` and the two-URL reading limit.
+Default: `2`
 
 The database-backed model selector can override the main, small, and embedding values at runtime. Startup seeds missing selections without overwriting existing admin choices. Legacy `OPENROUTER_MODEL`, `OPENROUTER_SMALL_MODEL`, and `OPENROUTER_EMBEDDING_MODEL` names are accepted only as compatibility aliases for model IDs; the commented `OPENROUTER_API_KEY`, `OPENROUTER_GRAPHITI_API_KEY`, and `OPENROUTER_BASE_URL` template entries are retired and have no effect.
 

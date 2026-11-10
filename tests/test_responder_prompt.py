@@ -43,6 +43,7 @@ class ResponderPromptTests(unittest.IsolatedAsyncioTestCase):
             patch.object(llm, "CONVERSATION_STYLE", {"default": "casual", "reflective": "thoughtful {茶}"}),
             patch.object(llm, "_get_responder_llm", AsyncMock(return_value=model)),
             patch.object(llm.settings, "agent_max_context_passes", 3),
+            patch.object(llm.settings, "agent_max_search_attempts", 4),
             patch.object(llm, "datetime") as clock,
             patch.object(llm, "build_responder_context",
                          wraps=prompt_builders.build_responder_context) as normalize,
@@ -71,7 +72,11 @@ class ResponderPromptTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertIn("Cafe 茶 {value}", messages[0].content)
         self.assertNotIn("unavailable {value}", messages[0].content)
-        self.assertTrue(messages[1].content.startswith("Loop instructions {茶}\nLoop state: "))
+        instructions = (
+            "Loop instructions {茶}\nWeb search attempt limit for this graph run: 4. "
+            "This total spans all retrieval passes and includes failed and timed-out attempts."
+        )
+        self.assertTrue(messages[1].content.startswith(instructions + "\nLoop state: "))
         self.assertEqual(json.loads(messages[1].content.split("Loop state: ", 1)[1]), {
             "context_passes": 2, "max_context_passes": 3, "remaining_steps": 9,
             "retrieval_status": json.dumps(original[1], ensure_ascii=False),
@@ -92,7 +97,7 @@ class ResponderPromptTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         loop.assert_called_once_with(
-            instructions="Loop instructions {茶}", context_passes=2, max_context_passes=3,
+            instructions=instructions, context_passes=2, max_context_passes=3,
             remaining_steps=9, context=build.call_args.kwargs["context"],
         )
         self.assertIs(build.call_args.kwargs["context"], loop.call_args.kwargs["context"])

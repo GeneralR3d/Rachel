@@ -4,6 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Keep this repository guidance synchronized between `AGENTS.md` and `CLAUDE.md`; only the title and agent introduction should differ.
 
+## Git workflow
+
+Do not create Git commits unless the user explicitly asks you to commit. Requests to implement, edit, fix, or test changes do not authorize a commit. Leave changes uncommitted for the user to review and commit themselves.
+
 ## Setup and commands
 
 Python **3.11+** and `uv` are required. Run commands from the repository root.
@@ -55,6 +59,7 @@ Rachel is a FastAPI application with two Telethon clients and an in-process APSc
 - `app/telegram/bot.py`: separate `TelegramClient("bot", ...)` restricted to `ADMIN_ID`.
 - `app/services/llm.py`: compiled reactive and proactive LangGraph workflows, lazy model clients, router decisions, retrieval passes, and responder validation.
 - `app/prompts.py`: source-controlled system prompts, tool guidance, persona, moods, trait defaults, and profile schema. Prompts are no longer stored or edited in Postgres.
+- `app/services/web_search.py` and `app/services/url_fetch.py`: bounded public web search through the async Exa SDK and public page reading.
 - `app/services/prompt_builders.py` and `app/services/context.py`: pure prompt/context assembly and typed raw tool observations.
 - `app/services/proactive.py`, `app/services/proactive_schemas.py`, and `app/services/proactive_tools.py`: scheduler lifecycle, shared validation, and chat-scoped schedule tools.
 - `app/services/memory.py`, `app/services/worldview.py`, `app/services/userfacts.py`, and `app/services/graphiti.py`: conversation extraction and persistent memory.
@@ -95,7 +100,7 @@ admission -> summarizer -----------------> responder -> END
 
 - **Router:** direct `httpx` POST to `merge_gateway_base_url + "/decisions"`, with a 15-second timeout and model `DECISIONS_LLM` (default `typesafe/jev-1.13`). It sees the summary and latest **15** messages, chooses `ROUTER_PRIVATE_QUESTION` or `ROUTER_GROUP_QUESTION`, validates a finite `noul` probability in `[0, 1]`, and replies at **>= 0.7**. Errors or invalid answers fail open. Rejection skips summarization, retrieval, and response generation.
 - **Summarizer:** uses `SUMMARIZER_SYSTEM_PROMPT`, the entire undivided history, and a dynamic mood enum from `CONVERSATION_STYLE`. Its output schema requests a summary of at most 200 words, or `NIL` to preserve the summary, plus mood. Failures preserve existing state. The responder reads the joined graph state's mood, including a successful current-call update; `get_response` also saves it in `_chat_mood` for later calls. Older comments claiming a deliberate one-call mood lag do not match this implementation.
-- **Context fetcher:** owns all tool execution. `CONTEXT_TOOLS` combines `CALENDAR_TOOLS`, `search_world_view`, the name-based `search_user_info_tool`, and `PROACTIVE_TOOLS`. Each pass makes one tool-selection call and executes its requested tools sequentially under a shared **30-second** deadline. Completed results survive a later timeout.
+- **Context fetcher:** owns all tool execution. `CONTEXT_TOOLS` combines `CALENDAR_TOOLS`, `search_world_view`, the name-based `search_user_info_tool`, `PROACTIVE_TOOLS`, `fetch_url`, and `search_web`. Search uses the `web_search` category; page reads use `url_content`. Each pass makes one tool-selection call and executes its requested tools sequentially under a shared **30-second** deadline. Completed results survive a later timeout.
 - **Observations:** `GraphState.tool_observations` accumulates `ToolObservation` records with pass number, tool name, arguments, category, status (`success`, `empty`, `error`, `timeout`), and raw result. Model failures, unknown tools, ambiguous participant names, and individual tool failures become explicit observations. Do not collapse failed retrieval into successful empty facts or replace observations with an LLM summary.
 - **Responder:** sees summary, traits, current mood/style, SGT date/time, history, and rendered observations. `ResponseOutput` requires `decision` (`respond` or `fetch_more`), `retrieval_request`, `content`, and `reason`, and forbids extra keys. It may request another lookup or supported schedule action; only the fetcher selects and executes tools. Even `fetch_more` must carry a sendable best-effort reply.
 - **Bounds/fallback:** `AGENT_MAX_CONTEXT_PASSES` defaults to **3**, accepts **1–10**, and includes the initial pass. Another pass requires a non-empty request, unused pass budget, and more than two remaining graph steps. Summarization is not repeated. The runner sets recursion limit `2 * passes + 8`; emergency recovery preserves an existing reply or supplies a clarification. Malformed responder output salvages visible `content` or prose without exposing serialized decision/handoff fields, then ends the loop. Outcomes are `first_pass`, `retried`, or `capped`.
@@ -136,6 +141,18 @@ Client settings differ deliberately: summarizer and memory extractors use `metho
 `PROACTIVE_TOOLS` exposes create, list, update, enable/disable, and delete operations to the fetcher. Tools obtain `current_chat_id` from application-supplied `RunnableConfig`, never model arguments, and scope reads/writes to that chat. Preserve these ownership checks. There is no agent-facing run-now tool. Tool create/update explicitly requires `repeat_times` (positive integer up to 99999 or null); HTTP permits positive Postgres bigint limits. Updates replace editable details and enable the job; toggling preserves them.
 
 Agent schedule writes use `apply_schedule_mutation` so persistence and live job synchronization finish in a strongly referenced shielded task even if the context pass times out. Shutdown pauses future occurrences and drains active executions and mutations before Telegram disconnects.
+
+## Public web search and URL content
+
+`search_web(query, num_results=5)` uses `exa-py`'s `AsyncExa` with `type="auto"`. Optional `EXA_API_KEY` is passed explicitly; an absent key allows startup but errors when invoked. The SDK client is created per call and closed with its async context manager. Both the total tool deadline (`asyncio.timeout`) and SDK network timeout are **15 seconds**, within the **30-second** context-pass deadline. SDK timeouts become timeout observations; cancellation propagates. Authentication, HTTP, rate-limit, malformed-response and network errors are sanitized without application-level retries.
+
+Queries are trimmed and nonblank; result counts must be integers **1–10**. The model-facing schema exposes only `query` and `num_results`, and rejects a `mode` argument. Output format is a developer choice: `SEARCH_MODE` in `app/services/web_search.py` defaults to `"urls"`; change it to `"text"` in code to enable highlights. URL mode returns URL strings and passes `contents=False` so the SDK omits `contents` on the wire (omitting the SDK argument would request full text). Text mode uses `contents={"highlights": True}` and returns source URLs, optional titles, highlights capped at **2,000 combined characters per result**, and a local truncation flag. No Exa-generated summaries or answers are requested. Missing excerpts retain links and count as success; an empty results list is `empty`.
+
+The shared reactive/proactive fetcher reserves up to **`AGENT_MAX_SEARCH_ATTEMPTS` Exa attempts per graph run** (default **2**, nonnegative; **0** disables attempts) before awaiting, counting errors and cancellations. Both agents receive the configured limit in runtime instructions. It validates and resolves defaults before deduplicating normalized `(query, num_results)` sets across passes; identical earlier attempts are reused regardless of outcome. Invalid arguments do not consume attempts. The Telegram whole-graph retry starts with fresh observations and allowances, so searches and URL reads may repeat after a restart; there is no cross-run retrieval session. Search does not automatically fetch pages: one tool-selection call runs per pass, and dependent reads of discovered URLs require a later pass. The default stays **three passes**, with a separate **two distinct normalized URL attempts** allowance per graph run.
+
+`fetch_url` supports public HTML, plain text, Markdown and JSON, including `+json`; HTML becomes readable Markdown off the event loop. It enforces a **10-second** total deadline, **three redirects**, **2 MiB** decoded response limit and **12,000-character** output cap. Standard HTTP/HTTPS ports and public destinations only; redirects are revalidated and DNS connections pinned. It cannot execute JavaScript, log in, parse PDFs or crawl.
+
+`split_url_observations` partitions both search and page observations before prompt projection. Their payloads, titles, excerpts and errors reach each agent once in a separate, explicitly untrusted human data message, outside system instructions. Preserve this boundary, raw observations, partial successes, and all existing statuses. Search is for relevant missing public facts, not ordinary conversation or a substitute for participant memory.
 
 ## Memory pipelines and Graphiti
 

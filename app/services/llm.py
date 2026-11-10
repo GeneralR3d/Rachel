@@ -26,6 +26,7 @@ from app.services import worldview
 from app.services.metrics import AGENT_CONTEXT_PASSES, AGENT_LOOP_OUTCOMES, LLM_CALLS, record_llm_error
 from app.services.context import ToolObservation
 from app.services.url_fetch import fetch_url, normalize_url
+from app.services.web_search import search_web, normalize_search_arguments
 from app.services.prompt_builders import (
     build_context_fetcher_handoff,
     build_context_fetcher_prompt,
@@ -361,7 +362,7 @@ async def _get_responder_llm():
 # some models — each pass has a hard timeout below and records failures as
 # observations, so a hang/error can never stall the pipeline.) CONTEXT_TOOLS is the
 # single source of truth for both the agent's tools and its dynamic prompt.
-CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool, *PROACTIVE_TOOLS, fetch_url]
+CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool, *PROACTIVE_TOOLS, fetch_url, search_web]
 
 
 class ContextFetcherPromptContext(TypedDict):
@@ -582,6 +583,8 @@ def _context_category(name: str) -> str:
         return "proactive_schedules"
     if name == fetch_url.name:
         return "url_content"
+    if name == search_web.name:
+        return "web_search"
     if name == search_world_view.name:
         return "worldview"
     if name == search_user_info_tool.name:
@@ -611,7 +614,7 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
     )
     participants = ", ".join(senders.values()) or "(unknown)"
     pass_number = state.get("context_passes", 0) + 1
-    # Keep URL payloads and failures out of the system-message handoff.
+    # Keep external web payloads and failures out of the system-message handoff.
     other_observations, url_observations = split_url_observations(observations)
     handoff = SystemMessage(content=build_context_fetcher_handoff(
         context_pass=pass_number,
@@ -669,6 +672,23 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
                 observations.append(observation)
                 continue
             observation['url_attempted'] = True
+        if name == search_web.name:
+            observation['search_attempted'] = False
+            try:
+                normalized = normalize_search_arguments(arguments)
+                observation['arguments'] = normalized
+                if any(o['tool_name'] == search_web.name and o['arguments'] == normalized
+                       for o in observations):
+                    continue
+                attempts = sum(bool(o.get('search_attempted')) for o in observations
+                               if o['tool_name'] == search_web.name)
+                if attempts >= settings.agent_max_search_attempts:
+                    raise ValueError('Web search attempt limit reached for this graph run')
+            except ValueError as error:
+                observation.update(status='error', raw_result=str(error))
+                observations.append(observation)
+                continue
+            observation['search_attempted'] = True
         # Reserve attempts before awaiting so a cancelled pass still consumes them.
         observations.append(observation)
         # Memory lookups bypass LangChain's tool wrappers; trace those explicitly.
@@ -677,7 +697,10 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
         } else nullcontext()
         with tool_trace:
             try:
-                if name == fetch_url.name:
+                if name == search_web.name:
+                    result = await _context_tools_by_name[name].ainvoke(observation['arguments'])
+                    usable = bool(result['results'])
+                elif name == fetch_url.name:
                     result = await _context_tools_by_name[name].ainvoke(observation['arguments'])
                     usable = bool(result['content'].strip())
                 elif name == search_world_view.name:

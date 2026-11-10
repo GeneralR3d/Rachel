@@ -21,6 +21,13 @@ class UrlPromptBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     'raw_result': {'title': marker, 'content': marker} if status == 'success' else marker,
                     'url_attempted': True,
                 } for status in ('success', 'empty', 'error', 'timeout')]
+                url_observations += [{
+                    'pass_number': 1, 'tool_name': 'search_web', 'arguments': {'query': marker},
+                    'result_category': 'web_search', 'status': status,
+                    'raw_result': {'query': marker, 'mode': 'text', 'results': [
+                        {'url': 'https://example.org/', 'title': marker, 'highlights': [marker]}
+                    ]} if status == 'success' else marker, 'search_attempted': True,
+                } for status in ('success', 'empty', 'error', 'timeout')]
                 other = [{'pass_number': 1, 'tool_name': 'calendar', 'arguments': {},
                           'result_category': 'schedule', 'status': 'success', 'raw_result': 'Friday free'}]
                 observations = [*url_observations, *other]
