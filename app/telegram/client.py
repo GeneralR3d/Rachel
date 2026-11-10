@@ -36,6 +36,7 @@ from app.repository import (
 )
 from app.services.llm import get_chat_mood, get_proactive_response, get_response, set_chat_mood
 from app.services.memory import update_memories
+from app.services.poll_tools import PollDeliveryRuntime
 from app.services.tracing import traced_workflow
 from app.telegram.bot import ADMIN
 from app.telegram.message_content import render_message_content
@@ -257,6 +258,8 @@ async def _append_or_persist_bot_message(
         # that arrived during the slow send are already buffered with higher
         # ids, and the reply belongs ahead of them (see _insert_by_message_id).
         if buffer is not None:
+            if any(message.telegram_message_id == message_id for message in buffer):
+                return
             _insert_by_message_id(
                 buffer,
                 BufferedMessage(
@@ -449,6 +452,16 @@ async def reply(event):
 
 
 async def _reply(event):
+    """Generate/deliver a normal reply and finish recording confirmed tool sends."""
+    me = await client.get_me()
+    poll_delivery = PollDeliveryRuntime(event.chat_id, me.id, client, _append_or_persist_bot_message)
+    try:
+        await _reply_with_delivery(event, me, poll_delivery)
+    finally:
+        await poll_delivery.finish_recording()
+
+
+async def _reply_with_delivery(event, me, poll_delivery: PollDeliveryRuntime):
     """
     Feed the most recent N_PAST_MSG_REQUIRED messages from the buffer as context,
     call the LLM, send the reply, and append the bot response back into the buffer.
@@ -457,7 +470,6 @@ async def _reply(event):
     chat_id = event.chat_id
     session_id = burst_sessions.get(chat_id)
     chat_name = _chat_display_name(getattr(event, "chat", None))
-    me = await client.get_me()
 
     if not client.is_connected():
         print(f"[{chat_id}] Client disconnected — skipping reply")
@@ -523,6 +535,7 @@ async def _reply(event):
                 "must_reply": must_reply,
                 "is_private": is_private,
                 "responded_watermark": watermark,
+                "poll_delivery": poll_delivery,
             },
             session_id,
             chat_id,
@@ -617,10 +630,12 @@ async def send_proactive_message(chat_id: int, intent: str, schedule_id: int) ->
             continue
         break
 
+    poll_delivery = None
     try:
         if not client.is_connected():
             raise RuntimeError("Telegram client is disconnected")
         me = await client.get_me()
+        poll_delivery = PollDeliveryRuntime(chat_id, me.id, client, _append_or_persist_bot_message)
         current_summary = await _load_summary_and_mood(chat_id)
         _context_msgs, context, senders = await _snapshot_context(chat_id, me.id)
         with traced_workflow("telegram_proactive", burst_sessions.get(chat_id), chat_id):
@@ -631,6 +646,7 @@ async def send_proactive_message(chat_id: int, intent: str, schedule_id: int) ->
                     current_summary=current_summary,
                     chat_id=chat_id,
                     senders=senders,
+                    poll_delivery=poll_delivery,
                 )
         if not response.strip():
             raise RuntimeError("Proactive responder returned empty content")
@@ -644,7 +660,11 @@ async def send_proactive_message(chat_id: int, intent: str, schedule_id: int) ->
         _reset_flush_timer(chat_id)
         print(f"[{chat_id}] Proactive schedule {schedule_id} sent")
     finally:
-        lock.release()
+        try:
+            if poll_delivery is not None:
+                await poll_delivery.finish_recording()
+        finally:
+            lock.release()
 
 
 async def _flush_chat(

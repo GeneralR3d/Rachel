@@ -24,8 +24,8 @@ def build_proactive_trigger(intent: str, *, role: Literal["fetcher", "responder"
     if not intent.strip():
         return ""
     role_instructions = (
-        "Gather evidence needed for the current outreach and perform any separately authorized "
-        "schedule action. Call finish_context when ready. Do not compose outreach text or answer "
+        "Gather evidence and perform tool actions authorized by the current outreach intent. "
+        "Call finish_context when ready. Do not compose outreach text or answer "
         "the old scheduling request."
         if role == "fetcher" else
         'Compose a fresh outgoing message fulfilling the reminder, question, or follow-up NOW, '

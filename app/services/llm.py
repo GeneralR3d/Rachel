@@ -23,6 +23,7 @@ import httpx
 from app.services import worldview
 from app.services.metrics import AGENT_CONTEXT_PASSES, AGENT_LOOP_OUTCOMES, LLM_CALLS, record_llm_error
 from app.services.context import ToolObservation
+from app.services.poll_tools import PollDeliveryRuntime, send_poll
 from app.services.url_fetch import fetch_url, normalize_url
 from app.services.web_search import search_web, normalize_search_arguments
 from app.services.prompt_builders import (
@@ -302,6 +303,7 @@ class GraphState(TypedDict):
     responder_status: Literal["evaluated", "parse_fallback"]
     response_text: str
     response_reason: str
+    poll_delivery: PollDeliveryRuntime | None
 
 
 
@@ -387,7 +389,7 @@ def finish_context(reason: str) -> str:
 # some models — each pass has a hard timeout below and records failures as
 # observations, so a hang/error can never stall the pipeline.) CONTEXT_TOOLS is the
 # single source of truth for both the agent's tools and its dynamic prompt.
-CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool, *PROACTIVE_TOOLS, fetch_url, search_web, finish_context]
+CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool, *PROACTIVE_TOOLS, fetch_url, search_web, send_poll, finish_context]
 
 
 class ContextFetcherPromptContext(TypedDict):
@@ -763,14 +765,19 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
                     tool = _context_tools_by_name.get(name)
                     if tool is None:
                         raise ValueError(f"Unknown tool '{name}'")
-                    if _context_category(name) == "proactive_schedules":
+                    if _context_category(name) == "proactive_schedules" or name == send_poll.name:
                         result = await tool.ainvoke(arguments, config={
-                            "configurable": {"current_chat_id": state.get("chat_id")},
+                            "configurable": {"current_chat_id": state.get("chat_id"),
+                                             "poll_delivery": state.get("poll_delivery")},
                         })
                     else:
                         result = await tool.ainvoke(arguments)
                     usable = result is not None and bool(str(result).strip())
                 observation.update(status="success" if usable else "empty", raw_result=result)
+            except asyncio.CancelledError as error:
+                if name == send_poll.name and str(error):
+                    observation.update(status="timeout", raw_result=str(error))
+                raise
             except asyncio.TimeoutError as e:
                 observation.update(status="timeout", raw_result=f"TimeoutError: {e}")
             except Exception as e:
@@ -1013,6 +1020,7 @@ async def get_response(
     must_reply: bool = False,
     is_private: bool = False,
     responded_watermark: int | None = None,
+    poll_delivery: PollDeliveryRuntime | None = None,
 ) -> Tuple[str, str, str | None, float]:
     """Run the LangGraph pipeline and return ``(response_text, reason, new_summary, elapsed_seconds)``.
 
@@ -1024,6 +1032,8 @@ async def get_response(
     ``response_text`` comes back empty (no message is sent). When a reply is
     produced, summarizer_node runs before responder_node. The mood detected this
     call reaches the joined responder and is stored in _chat_mood for later calls.
+    Poll delivery is a tool side effect whose result is included in the collected
+    observations for the responder.
     """
     start = time.time()
 
@@ -1047,6 +1057,7 @@ async def get_response(
         "loop_outcome": "first_pass",
         "response_text": "",
         "response_reason": "",
+        "poll_delivery": poll_delivery,
     }
 
     result = await _run_response_graph(_graph, initial_state, run_name="RachelReplyGraph")
@@ -1065,6 +1076,7 @@ async def get_proactive_response(
     current_summary: str | None = None,
     chat_id: int | None = None,
     senders: Dict[int, str] | None = None,
+    poll_delivery: PollDeliveryRuntime | None = None,
 ) -> Tuple[str, str, float]:
     """Generate an unconditional outreach without routing, summarizing, or mood writes."""
     if not intent.strip():
@@ -1089,6 +1101,7 @@ async def get_proactive_response(
         "loop_outcome": "first_pass",
         "response_text": "",
         "response_reason": "",
+        "poll_delivery": poll_delivery,
     }
     result = await _run_response_graph(_proactive_graph, initial_state, run_name="RachelProactiveGraph")
     return result["response_text"], result["response_reason"], time.time() - start
