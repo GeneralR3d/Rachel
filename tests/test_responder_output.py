@@ -24,7 +24,6 @@ def tool_message(arguments):
 
 
 VALID_MESSAGE = {"role": "assistant", "content": json.dumps({
-    "decision": "respond", "retrieval_request": "",
     "content": "Hey, how was your day?", "reason": "Following the check-in intent.",
 })}
 
@@ -62,7 +61,7 @@ class ResponderOutputTests(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch.object(llm, "get_active_models", AsyncMock(return_value={"main": "test-model"})))
         self.stack.enter_context(patch.object(llm, "RESPONDER_SYSTEM_PROMPT", "You are Rachel. {intent}"))
         self.stack.enter_context(patch.object(llm, "get_active_trait_prompts", AsyncMock(return_value="Friendly")))
-        self.stack.enter_context(patch.object(llm, "_run_context_fetcher", AsyncMock()))
+        self.stack.enter_context(patch.object(llm, "_run_context_fetcher", AsyncMock(return_value="Enough evidence")))
         self.stack.enter_context(patch("builtins.print"))
         self.stack.enter_context(patch.object(llm, "pprint"))
         self.stack.enter_context(redirect_stderr(StringIO()))
@@ -154,7 +153,7 @@ class ResponderOutputTests(unittest.IsolatedAsyncioTestCase):
         format_schema = request["response_format"]["json_schema"]
         self.assertIs(format_schema["strict"], True)
         self.assertEqual(format_schema["name"], "ResponseOutput")
-        self.assertEqual(set(format_schema["schema"]["required"]), {"decision", "retrieval_request", "reason", "content"})
+        self.assertEqual(set(format_schema["schema"]["required"]), {"reason", "content"})
         self.assertIs(format_schema["schema"]["additionalProperties"], False)
         for field in ("reason", "content"):
             self.assertEqual(format_schema["schema"]["properties"][field]["type"], "string")

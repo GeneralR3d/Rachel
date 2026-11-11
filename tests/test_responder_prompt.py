@@ -33,12 +33,11 @@ class ResponderPromptTests(unittest.IsolatedAsyncioTestCase):
             "{current_summary}|{datetime}|{tool_results}"
         )
         model = SimpleNamespace(ainvoke=AsyncMock(return_value=llm.ResponseOutput(
-            decision="respond", content="hey", reason="Enough context.", retrieval_request="",
+            content="hey", reason="Enough context.",
         )))
         fixed_time = datetime(2026, 10, 18, 12, 0, tzinfo=llm.SGT)
         with (
             patch.object(llm, "RESPONDER_SYSTEM_PROMPT", template),
-            patch.object(llm, "RESPONDER_LOOP_INSTRUCTIONS", "Loop instructions {茶}"),
             patch.object(llm, "get_active_trait_prompts", AsyncMock(return_value="friendly {茶}")),
             patch.object(llm, "CONVERSATION_STYLE", {"default": "casual", "reflective": "thoughtful {茶}"}),
             patch.object(llm, "_get_responder_llm", AsyncMock(return_value=model)),
@@ -49,8 +48,8 @@ class ResponderPromptTests(unittest.IsolatedAsyncioTestCase):
                          wraps=prompt_builders.build_responder_context) as normalize,
             patch.object(llm, "build_responder_prompt",
                          wraps=prompt_builders.build_responder_prompt, create=True) as build,
-            patch.object(llm, "build_responder_loop_message",
-                         wraps=prompt_builders.build_responder_loop_message, create=True) as loop,
+            patch.object(llm, "build_responder_context_status_message",
+                         wraps=prompt_builders.build_responder_context_status_message, create=True) as loop,
         ):
             clock.now.return_value = fixed_time
             await llm.responder_node({
@@ -60,7 +59,7 @@ class ResponderPromptTests(unittest.IsolatedAsyncioTestCase):
                     {"sender": "Jamie", "content": "What about {茶}?", "telegram_message_id": 3},
                 ],
                 "current_summary": "Earlier {conversation}.", "mood": "reflective",
-                "tool_observations": observations, "context_passes": 2, "remaining_steps": 9,
+                "tool_observations": observations, "context_passes": 2, "context_status": "capped", "remaining_steps": 9,
                 "responded_watermark": 2,
             })
         messages = model.ainvoke.call_args.args[0]
@@ -72,13 +71,8 @@ class ResponderPromptTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertIn("Cafe 茶 {value}", messages[0].content)
         self.assertNotIn("unavailable {value}", messages[0].content)
-        instructions = (
-            "Loop instructions {茶}\nWeb search attempt limit for this graph run: 4. "
-            "This total spans all retrieval passes and includes failed and timed-out attempts."
-        )
-        self.assertTrue(messages[1].content.startswith(instructions + "\nLoop state: "))
-        self.assertEqual(json.loads(messages[1].content.split("Loop state: ", 1)[1]), {
-            "context_passes": 2, "max_context_passes": 3, "remaining_steps": 9,
+        self.assertEqual(json.loads(messages[1].content.split("Collection state: ", 1)[1]), {
+            "context_status": "capped", "context_passes": 2,
             "retrieval_status": json.dumps(original[1], ensure_ascii=False),
         })
         self.assertEqual([msg.content for msg in messages[2:]], [
@@ -97,15 +91,14 @@ class ResponderPromptTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         loop.assert_called_once_with(
-            instructions=instructions, context_passes=2, max_context_passes=3,
-            remaining_steps=9, context=build.call_args.kwargs["context"],
+            context_status="capped", context_passes=2, context=build.call_args.kwargs["context"],
         )
         self.assertIs(build.call_args.kwargs["context"], loop.call_args.kwargs["context"])
         self.assertEqual(observations, original)
 
     async def render(self, observations, template=RESPONDER_SYSTEM_PROMPT):
         model = SimpleNamespace(ainvoke=AsyncMock(return_value=llm.ResponseOutput(
-            decision="respond", content="hey", reason="Enough context.", retrieval_request="",
+            content="hey", reason="Enough context.",
         )))
         with (
             patch.object(llm, "RESPONDER_SYSTEM_PROMPT", template),
@@ -155,7 +148,7 @@ class ResponderPromptTests(unittest.IsolatedAsyncioTestCase):
         }, status="empty")])
         self.assertIn("Jamie (id 7)", messages[0].content)
         self.assertIn("Life stage: NIL", messages[0].content)
-        loop_state = json.loads(messages[1].content.split("Loop state: ", 1)[1])
+        loop_state = json.loads(messages[1].content.split("Collection state: ", 1)[1])
         self.assertEqual(json.loads(loop_state["retrieval_status"])["status"], "empty")
 
     async def test_failures_remain_visible_without_becoming_successful_facts(self):

@@ -1,10 +1,8 @@
-"""Bounded context–responder loop over Merge Gateway and LangGraph.
+"""Fetcher-owned bounded retrieval followed by one final responder invocation.
 
-The checker/router gates reply generation. On admission, summarization and the
-initial context pass run in parallel. The responder joins them, evaluates all
-raw observations, and either replies or requests another context pass. Only the
-fetcher executes tools; the summarizer stays outside the loop. Pass and
-remaining-step guards stop retrieval while preserving a best-effort reply.
+Reactive admission runs summarization and context collection in parallel with an
+explicit join. Proactive outreach reuses collection without summarization. The
+fetcher owns all tool calls and completion; pass/step guards preserve evidence.
 """
 
 import asyncio
@@ -25,14 +23,15 @@ import httpx
 from app.services import worldview
 from app.services.metrics import AGENT_CONTEXT_PASSES, AGENT_LOOP_OUTCOMES, LLM_CALLS, record_llm_error
 from app.services.context import ToolObservation
+from app.services.poll_tools import PollDeliveryRuntime, send_poll
 from app.services.url_fetch import fetch_url, normalize_url
 from app.services.web_search import search_web, normalize_search_arguments
 from app.services.prompt_builders import (
-    build_context_fetcher_handoff,
+    build_context_fetcher_state_message,
     build_context_fetcher_prompt,
     build_proactive_trigger,
     build_responder_context,
-    build_responder_loop_message,
+    build_responder_context_status_message,
     build_responder_prompt,
     build_url_context_message,
     split_url_observations,
@@ -49,18 +48,18 @@ from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.errors import GraphRecursionError
 from langgraph.managed import RemainingSteps
 from langgraph.runtime import Runtime
-from pydantic import BaseModel, Field, ConfigDict, ValidationError
-from typing_extensions import TypedDict
+from pydantic import BaseModel, Field, ConfigDict, ValidationError, field_validator
+from typing_extensions import NotRequired, TypedDict
 
 from app.config import get_settings
 from app.prompts import (
     CONTEXT_FETCHER_SYSTEM_PROMPT,
-    RESPONDER_LOOP_INSTRUCTIONS,
     RESPONDER_SYSTEM_PROMPT,
     SUMMARIZER_SYSTEM_PROMPT,
     CONVERSATION_STYLE,
@@ -263,12 +262,6 @@ class SummarizerOutput(BaseModel):
 
 
 class ResponseOutput(BaseModel):
-    decision: Literal["respond", "fetch_more"] = Field(
-        ..., description="Respond now, or request one more supported context/schedule-action pass."
-    )
-    retrieval_request: str = Field(
-        ..., description="Missing information or desired proactive schedule action for the context fetcher; empty for respond. Do not select tools."
-    )
     model_config = ConfigDict(extra="forbid")
     reason: str = Field(
         ...,
@@ -276,15 +269,28 @@ class ResponseOutput(BaseModel):
     )
     content: str = Field(
         ...,
-        description="Rachel's reply as plain text in her natural Singlish voice. Always required: for fetch_more, provide a best-effort clarification acknowledging uncertainty and asking one focused question. Use \\n\\n to separate message bursts. Do NOT include her name or any prefix.",
+        description="Rachel's reply as plain text in her natural Singlish voice. Use \\n\\n to separate message bursts. Do NOT include her name or any prefix.",
     )
+
+    @field_validator("content")
+    @classmethod
+    def sendable_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Response content must be sendable")
+        return value
 
 
 class GraphState(TypedDict):
+    context_passes: int
+    tool_observations: List[ToolObservation]
+    context_status: Literal["collecting", "finished", "capped"]
+    context_reason: str
+    loop_outcome: Literal["first_pass", "retried", "capped"]
     history: List[Dict[str, Any]]
     chat_id: int | None
     intent: str
     current_summary: str | None
+    collection_summary: NotRequired[str | None]
     mood: str
     senders: Dict[int, str]  # sender_user_id -> display name
     must_reply: bool  # set by caller: Rachel was tagged/replied-to in a group
@@ -293,15 +299,11 @@ class GraphState(TypedDict):
     # "already handled vs. new" divider (see _partition_index). None on first contact.
     responded_watermark: Optional[int]
     should_reply: bool
-    context_passes: int
-    retrieval_request: str
-    tool_observations: List[ToolObservation]
     remaining_steps: RemainingSteps
-    responder_decision: Literal["respond", "fetch_more"]
     responder_status: Literal["evaluated", "parse_fallback"]
-    loop_outcome: Literal["first_pass", "retried", "capped"]
     response_text: str
     response_reason: str
+    poll_delivery: PollDeliveryRuntime | None
 
 
 
@@ -330,8 +332,8 @@ def _base_chat(model: str, temperature: float, reasoning_effort: str = "none") -
         api_key=settings.merge_gateway_api_key,
         base_url=settings.merge_gateway_openai_base_url,
         temperature=temperature,
-        # Tool-bearing clients keep reasoning disabled because persisted replies
-        # contain only visible text, not reasoning_content to replay with tools.
+        # Summarizer/extractors use none; fetcher and final responder use medium.
+        # Persisted dialogue contains only visible text.
         reasoning_effort=reasoning_effort,
     )
 
@@ -357,12 +359,37 @@ async def _get_responder_llm():
         )
     return _client_cache[key]
 
+class FinishContextArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(..., strict=True, min_length=1)
+
+    @field_validator("reason")
+    @classmethod
+    def nonblank_reason(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Completion reason must be nonempty")
+        return value
+
+
+@tool(args_schema=FinishContextArgs)
+def finish_context(reason: str) -> str:
+    """End context collection after reviewing the current task and prior tool results.
+
+    Call exactly once, alone, with a concise nonempty reason when the evidence
+    is sufficient, no supported lookup can help, or only the user can clarify.
+    Do not compose Rachel's reply. Never combine completion with a lookup or
+    schedule action: review its result on a later pass before completing.
+    """
+    return reason
+
+
 # The context_fetcher is the one node that *does* use tool-calling: it has these
 # tools bound and decides which to call. (CLAUDE.md notes tool-calling can hang on
 # some models — each pass has a hard timeout below and records failures as
 # observations, so a hang/error can never stall the pipeline.) CONTEXT_TOOLS is the
 # single source of truth for both the agent's tools and its dynamic prompt.
-CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool, *PROACTIVE_TOOLS, fetch_url, search_web]
+CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool, *PROACTIVE_TOOLS, fetch_url, search_web, send_poll, finish_context]
 
 
 class ContextFetcherPromptContext(TypedDict):
@@ -386,7 +413,10 @@ def context_fetcher_dynamic_prompt(request: ModelRequest) -> str:
     )
 
 
-_context_tools_by_name = {t.name: t for t in CONTEXT_TOOLS}
+_context_tools_by_name = {t.name: t for t in CONTEXT_TOOLS if t.name != finish_context.name}
+_schedule_mutation_schemas = {
+    t.name: t.args_schema for t in PROACTIVE_TOOLS if t.name != "list_proactive_schedules"
+}
 
 
 async def _get_context_fetcher_llm():
@@ -426,9 +456,8 @@ CONTEXT_FETCHER_TIMEOUT = 30  # seconds
 
 
 def checker_node(state: GraphState) -> Dict:
-    """Cheap, no-LLM gate in front of the router. Does nothing on its own; the
-    routing decision lives in _route_after_checker, which reads must_reply."""
-    return {}
+    """Capture the existing summary before the parallel summarizer can update it."""
+    return {"collection_summary": state.get("current_summary")}
 
 
 def _has_new_messages(state: GraphState) -> bool:
@@ -444,7 +473,7 @@ def _has_new_messages(state: GraphState) -> bool:
 
 def _route_after_checker(state: GraphState):
     """Conditional edge: if the caller forced a reply (1-on-1 chat or Rachel was
-    tagged), skip the router and fan out to the summarizer + context_fetcher.
+    tagged), skip the router and fan out to summarization + collection.
     Otherwise let the router decide whether a reply is warranted."""
     # "Nothing new" overrides everything, including must_reply: if there is nothing
     # unanswered since the watermark there is nothing to reply to, and running on a
@@ -512,7 +541,7 @@ async def router_node(state: GraphState) -> Dict:
 
 
 def _route_after_router(state: GraphState):
-    """Conditional edge: fan out to the summarizer + context_fetcher only if a
+    """Conditional edge: fan out to summarization + collection only if a
     reply is wanted; otherwise short-circuit straight to END."""
     if state.get("should_reply", True):
         return ["summarizer_node", "context_fetcher_node"]
@@ -594,7 +623,7 @@ def _context_category(name: str) -> str:
     return name if name in _context_tools_by_name else "retrieval"
 
 
-async def _run_context_fetcher(state: GraphState, observations: List[ToolObservation]) -> None:
+async def _run_context_fetcher(state: GraphState, observations: List[ToolObservation]) -> str | None:
     """Append each raw observation immediately, preserving partial work on timeout."""
     senders = state.get("senders") or {}
     proactive = bool((state.get("intent") or "").strip())
@@ -605,7 +634,7 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
     )
     if proactive:
         # End the old transcript with the fired job, not the earlier setup request.
-        history_msgs.append(SystemMessage(content=build_proactive_trigger(state["intent"])))
+        history_msgs.append(SystemMessage(content=build_proactive_trigger(state["intent"], role="fetcher")))
     now = datetime.now(SGT)
     formatted_datetime = (
         f"The current date is {now.strftime('%d %B %Y')}, "
@@ -614,12 +643,14 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
     )
     participants = ", ".join(senders.values()) or "(unknown)"
     pass_number = state.get("context_passes", 0) + 1
-    # Keep external web payloads and failures out of the system-message handoff.
+    # Keep external web payloads and failures out of the system collection state.
     other_observations, url_observations = split_url_observations(observations)
-    handoff = SystemMessage(content=build_context_fetcher_handoff(
+    collection_state = SystemMessage(content=build_context_fetcher_state_message(
         context_pass=pass_number,
         max_context_passes=settings.agent_max_context_passes,
-        retrieval_request=state.get("retrieval_request", ""),
+        current_summary=state.get("collection_summary", state.get("current_summary")) or "",
+        remaining_steps=state.get("remaining_steps"),
+        max_search_attempts=settings.agent_max_search_attempts,
         observations=other_observations,
     ))
     url_data = build_url_context_message(observations=url_observations)
@@ -627,7 +658,7 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
 
     request = ModelRequest(
         model=await _get_context_fetcher_llm(),
-        messages=[handoff, *url_messages, *history_msgs],
+        messages=[collection_state, *url_messages, *history_msgs],
         tools=CONTEXT_TOOLS,
         runtime=Runtime(context={"participants": participants, "datetime": formatted_datetime,
                                  "intent": state.get("intent", "")}),
@@ -641,9 +672,16 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
 
     ai: AIMessage = await context_fetcher_dynamic_prompt.awrap_model_call(request, call_model)
     tool_calls = getattr(ai, "tool_calls", None) or []
-    print(f"[context_fetcher] LLM requested {len(tool_calls)} tool call(s):")
-    for tc in tool_calls:
-        print(f"[context_fetcher]   -> {tc['name']}({tc['args']})")
+    # Validate control batches atomically before any side effects execute.
+    if (getattr(ai, "invalid_tool_calls", None) or not tool_calls
+            or any(not isinstance(tc, dict) or not isinstance(tc.get("name"), str)
+                   or not isinstance(tc.get("args"), dict) for tc in tool_calls)):
+        raise ValueError("Invalid context protocol: request tools or call finish_context alone")
+    completions = [tc for tc in tool_calls if tc["name"] == finish_context.name]
+    if completions:
+        if len(tool_calls) != 1:
+            raise ValueError("Invalid context protocol: finish_context must be the only tool call")
+        return FinishContextArgs.model_validate(completions[0]["args"]).reason
 
     for tc in tool_calls:
         name = tc["name"]
@@ -655,6 +693,16 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
             # its deadline; completed calls replace it below.
             "status": "timeout", "raw_result": "Tool call exceeded the retrieval pass deadline.",
         }
+        if name in _schedule_mutation_schemas:
+            try:
+                arguments = _schedule_mutation_schemas[name].model_validate(arguments).model_dump()
+                observation["arguments"] = arguments
+            except ValidationError as error:
+                observation.update(status="error", raw_result=str(error))
+                observations.append(observation)
+                continue
+            if any(o["tool_name"] == name and o["arguments"] == arguments for o in observations):
+                continue
         if name == fetch_url.name:
             observation['url_attempted'] = False
             try:
@@ -717,14 +765,19 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
                     tool = _context_tools_by_name.get(name)
                     if tool is None:
                         raise ValueError(f"Unknown tool '{name}'")
-                    if _context_category(name) == "proactive_schedules":
+                    if _context_category(name) == "proactive_schedules" or name == send_poll.name:
                         result = await tool.ainvoke(arguments, config={
-                            "configurable": {"current_chat_id": state.get("chat_id")},
+                            "configurable": {"current_chat_id": state.get("chat_id"),
+                                             "poll_delivery": state.get("poll_delivery")},
                         })
                     else:
                         result = await tool.ainvoke(arguments)
                     usable = result is not None and bool(str(result).strip())
                 observation.update(status="success" if usable else "empty", raw_result=result)
+            except asyncio.CancelledError as error:
+                if name == send_poll.name and str(error):
+                    observation.update(status="timeout", raw_result=str(error))
+                raise
             except asyncio.TimeoutError as e:
                 observation.update(status="timeout", raw_result=f"TimeoutError: {e}")
             except Exception as e:
@@ -738,8 +791,11 @@ async def context_fetcher_node(state: GraphState) -> Dict:
     observations = [dict(o) for o in state.get("tool_observations", [])]
     previous_count = len(observations)
     pass_number = state.get("context_passes", 0) + 1
+    completion_reason = None
     try:
-        await asyncio.wait_for(_run_context_fetcher(state, observations), timeout=CONTEXT_FETCHER_TIMEOUT)
+        completion_reason = await asyncio.wait_for(
+            _run_context_fetcher(state, observations), timeout=CONTEXT_FETCHER_TIMEOUT,
+        )
     except Exception as e:
         record_llm_error("context_fetcher", e)
         # If a tool was in-flight, its timeout observation is already present.
@@ -750,40 +806,28 @@ async def context_fetcher_node(state: GraphState) -> Dict:
                 "result_category": "retrieval", "status": "timeout" if isinstance(e, TimeoutError) else "error",
                 "raw_result": f"{type(e).__name__}: {e}",
             })
+    status = "collecting"
+    reason = ""
+    if completion_reason is not None:
+        status, reason = "finished", completion_reason
+    elif pass_number >= settings.agent_max_context_passes or state.get("remaining_steps", 3) <= 2:
+        status, reason = "capped", "Context pass or remaining-step limit reached."
     return {
         "context_passes": pass_number,
         "tool_observations": observations,
+        "context_status": status,
+        "context_reason": reason,
+        "loop_outcome": "capped" if status == "capped" else ("retried" if pass_number > 1 else "first_pass"),
     }
 
 
-def _loop_outcome(state: GraphState, decision: str) -> str:
-    if decision == "fetch_more":
-        if (state.get("context_passes", 0) >= settings.agent_max_context_passes
-                or state.get("remaining_steps", 3) <= 2):
-            return "capped"
-    return "retried" if state.get("context_passes", 0) > 1 else "first_pass"
+def _route_after_context(state: GraphState) -> Literal["context_fetcher_node", "responder_node"]:
+    return "context_fetcher_node" if state["context_status"] == "collecting" else "responder_node"
 
 
-def _route_after_responder(state: GraphState):
-    if (state.get("responder_decision") == "fetch_more"
-            and state.get("retrieval_request", "").strip()
-            and state.get("context_passes", 0) < settings.agent_max_context_passes
-            and state.get("remaining_steps", 3) > 2):
-        return "context_fetcher_node"
-    return END
-
-
-def _response_update(state: GraphState, content: str, reason: str, decision: str = "respond",
-                     request: str = "", status: str = "evaluated") -> Dict:
-    # An empty handoff cannot drive a useful retrieval pass.
-    if not request.strip():
-        decision = "respond"
-    return {
-        "response_text": content, "response_reason": reason,
-        "responder_decision": decision, "responder_status": status,
-        "retrieval_request": request.strip() if decision == "fetch_more" else "",
-        "loop_outcome": _loop_outcome(state, decision),
-    }
+def _response_update(state: GraphState, content: str, reason: str,
+                     status: str = "evaluated") -> Dict:
+    return {"response_text": content, "response_reason": reason, "responder_status": status}
 
 
 def _salvage_reply(raw: str) -> str:
@@ -855,7 +899,7 @@ async def responder_node(state: GraphState) -> Dict:
             watermark=None if proactive else state.get("responded_watermark"),
         )
         if proactive:
-            history_msgs.append(SystemMessage(content=build_proactive_trigger(state["intent"])))
+            history_msgs.append(SystemMessage(content=build_proactive_trigger(state["intent"], role="responder")))
         history_tokens = sum(_count_tokens(f"{m.type}: {m.content}") for m in history_msgs)
         print(f"[responder] history fetched (count={len(history_msgs)}, tokens={history_tokens})")
         pprint(history_msgs)
@@ -870,14 +914,12 @@ async def responder_node(state: GraphState) -> Dict:
             current_datetime=formatted_datetime,
             intent=state.get("intent", ""),
         ))
-        loop_system_message = SystemMessage(content=build_responder_loop_message(
-            instructions=RESPONDER_LOOP_INSTRUCTIONS,
+        status_system_message = SystemMessage(content=build_responder_context_status_message(
+            context_status=state.get("context_status", "capped"),
             context_passes=state.get("context_passes", 0),
-            max_context_passes=settings.agent_max_context_passes,
-            remaining_steps=state.get("remaining_steps"),
             context=context,
         ))
-        msgs = [main_system_message, loop_system_message, *url_messages, *history_msgs]
+        msgs = [main_system_message, status_system_message, *url_messages, *history_msgs]
         msgs_tokens = sum(_count_tokens(str(m.content)) for m in msgs)
         print(f"[responder] TOTAL context: {len(msgs)} messages, {msgs_tokens} tokens")
 
@@ -898,7 +940,7 @@ async def responder_node(state: GraphState) -> Dict:
         if result is None:
             return _parse_fallback(state, "", ValueError("Responder LLM returned no parsed response"))
         print(f"[responder] LLM returned: content={result.content[:80]!r} | reason={result.reason!r}")
-        return _response_update(state, result.content, result.reason, result.decision, result.retrieval_request)
+        return _response_update(state, result.content, result.reason)
     except BaseException as e:
         import traceback
         # Don't count cooperative cancellation (a racing new message cancels the
@@ -911,53 +953,37 @@ async def responder_node(state: GraphState) -> Dict:
 
 
 def _build_graph():
-    graph: StateGraph = StateGraph(GraphState)
+    graph = StateGraph(GraphState)
     graph.add_node("checker_node", checker_node)
     graph.add_node("router_node", router_node)
     graph.add_node("summarizer_node", summarizer_node)
     graph.add_node("context_fetcher_node", context_fetcher_node)
-    graph.add_node("responder_node", responder_node)
+    # Admission starts summarization and the first fetch pass together. Defer
+    # the terminal reply until all pending work in the graph has finished.
+    graph.add_node("responder_node", responder_node, defer=True)
     graph.add_edge(START, "checker_node")
-    # Checker gates the router: a forced reply (must_reply) fans out straight to
-    # the summarizer + context_fetcher; otherwise the router decides first.
-    graph.add_conditional_edges(
-        "checker_node",
-        _route_after_checker,
-        {
-            "summarizer_node": "summarizer_node",
-            "context_fetcher_node": "context_fetcher_node",
-            "router_node": "router_node",
-            END: END,
-        },
-    )
-    # Router gates everything: if no reply is warranted, jump straight to END.
-    graph.add_conditional_edges(
-        "router_node",
-        _route_after_router,
-        {
-            "summarizer_node": "summarizer_node",
-            "context_fetcher_node": "context_fetcher_node",
-            END: END,
-        },
-    )
-    # Summarizer + context_fetcher run in parallel; the responder joins them
-    # (LangGraph waits for both before running responder_node once).
-    graph.add_edge("summarizer_node", "responder_node")
-    graph.add_edge("context_fetcher_node", "responder_node")
-    graph.add_conditional_edges("responder_node", _route_after_responder,
-                                {"context_fetcher_node": "context_fetcher_node", END: END})
+    graph.add_conditional_edges("checker_node", _route_after_checker, {
+        "summarizer_node": "summarizer_node",
+        "context_fetcher_node": "context_fetcher_node",
+        "router_node": "router_node", END: END,
+    })
+    graph.add_conditional_edges("router_node", _route_after_router, {
+        "summarizer_node": "summarizer_node",
+        "context_fetcher_node": "context_fetcher_node", END: END,
+    })
+    graph.add_conditional_edges("context_fetcher_node", _route_after_context)
+    graph.add_edge("responder_node", END)
     return graph.compile()
 
 
 def _build_proactive_graph():
-    """Build the outreach-only graph: no checker, router, or summarizer."""
-    graph: StateGraph = StateGraph(GraphState)
+    """Build the outreach-only graph: no checker, router, summarizer or mood writes."""
+    graph = StateGraph(GraphState)
     graph.add_node("context_fetcher_node", context_fetcher_node)
     graph.add_node("responder_node", responder_node)
     graph.add_edge(START, "context_fetcher_node")
-    graph.add_edge("context_fetcher_node", "responder_node")
-    graph.add_conditional_edges("responder_node", _route_after_responder,
-                                {"context_fetcher_node": "context_fetcher_node", END: END})
+    graph.add_conditional_edges("context_fetcher_node", _route_after_context)
+    graph.add_edge("responder_node", END)
     return graph.compile()
 
 
@@ -994,6 +1020,7 @@ async def get_response(
     must_reply: bool = False,
     is_private: bool = False,
     responded_watermark: int | None = None,
+    poll_delivery: PollDeliveryRuntime | None = None,
 ) -> Tuple[str, str, str | None, float]:
     """Run the LangGraph pipeline and return ``(response_text, reason, new_summary, elapsed_seconds)``.
 
@@ -1004,7 +1031,9 @@ async def get_response(
     reply is warranted, the graph short-circuits and
     ``response_text`` comes back empty (no message is sent). When a reply is
     produced, summarizer_node runs before responder_node. The mood detected this
-    call is stored in _chat_mood and injected on the *next* call.
+    call reaches the joined responder and is stored in _chat_mood for later calls.
+    Poll delivery is a tool side effect whose result is included in the collected
+    observations for the responder.
     """
     start = time.time()
 
@@ -1023,10 +1052,12 @@ async def get_response(
         "should_reply": True,
         "context_passes": 0,
         "tool_observations": [],
-        "retrieval_request": "",
-        "responder_decision": "respond",
+        "context_status": "collecting",
+        "context_reason": "",
+        "loop_outcome": "first_pass",
         "response_text": "",
         "response_reason": "",
+        "poll_delivery": poll_delivery,
     }
 
     result = await _run_response_graph(_graph, initial_state, run_name="RachelReplyGraph")
@@ -1045,6 +1076,7 @@ async def get_proactive_response(
     current_summary: str | None = None,
     chat_id: int | None = None,
     senders: Dict[int, str] | None = None,
+    poll_delivery: PollDeliveryRuntime | None = None,
 ) -> Tuple[str, str, float]:
     """Generate an unconditional outreach without routing, summarizing, or mood writes."""
     if not intent.strip():
@@ -1064,10 +1096,12 @@ async def get_proactive_response(
         "should_reply": True,
         "context_passes": 0,
         "tool_observations": [],
-        "retrieval_request": "",
-        "responder_decision": "respond",
+        "context_status": "collecting",
+        "context_reason": "",
+        "loop_outcome": "first_pass",
         "response_text": "",
         "response_reason": "",
+        "poll_delivery": poll_delivery,
     }
     result = await _run_response_graph(_proactive_graph, initial_state, run_name="RachelProactiveGraph")
     return result["response_text"], result["response_reason"], time.time() - start

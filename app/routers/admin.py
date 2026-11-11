@@ -36,6 +36,8 @@ router = APIRouter()
 # whole pipeline's prompting is visible in one place. The responder &
 # summarizer prompts have their own read-only endpoints below.
 WORKFLOW_PROMPTS: list[tuple[str, str, str]] = [
+    ("context_fetcher", "Context fetcher", prompts.CONTEXT_FETCHER_SYSTEM_PROMPT),
+    ("context_fetcher_loop", "Context collection loop", prompts.CONTEXT_FETCHER_LOOP_INSTRUCTIONS),
     ("router", "Router / reply-gating", json.dumps(prompts.ROUTER_GROUP_QUESTION, indent=2)),
     ("proactive_schedule_tools", "Proactive reach-out tools", prompts.PROACTIVE_SCHEDULE_TOOL_PROMPT),
     ("worldview_fact_extractor", "World-view: fact extractor", prompts.FACT_EXTRACTOR_SYSTEM_PROMPT),

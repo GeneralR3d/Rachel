@@ -68,7 +68,7 @@ class PhoenixGroupingTests(unittest.IsolatedAsyncioTestCase):
             "chat_id": -42, "senders": {7: "Jamie"}, "current_summary": "Dinner plans",
             "mood": "default", "must_reply": True, "is_private": False,
             "responded_watermark": 1, "should_reply": True, "context_passes": 0,
-            "tool_observations": [], "retrieval_request": "", "intent": "",
+            "tool_observations": [], "context_status": "collecting", "context_reason": "", "intent": "",
             **overrides,
         }
 
@@ -84,15 +84,12 @@ class PhoenixGroupingTests(unittest.IsolatedAsyncioTestCase):
         for proactive in (False, True):
             with self.subTest(proactive=proactive):
                 self.exporter.clear()
-                responses = iter([
-                    {"decision": "fetch_more", "retrieval_request": "Confirm café hours", "content": "Which café?", "reason": "Need details"},
-                    {"decision": "respond", "retrieval_request": "", "content": "Tea at six?", "reason": "Have details"},
-                ])
+                responses = iter([{"content": "Tea at six?", "reason": "Have details"}])
 
                 async def respond(messages):
                     return llm.ResponseOutput(**next(responses))
 
-                with self.tool_retrieval(batches), patch.object(
+                with self.tool_retrieval([*batches, [{"name": "finish_context", "args": {"reason": "Enough evidence"}, "id": "finish"}]]), patch.object(
                     llm, "_get_responder_llm", AsyncMock(return_value=SimpleNamespace(ainvoke=respond))
                 ), patch.object(llm, "get_active_trait_prompts", AsyncMock(return_value="friendly")), patch.object(
                     llm, "summarizer_node", AsyncMock(return_value={})
@@ -267,23 +264,22 @@ class PhoenixGroupingTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(passes=passes):
                 self.exporter.clear()
                 responder_calls = 0
+                fetcher_calls = 0
 
                 def handle_request(request):
-                    nonlocal responder_calls
+                    nonlocal responder_calls, fetcher_calls
+                    message = {"role": "assistant", "content": ""}
                     if json.loads(request.content).get("tools"):
-                        content = ""
+                        fetcher_calls += 1
+                        if fetcher_calls == passes:
+                            message["tool_calls"] = [{"id": "finish", "type": "function", "function": {
+                                "name": "finish_context", "arguments": json.dumps({"reason": "Ready"})}}]
                     else:
                         responder_calls += 1
-                        content = json.dumps({
-                            "decision": "fetch_more" if responder_calls < passes else "respond",
-                            "retrieval_request": "Exam background" if responder_calls < passes else "",
-                            "content": "How was the exam?", "reason": "Checking in",
-                        })
+                        message["content"] = json.dumps({"content": "How was the exam?", "reason": "Checking in"})
                     return httpx.Response(200, json={
                         "id": "chatcmpl-test", "object": "chat.completion", "created": 0,
-                        "model": "test-model", "choices": [{"index": 0, "message": {
-                            "role": "assistant", "content": content,
-                        }, "finish_reason": "stop"}],
+                        "model": "test-model", "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
                     })
 
                 api = AsyncOpenAI(api_key="test", base_url="https://gateway.example/v1",
@@ -320,7 +316,9 @@ class PhoenixGroupingTests(unittest.IsolatedAsyncioTestCase):
                 graph = next(span for span in spans if span.name == "RachelProactiveGraph")
                 self.assertEqual(graph.parent.span_id, root.context.span_id)
                 completions = [span for span in spans if span.name == "ChatCompletion"]
-                self.assertEqual(len(completions), 2 * passes)
+                self.assertEqual(len(completions), passes + 1)
+                self.assertEqual(responder_calls, 1)
+                self.assertEqual(fetcher_calls, passes)
                 for span in [graph, *completions]:
                     self.assertEqual(span.parent.span_id, root.context.span_id)
                     self.assertEqual(span.attributes["session.id"], session_id)

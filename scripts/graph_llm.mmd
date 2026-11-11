@@ -1,0 +1,13 @@
+flowchart LR
+    S((start)) --> C[checker]
+    C -->|no new user messages| E((end))
+    C -->|forced admission| A[admission]
+    C -->|ordinary turn| R[JEV decision router]
+    R -->|stay silent| E
+    R -->|reply| A
+    A --> SUM[summarizer]
+    A --> CTX
+    CTX[context fetcher] -->|collecting| CTX
+    CTX -->|finish_context or application cap| RESP[one final responder]
+    SUM -.->|summary and mood at join| RESP
+    RESP --> E

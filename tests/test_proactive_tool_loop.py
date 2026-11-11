@@ -19,11 +19,12 @@ def tool_call(name, args):
     return AIMessage(content="", tool_calls=[{"id": "call-1", "name": name, "args": args}])
 
 
-def response(decision="respond", request=""):
-    return SimpleNamespace(
-        decision=decision, retrieval_request=request,
-        content="Okay, I'll check in!", reason="Follow up on the exam.",
-    )
+def response():
+    return llm.ResponseOutput(content="Okay, I'll check in!", reason="Follow up on the exam.")
+
+
+def finish():
+    return tool_call("finish_context", {"reason": "Finished collection"})
 
 
 class Model:
@@ -58,7 +59,7 @@ class ProactiveLoopTests(IsolatedAsyncioTestCase):
         self.history = [{"sender": "Jamie", "content": "Remind me tomorrow at 10am", "telegram_message_id": 5}]
 
     def models(self, fetcher_results, responder_results):
-        fetcher, responder = Model(fetcher_results), Model(responder_results)
+        fetcher, responder = Model([*fetcher_results, finish()]), Model(responder_results)
         self.stack.enter_context(patch.object(llm, "_get_context_fetcher_llm", AsyncMock(return_value=fetcher)))
         self.stack.enter_context(patch.object(llm, "_get_responder_llm", AsyncMock(return_value=responder)))
         return fetcher, responder
@@ -72,7 +73,7 @@ class ProactiveLoopTests(IsolatedAsyncioTestCase):
                     args.update(create_args(cron_expression="0 11 * * *"))
                 _, responder = self.models([
                     tool_call("list_proactive_schedules", {}), tool_call(name, args),
-                ], [response("fetch_more", f"{operation} Jamie's listed reminder"), response()])
+                ], [response()])
                 with patch.object(repository, "get_proactive_schedules", AsyncMock(return_value=[schedule_row()])), \
                         patch.object(repository, "update_proactive_schedule", AsyncMock(return_value=schedule_row(cron_expression="0 11 * * *"))) as update, \
                         patch.object(repository, "delete_proactive_schedule", AsyncMock(return_value=True)) as delete:
@@ -86,14 +87,14 @@ class ProactiveLoopTests(IsolatedAsyncioTestCase):
                     self.assertEqual(delete.await_args.kwargs["chat_id"], -123)
                     self.assertIn('"deleted": true', prompt)
 
-    async def test_requested_tool_calls_execute_on_each_context_pass(self):
+    async def test_exact_repeated_mutations_execute_once(self):
         self.models([
             tool_call("create_proactive_schedule", create_args()),
             tool_call("create_proactive_schedule", create_args()),
-        ], [response("fetch_more", "Confirm the reminder is saved"), response()])
+        ], [response()])
         with patch.object(repository, "create_proactive_schedule", AsyncMock(return_value=schedule_row())) as create:
             await llm.get_response(self.history, chat_id=-123, must_reply=True)
-        self.assertEqual(create.await_count, 2)
+        self.assertEqual(create.await_count, 1)
 
     async def test_list_then_toggle_reaches_responder_with_saved_enabled_state(self):
         for enabled in (False, True):
@@ -101,7 +102,7 @@ class ProactiveLoopTests(IsolatedAsyncioTestCase):
                 _, responder = self.models([
                     tool_call("list_proactive_schedules", {}),
                     tool_call("set_proactive_schedule_enabled", {"schedule_id": 1, "enabled": enabled}),
-                ], [response("fetch_more", "Pause or resume Jamie's listed reminder"), response()])
+                ], [response()])
 
                 async def save(schedule_id, data, *, chat_id):
                     self.assertEqual((schedule_id, chat_id), (1, -123))
@@ -117,18 +118,19 @@ class ProactiveLoopTests(IsolatedAsyncioTestCase):
 
     async def test_each_reply_supplies_only_its_current_chat(self):
         fetcher, _ = self.models([
-            tool_call("create_proactive_schedule", create_args()),
-            tool_call("create_proactive_schedule", create_args()),
+            tool_call("create_proactive_schedule", create_args()), finish(),
+            tool_call("create_proactive_schedule", create_args()), finish(),
         ], [response(), response()])
         with patch.object(repository, "create_proactive_schedule", AsyncMock(return_value=schedule_row())) as create:
             for chat_id in (-123, -456):
                 await llm.get_response(self.history, chat_id=chat_id, must_reply=True)
         self.assertEqual([call.args[0]["chat_id"] for call in create.await_args_list], [-123, -456])
-        second_handoff = json.loads(fetcher.messages[1][1].content.split("\n", 1)[1])
+        second_handoff = json.loads(fetcher.messages[2][1].content.split("\n", 1)[1])
         self.assertEqual(second_handoff["previous_observations"], [])
 
-    async def test_timed_out_action_is_reported_to_responder_as_unconfirmed(self):
+    async def test_timed_out_repeated_action_remains_unconfirmed_and_executes_once(self):
         _, responder = self.models([
+            tool_call("create_proactive_schedule", create_args()),
             tool_call("create_proactive_schedule", create_args()),
         ], [response()])
         writes = []
@@ -147,7 +149,7 @@ class ProactiveLoopTests(IsolatedAsyncioTestCase):
                 release.set()
                 await asyncio.gather(*list(proactive._active_tasks), return_exceptions=True)
         self.assertEqual(len(writes), 1)
-        loop = json.loads(responder.messages[-1][1].content.split("\nLoop state: ", 1)[1])
+        loop = json.loads(responder.messages[-1][1].content.split("\nCollection state: ", 1)[1])
         observation = json.loads(loop["retrieval_status"])
         self.assertEqual(observation["status"], "timeout")
         self.assertIn("No proactive schedule action or listing has been confirmed", responder.messages[-1][0].content)
@@ -163,8 +165,22 @@ class ProactiveLoopTests(IsolatedAsyncioTestCase):
         _, responder = self.models([tool_call("delete_proactive_schedule", {"schedule_id": 2})], [response()])
         with patch.object(repository, "delete_proactive_schedule", AsyncMock(return_value=False)):
             await llm.get_response(self.history, chat_id=-123, must_reply=True)
-        loop = json.loads(responder.messages[-1][1].content.split("\nLoop state: ", 1)[1])
+        loop = json.loads(responder.messages[-1][1].content.split("\nCollection state: ", 1)[1])
         observation = json.loads(loop["retrieval_status"])
         self.assertEqual(observation["status"], "error")
         self.assertIn("not found in the current chat", observation["raw_result"])
         self.assertNotIn('"deleted": true', responder.messages[-1][0].content)
+
+
+    async def test_read_only_listings_refresh_after_mutation(self):
+        self.models([
+            tool_call("list_proactive_schedules", {}),
+            tool_call("delete_proactive_schedule", {"schedule_id": 1}),
+            tool_call("list_proactive_schedules", {}),
+        ], [response()])
+        with patch.object(repository, "get_proactive_schedules", AsyncMock(side_effect=[[schedule_row()], []])) as listing, \
+                patch.object(repository, "delete_proactive_schedule", AsyncMock(return_value=True)) as delete:
+            await llm.get_response(self.history, chat_id=-123, must_reply=True)
+        self.assertEqual(listing.await_count, 2)
+        self.assertEqual([call.kwargs["chat_id"] for call in listing.await_args_list], [-123, -123])
+        delete.assert_awaited_once_with(1, chat_id=-123)
