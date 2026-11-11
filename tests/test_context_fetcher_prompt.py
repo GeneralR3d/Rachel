@@ -170,15 +170,15 @@ class ContextFetcherNodeTests(unittest.IsolatedAsyncioTestCase):
             "result_category": "worldview", "status": "error", "raw_result": "unavailable {value}",
         }]
         original = deepcopy(observations)
-        model = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content="")))
+        model = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content="", tool_calls=[{"name": "finish_context", "args": {"reason": "Done"}, "id": "finish"}])))
         model.bind_tools = lambda tools: model
         fixed_time = datetime(2026, 10, 18, 12, 0, tzinfo=llm.SGT)
         with (
             patch.object(llm, "_get_context_fetcher_llm", AsyncMock(return_value=model)),
             patch.object(llm.settings, "agent_max_context_passes", 3),
             patch.object(llm, "datetime") as clock,
-            patch.object(llm, "build_context_fetcher_handoff",
-                         wraps=prompt_builders.build_context_fetcher_handoff, create=True) as build,
+            patch.object(llm, "build_context_fetcher_state_message",
+                         wraps=prompt_builders.build_context_fetcher_state_message, create=True) as build,
         ):
             clock.now.return_value = fixed_time
             await llm._run_context_fetcher({
@@ -188,14 +188,15 @@ class ContextFetcherNodeTests(unittest.IsolatedAsyncioTestCase):
                     {"sender": "Jamie", "content": "Free {茶}?", "telegram_message_id": 3},
                 ],
                 "senders": {7: "Jamie"}, "context_passes": 1,
-                "retrieval_request": "Friday {value}", "responded_watermark": 2,
+                "current_summary": "Friday {value}", "responded_watermark": 2,
             }, observations)
         messages = model.ainvoke.call_args.args[0]
         self.assertEqual([msg.type for msg in messages], ["system", "system", "human", "ai", "human", "human"])
         self.assertIn("Jamie", messages[0].content)
         self.assertIn("The current date is 18 October 2026, the current day of week is Sunday, the current time is 12:00", messages[0].content)
         self.assertEqual(json.loads(messages[1].content.split("\n", 1)[1]), {
-            "context_pass": 2, "max_context_passes": 3, "retrieval_request": "Friday {value}",
+            "context_pass": 2, "max_context_passes": 3, "current_summary": "Friday {value}",
+            "remaining_steps": None, "max_search_attempts": llm.settings.agent_max_search_attempts, "max_url_attempts": 2,
             "previous_observations": original,
         })
         self.assertEqual([msg.content for msg in messages[2:]], [
@@ -203,7 +204,8 @@ class ContextFetcherNodeTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(observations, original)
         build.assert_called_once_with(
-            context_pass=2, max_context_passes=3, retrieval_request="Friday {value}",
+            context_pass=2, max_context_passes=3, current_summary="Friday {value}",
+            remaining_steps=None, max_search_attempts=llm.settings.agent_max_search_attempts,
             observations=original,
         )
 
@@ -217,7 +219,7 @@ class ContextFetcherNodeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(await llm._get_context_fetcher_llm(), model)
             await llm._run_context_fetcher({
                 "history": [{"sender": "Jamie", "content": "Free Friday?", "telegram_message_id": 1}],
-                "senders": {7: "Jamie"}, "context_passes": 0, "retrieval_request": "",
+                "senders": {7: "Jamie"}, "context_passes": 0, "current_summary": "",
             }, observations)
 
         self.assertEqual(model.bound_tool_names, [tool.name for tool in llm.CONTEXT_TOOLS])

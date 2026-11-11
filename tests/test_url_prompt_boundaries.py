@@ -34,26 +34,26 @@ class UrlPromptBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 original = deepcopy(observations)
                 state = {'history': [{'sender': 'Jamie', 'content': 'Read https://example.com/', 'telegram_message_id': 2}],
                          'senders': {7: 'Jamie'}, 'context_passes': passes, 'tool_observations': observations,
-                         'retrieval_request': 'Check the article', 'current_summary': '', 'mood': 'default'}
-                fetcher = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content='')))
+                         'context_status': 'finished', 'current_summary': '', 'mood': 'default'}
+                fetcher = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content='', tool_calls=[{'name': 'finish_context', 'args': {'reason': 'Done'}, 'id': 'finish'}])))
                 fetcher.bind_tools = lambda tools: fetcher
                 responder = SimpleNamespace(ainvoke=AsyncMock(return_value=llm.ResponseOutput(
-                    decision='respond', content='Article read', reason='Page provides the context', retrieval_request='')))
+                    content='Article read', reason='Page provides the context')))
                 with (
                     patch.object(llm, '_get_context_fetcher_llm', AsyncMock(return_value=fetcher)),
                     patch.object(llm, '_get_responder_llm', AsyncMock(return_value=responder)),
                     patch.object(llm, 'get_active_trait_prompts', AsyncMock(return_value='friendly')),
-                    patch.object(llm, 'build_context_fetcher_handoff', wraps=prompt_builders.build_context_fetcher_handoff) as handoff,
+                    patch.object(llm, 'build_context_fetcher_state_message', wraps=prompt_builders.build_context_fetcher_state_message) as handoff,
                     patch.object(llm, 'build_responder_context', wraps=prompt_builders.build_responder_context) as projection,
                     patch.object(llm, 'build_responder_prompt', wraps=prompt_builders.build_responder_prompt) as prompt,
-                    patch.object(llm, 'build_responder_loop_message', wraps=prompt_builders.build_responder_loop_message) as loop,
+                    patch.object(llm, 'build_responder_context_status_message', wraps=prompt_builders.build_responder_context_status_message) as loop,
                     patch.object(llm, 'build_url_context_message', wraps=prompt_builders.build_url_context_message, create=True) as data,
                 ):
                     await llm._run_context_fetcher(state, observations)
                     await llm.responder_node(state)
                 handoff.assert_called_once_with(context_pass=passes + 1,
                     max_context_passes=llm.settings.agent_max_context_passes,
-                    retrieval_request='Check the article', observations=other)
+                    current_summary='', remaining_steps=None, max_search_attempts=llm.settings.agent_max_search_attempts, observations=other)
                 projection.assert_called_once_with(other)
                 self.assertIs(prompt.call_args.kwargs['context'], loop.call_args.kwargs['context'])
                 self.assertEqual(data.call_count, 2)
@@ -70,12 +70,12 @@ class UrlPromptBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(observations, original)
 
     async def test_shared_links_stay_in_history_without_an_extra_candidate_message(self):
-        model = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content='')))
+        model = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content='', tool_calls=[{'name': 'finish_context', 'args': {'reason': 'Done'}, 'id': 'finish'}])))
         model.bind_tools = lambda tools: model
         with patch.object(llm, '_get_context_fetcher_llm', AsyncMock(return_value=model)):
             await llm._run_context_fetcher({
                 'history': [{'sender': 'Jamie', 'content': 'Read https://example.com/', 'telegram_message_id': 2}],
-                'senders': {7: 'Jamie'}, 'context_passes': 0, 'retrieval_request': '',
+                'senders': {7: 'Jamie'}, 'context_passes': 0, 'context_status': 'finished',
             }, [])
         messages = model.ainvoke.call_args.args[0]
         self.assertEqual([m.type for m in messages], ['system', 'system', 'human'])

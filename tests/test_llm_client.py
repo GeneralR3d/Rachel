@@ -52,7 +52,7 @@ class ReplyPipelineClientTests(unittest.IsolatedAsyncioTestCase):
                     observations = []
                     await llm._run_context_fetcher({
                         "history": [{"sender": "Jamie", "content": "Free on Friday?", "telegram_message_id": 1}],
-                        "senders": {7: "Jamie"}, "context_passes": 0, "retrieval_request": "",
+                        "senders": {7: "Jamie"}, "context_passes": 0,
                     }, observations)
         finally:
             await openai_client.close()
@@ -88,7 +88,7 @@ class ReplyPipelineClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_responder_uses_medium_reasoning_with_json_schema_and_no_tools(self) -> None:
         requests: list[dict] = []
         outputs = iter([
-            '{"decision":"respond","retrieval_request":"","content":"hey","reason":"I followed the friendly tone."}',
+            '{"content":"hey","reason":"I followed the friendly tone."}',
             '{"content":"Which cafe?","reason":"INTERNAL","retrieval_request":"INTERNAL"}',
             'Could you tell me which day?',
         ])
@@ -139,7 +139,7 @@ class ReplyPipelineClientTests(unittest.IsolatedAsyncioTestCase):
                 for expected in ("Which cafe?", "Could you tell me which day?"):
                     fallback = await llm.responder_node({"history": [], "tool_observations": [], "context_passes": 1})
                     self.assertEqual(fallback["response_text"], expected)
-                    self.assertEqual(fallback["responder_decision"], "respond")
+                    self.assertNotIn("responder_decision", fallback)
                     self.assertEqual(fallback["responder_status"], "parse_fallback")
         finally:
             await openai_client.close()

@@ -38,8 +38,9 @@ class WebSearchTests(unittest.IsolatedAsyncioTestCase):
     async def search(self, **args):
         return await web_search.search_web.ainvoke({'query': ' tea ', **args})
 
-    async def test_default_urls_and_text_modes_use_sdk_and_preserve_sources(self):
-        urls = await self.search()
+    async def test_urls_and_text_modes_use_sdk_and_preserve_sources(self):
+        with patch.object(web_search, 'SEARCH_MODE', 'urls'):
+            urls = await self.search()
         with patch.object(web_search, 'SEARCH_MODE', 'text'):
             text = await self.search(num_results=2)
         self.assertEqual(urls, {'query': 'tea', 'mode': 'urls', 'results': [
@@ -75,7 +76,7 @@ class WebSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result['results']), 3)
 
     async def test_validation_prevents_requests_and_optional_key_allows_startup(self):
-        for args in ({'query': '  '}, {'num_results': 0}, {'num_results': 11},
+        for args in ({'query': '  '}, {'num_results': 0}, {'num_results': 21},
                      {'num_results': True}, {'num_results': 1.5}, {'mode': 'full'}):
             with self.subTest(args=args), self.assertRaises(ValueError):
                 await self.search(**args)
@@ -83,7 +84,7 @@ class WebSearchTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, 'EXA_API_KEY'):
                 await self.search()
         self.assertEqual(self.requests, [])
-        for count in (1, 10):
+        for count in (1, 20):
             await self.search(num_results=count)
         self.assertEqual(len(self.requests), 2)
 

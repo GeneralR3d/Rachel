@@ -25,7 +25,7 @@ Rachel does not answer directly inside Telegram's message-arrival event. Each un
 
 ### 2. Bounded retrieval with explicit failure observations
 
-After admission, summarization and the initial context pass run in parallel. The responder evaluates the collected evidence and can request another pass, while only the context fetcher selects and executes tools. Raw results retain their tool, arguments, pass number, and `success`, `empty`, `error`, or `timeout` status, so a failed lookup cannot silently become a claim that no facts exist. A configurable pass budget and a 30-second deadline per pass bound retrieval; completed results survive a later timeout, and every responder pass prepares a sendable fallback.
+After admission, summarization and the first fetcher pass run in parallel. The fetcher assesses evidence, selects and executes tools across bounded passes, and calls `finish_context(reason)` when done. The responder waits for both branches before generating one final reply. Raw results retain their tool, arguments, pass number, and `success`, `empty`, `error`, or `timeout` status, so a failed lookup cannot silently become a claim that no facts exist. A configurable pass budget and a 30-second deadline per pass bound retrieval; completed results survive a later timeout, and the final responder handles incomplete evidence naturally.
 
 ### 3. Separate boundaries for replies and memory extraction
 
@@ -100,7 +100,7 @@ flowchart TB
 - **Memory workflows** (`app/services/memory.py`, `worldview.py`, `userfacts.py`) partition finalized transcripts once, then update general knowledge, personal facts, and structured profiles concurrently.
 - **Graphiti adapter** (`app/services/graphiti.py`) initializes Neo4j indices, serializes graph writes, performs hybrid retrieval, and adds schema-aware retry behavior around Graphiti's LLM client.
 - **Data layer** (`app/models.py`, `app/repository.py`, `app/database.py`) uses async SQLAlchemy sessions and PostgreSQL upserts for durable chat and control-plane state.
-- **Admin plane** (`app/telegram/bot.py`, `app/routers/admin.py`, `app/static/index.html`) exposes Telegram commands, REST endpoints, a dashboard without a build step, and Prometheus metrics. Architecture rendering currently has a missing-source limitation described below.
+- **Admin plane** (`app/telegram/bot.py`, `app/routers/admin.py`, `app/static/index.html`) exposes Telegram commands, REST endpoints, a dashboard without a build step, and Prometheus metrics. Architecture rendering uses the checked-in reactive Mermaid source and compiled workflows.
 
 ### Proactive outreach repeat limits
 
@@ -118,40 +118,46 @@ The proactive graph runs context fetcher and responder with the same retrieval b
 
 ```mermaid
 flowchart LR
-    S((start)) -->|latest history| C[checker]
+    S((start)) --> C[checker]
     C -->|no new user messages| E((end))
     C -->|forced admission| A[admission]
     C -->|ordinary turn| R[JEV decision router]
     R -->|stay silent| E
     R -->|reply| A
-    A -->|undivided history| SUM[summarizer]
-    A -->|new turn and participants| CTX[context fetcher]
-    SUM -->|summary and current mood| RESP[responder]
-    CTX -->|raw tool observations| RESP
-    RESP -->|respond or retrieval limit| E
-    RESP -->|missing supported context| CTX
+    A --> SUM[summarizer]
+    A --> CTX
+    CTX[context fetcher] -->|collecting| CTX
+    CTX -->|finish_context or application cap| RESP[one final responder]
+    SUM -.->|summary and mood at join| RESP
+    RESP --> E
 ```
 
 The checker rejects turns without new user messages even when admission is forced. Otherwise, direct mentions/replies and the spontaneity path can bypass routing. The router sees the summary and latest 15 messages, uses separate DM/group questions, and admits a reply at a validated `noul` probability of at least **0.7**. Errors or invalid answers admit the turn; rejection skips summarization, retrieval, and generation.
 
-After admission, the summarizer runs once in parallel with the initial context fetch. The responder joins both branches and receives the current call's updated mood and summary when available, active traits, Singapore time, and selected tool observations. Summarizer failure preserves existing state. Each reply has a one-sentence reason stored beside its visible text in history, without exposing structured handoff fields to Telegram.
+After admission, the summarizer and first fetcher pass run in parallel. The fetcher loops directly in the reply graph. The deferred responder waits for both branches to finish. The fetcher uses the existing summary captured when collection starts; the responder receives the current call's updated summary and mood, active traits, Singapore time, and all accumulated observations. Summarizer failure preserves existing state. The responder returns only `content` and `reason`; it runs once per completed admitted graph attempt and cannot request retrieval. The whole-graph Telegram retry is separate.
 
-The responder can request another pass for supported calendar, memory, URL, or proactive-schedule work. Only the context fetcher selects and executes tools, sequentially under each pass's shared 30-second deadline. Raw observations accumulate across passes, including empty results, errors, and timeouts. Memory and schedule calls may repeat within the pass budget; normalized URL attempts are deduplicated across the reply. Personal lookup uses `search_user_info(name, query)`, resolves names against actual participants, and retrieves both scoped graph facts and the structured profile; unknown or ambiguous names produce an error observation.
+The fetcher independently assesses the current task and evidence, selecting supported calendar, memory, search, URL, and schedule actions. It executes each batch sequentially under a shared **30-second** deadline. Raw observations retain successes, empty results, errors and timeouts. A valid completion is exactly one `finish_context(reason)` call, alone, with a trimmed nonempty reason. A lookup and completion cannot share a batch: the fetcher must review its results on a later pass. Invalid protocol responses become error observations and allow a corrective pass. Completion reasons stay in tracing state and are never factual evidence for the responder.
 
-Set `AGENT_MAX_CONTEXT_PASSES` to **1–10** (default **3**, including the initial fetch). Retrieval stops on a sufficient response, the pass cap, or an approaching graph recursion limit. When more context is still needed, Rachel sends the responder's prepared best-effort clarification. Prometheus exposes `rachel_agent_loop_outcomes_total{outcome}` (`first_pass`, `retried`, `capped`) and `rachel_agent_context_passes` alongside per-node LLM metrics.
+Set `AGENT_MAX_CONTEXT_PASSES` to **1–10** (default **8**). Every fetcher model attempt counts, including completion, protocol errors and model failures. Immediate completion takes one pass; calendar lookup → completion takes two; search → page read → completion takes three. At the cap, the last tool batch still executes and its results reach the responder without an extra completion call. Completion on the final permitted pass finishes normally. The graph step guard reserves room for the final responder and passes along collected evidence.
 
-The Mermaid above documents the current reply flow. The PNG renderer registers four workflows, but its required `scripts/graph_llm.mmd` source is absent from this checkout. Consequently, `scripts.draw_graphs` fails and `GET /architecture` returns HTTP 502 until that file is restored. The checked-in workflow PNGs may be stale.
+Normalized searches and URL reads are reused across passes regardless of outcome. Exact repeated schedule mutations are deduplicated by tool name and validated arguments, including failed and timed-out writes. Read-only schedule listings remain refreshable for reconciliation. Shielded mutations still finish after a pass timeout, but remain unconfirmed until an observation establishes their outcome. Personal lookup uses `search_user_info(name, query)` against actual participant names and returns both scoped facts and profiles; unknown or ambiguous names become errors.
+
+The proactive graph reuses collection followed by one final responder, without routing, summarization or mood writes. The fired intent is delivered now; old reminder requests are prior context and do not authorize recreating a schedule. Fetcher and responder receive role-specific instructions and a post-history trigger.
+
+Prometheus keeps `rachel_agent_loop_outcomes_total{outcome}` and `rachel_agent_context_passes`: `first_pass` means explicit completion on pass one, `retried` means explicit completion on a later pass, and `capped` means application-enforced termination. Aggregate metrics are recorded once at the outer entry point; one workflow trace contains all fetcher passes and the final responder. The read-only workflow prompt listing includes the fetcher system prompt and loop instructions.
+
+The renderer loads the reactive diagram from `scripts/graph_llm.mmd` and registers reactive, proactive, world-view, and user-memory PNGs. Rendering requires access to the configured Mermaid image service; existing PNGs can be regenerated after changes.
 
 ### Web search
 
-`search_web(query, num_results=5)` uses the official async Exa SDK to find missing public facts. Set optional `EXA_API_KEY` in `.env` to enable requests; startup works without it and searches report a clear configuration error. Queries must be nonblank and result counts range from **1–10**.
+`search_web(query, num_results=5)` uses the official async Exa SDK to find missing public facts. Set optional `EXA_API_KEY` in `.env` to enable requests; startup works without it and searches report a clear configuration error. Queries must be nonblank and result counts range from **1–20**.
 
-- Rachel receives source URL strings and cannot select the output format. Developers can change `SEARCH_MODE` in `app/services/web_search.py` from `"urls"` to `"text"` to request source highlights with URLs, optional titles, excerpts, and a local truncation flag. Combined excerpts are capped at **2,000 characters per source**. Links remain available when excerpts are missing. No generated answers or summaries are requested.
-- At most **`AGENT_MAX_SEARCH_ATTEMPTS` Exa attempts per graph run** (default **2**, **0** disables attempts), across all passes. Both agents receive the configured limit in runtime instructions. Trimmed query and result count define an attempt; omitted defaults normalize identically. Failures and timeouts consume attempts and are reused; invalid arguments consume none. Restarting the whole graph starts fresh, so the Telegram retry can repeat searches and URL reads.
+- The model cannot select the output format. `SEARCH_MODE` in `app/services/web_search.py` currently uses `"text"` for source highlights with URLs, optional titles, excerpts, and a local truncation flag. Developers can change it to `"urls"` for source URL strings only. Combined excerpts are capped at **2,000 characters per source**. Links remain available when excerpts are missing. No generated answers or summaries are requested.
+- At most **`AGENT_MAX_SEARCH_ATTEMPTS` Exa attempts per graph run** (default **4**, **0** disables attempts), across all passes. The fetcher receives the configured limit in its runtime collection state. Trimmed query and result count define an attempt; omitted defaults normalize identically. Failures and timeouts consume attempts and are reused; invalid arguments consume none. Restarting the whole graph starts fresh, so the Telegram retry can repeat searches and URL reads.
 - A **15-second total deadline** and a **15-second SDK network timeout** bound each search inside the existing 30-second pass deadline. Clients are created lazily and closed after use. Errors are sanitized; there are no application-level automatic retries.
-- The fetcher selects tools once per pass. The responder can return source links or request a later pass to read selected search-discovered URLs when it needs page contents. Searches do not trigger automatic page fetches and do not replace participant memory.
+- The fetcher selects tools once per pass. The fetcher can select search-discovered URLs on a later pass when page contents are needed, then call `finish_context`. The final responder can cite the collected source links. Searches do not trigger automatic page fetches and do not replace participant memory.
 
-Search and fetched-page payloads, including titles, excerpts and failures, are explicitly untrusted data supplied to both agents separately from system instructions. Earlier observations survive later failures. The three-pass default and separate two-URL allowance apply within each graph run.
+Search and fetched-page payloads, including titles, excerpts and failures, are explicitly untrusted data supplied to both agents separately from system instructions. Earlier observations survive later failures. The eight-pass default and separate two-URL allowance apply within each graph run.
 
 ### URL reading
 
@@ -324,12 +330,12 @@ Initial embedding model for Graphiti's semantic search.
 Default: `openai/text-embedding-3-small`
 
 **`AGENT_MAX_CONTEXT_PASSES`** *(optional)*
-Sets the total retrieval-pass budget for each reactive or proactive reply, including the initial pass. Choose an integer from **1–10**; values outside that range fail settings validation.
-Default: `3`
+Sets the total retrieval-pass budget for each reactive or proactive reply, including completion calls and failed model attempts. Choose an integer from **1–10**; values outside that range fail settings validation.
+Default: `8`
 
 **`AGENT_MAX_SEARCH_ATTEMPTS`** *(optional)*
 Sets the maximum number of distinct Exa searches per reactive or proactive graph run, across all retrieval passes. Choose a nonnegative integer; **0** disables attempts. Failed and timed-out attempts count; identical normalized searches are reused. Restart the application after changing this setting. This budget is separate from `AGENT_MAX_CONTEXT_PASSES` and the two-URL reading limit.
-Default: `2`
+Default: `4`
 
 The database-backed model selector can override the main, small, and embedding values at runtime. Startup seeds missing selections without overwriting existing admin choices. Legacy `OPENROUTER_MODEL`, `OPENROUTER_SMALL_MODEL`, and `OPENROUTER_EMBEDDING_MODEL` names are accepted only as compatibility aliases for model IDs; the commented `OPENROUTER_API_KEY`, `OPENROUTER_GRAPHITI_API_KEY`, and `OPENROUTER_BASE_URL` template entries are retired and have no effect.
 
@@ -511,7 +517,7 @@ Rachel considers each non-empty incoming turn, but speaking behavior depends on 
 
 ### Browser dashboard
 
-The single-file dashboard at `/` exposes prompts, personality traits, model selections, proactive schedules, chats, histories, user profiles and facts, and world-view facts. Chat names resolve through Telegram, with unavailable names falling back to IDs in the UI. Its Architecture tab currently reports a rendering failure because the Mermaid source is missing. The HTTP API, dashboard, and metrics have no application authentication; use loopback locally and an authenticated reverse proxy in production.
+The single-file dashboard at `/` exposes prompts, personality traits, model selections, proactive schedules, chats, histories, user profiles and facts, and world-view facts. Chat names resolve through Telegram, with unavailable names falling back to IDs in the UI. Its Architecture tab renders the four workflow diagrams on demand. The HTTP API, dashboard, and metrics have no application authentication; use loopback locally and an authenticated reverse proxy in production.
 
 System prompts are defined in `app/prompts.py` and are read-only in the dashboard, API, and Telegram admin bot. Edit the source and restart the service to change them. Migration `f9c6a1d4b3e8` drops the retired `system_prompts` table and its stored values. Personality levels remain adjustable.
 
@@ -612,7 +618,7 @@ Successful test commands finish with no failures; database tests report skips un
 
 Tests cover reply routing, responder schemas/fallbacks, prompt boundaries, public URL handling, Telegram lifecycle races, schedule tools and limits, scheduler shutdown, tracing, and migration preservation. Migration `0a7e2c9d4b61` adds the history timestamp if absent while preserving existing timestamps. There is no lint configuration or CI workflow in this checkout. `Reference/` is an ignored local copy of the original implementation and may be absent from a fresh clone.
 
-The workflow renderer registers reactive, proactive, world-view, and user-memory diagrams. After restoring its missing `scripts/graph_llm.mmd` source, the following command writes all four PNGs; Mermaid rendering may also require network access:
+The workflow renderer registers reactive, proactive, world-view, and user-memory diagrams. The following command writes all four PNGs; Mermaid rendering may also require network access:
 
 ```bash
 uv run python -m scripts.draw_graphs
@@ -640,7 +646,7 @@ Run **one app process** in either topology; multiple workers would duplicate Tel
 - Timed silence, indefinite mute state, and reply watermarks are process-local; the durable memory-extraction watermark is persisted.
 - Extraction watermarks advance at background-task handoff. Failed extraction is not automatically replayed, and shutdown flushes do not start memory extraction.
 - Proactive repeat limits count attempts, including failures and manual runs. They do not guarantee successful delivery; missed occurrences beyond the scheduler grace period are not replayed.
-- The missing `scripts/graph_llm.mmd` prevents CLI diagram generation and makes `/architecture` return HTTP 502; checked-in PNGs may be stale.
+- Diagram rendering requires access to the Mermaid image service; rendering errors surface as HTTP 502 from `/architecture`. Checked-in PNGs may be stale.
 - Switching to an embedding model with a different vector dimensionality does not automatically re-embed existing Neo4j data.
 - Graphiti's configured OpenAI reranker requires log probabilities the Gateway does not supply. Current RRF retrieval avoids it; changing search recipes needs compatibility work.
 - Admin profile edits can remain stale in the five-minute profile cache until its TTL expires.
