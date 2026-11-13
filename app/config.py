@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # Optional: startup and non-search tools work without an Exa key.
     exa_api_key: str | None = None
 
+    # Optional speech synthesis for reactive Telegram replies.
+    elevenlabs_api_key: str | None = None
+    elevenlabs_voice_id: str = "SEWXl8lPSO01tdGbWECX"
+    elevenlabs_model_id: str = "eleven_v4"
+
     # Replaced by the MERGE_GATEWAY_* settings above; kept for reference.
     # openrouter_api_key: str
     # openrouter_graphiti_api_key: str | None = None

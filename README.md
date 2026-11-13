@@ -295,6 +295,16 @@ Example: `ADMIN_ID=987654321`
 
 Rachel's own Telegram login is intentionally not stored in `.env`; step 6 creates `anon.session` interactively.
 
+#### Optional Telegram voice replies
+
+- `ELEVENLABS_API_KEY` enables speech synthesis. Leave it unset or blank for text delivery.
+- `ELEVENLABS_VOICE_ID` defaults to `SEWXl8lPSO01tdGbWECX`.
+- `ELEVENLABS_MODEL_ID` defaults to `eleven_v4`.
+
+With a key configured, each eligible reactive reply in a private or group chat has a 20% chance of becoming one captionless voice note. Replies containing URLs use text. For voice, ElevenLabs receives `[Strong Singapore Accent]` followed by the full reply, including every paragraph. Rachel uses text if synthesis fails or the tagged input for `eleven_v4` exceeds 10,000 characters. Scheduled outreach, commands, and confirmations use text.
+
+Rachel uploads Ogg Opus audio from memory and stores the original reply text and reason in the existing history. Incoming captionless voice notes appear as `[voice message]`.
+
 #### Merge Gateway and model roles
 
 **`MERGE_GATEWAY_API_KEY`** *(required)*

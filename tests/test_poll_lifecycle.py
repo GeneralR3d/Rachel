@@ -14,6 +14,7 @@ from app.telegram import client as telegram
 from tests.test_agent_loop import FetcherModel, Model, calls, finish, reply
 from tests.test_poll_graph import POLL
 from tests import test_telegram_lifecycle as lifecycle
+from tests.test_voice import AUDIO
 
 PLACEHOLDER = "[Poll sent]\nQuestion: Which language?\nOptions:\n1. Python\n2. Rust"
 TEXT = "Have a vote!"
@@ -121,6 +122,47 @@ class PollLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assert_poll_and_text_buffer(responder_runs=2)
         self.assertEqual(len(self.fetcher.messages), 4)
         self.assertIn(PLACEHOLDER, self.responder.messages[-1][0].content)
+
+    async def test_whole_graph_retry_sends_one_poll_and_voice_and_drains_poll_under_lock(self):
+        append = telegram._append_or_persist_bot_message
+        recording_order = []
+        poll_attempts = 0
+
+        async def record(chat_id, sender_id, message_id, content, reason):
+            nonlocal poll_attempts
+            self.assertTrue(telegram.reply_locks[chat_id].locked())
+            if message_id == 123:
+                poll_attempts += 1
+                if poll_attempts <= 2:
+                    raise RuntimeError("Poll history temporarily unavailable")
+            await append(chat_id, sender_id, message_id, content, reason)
+            recording_order.append(message_id)
+
+        self.fetcher.outputs = iter([calls(POLL), finish(), calls(POLL), finish()])
+        self.responder.outputs = iter([RuntimeError("Retry after poll delivery"), reply(content=TEXT)])
+        self.send.side_effect = [SimpleNamespace(id=123), SimpleNamespace(id=124)]
+        synthesize = AsyncMock(return_value=AUDIO)
+        with (
+            patch.object(telegram.settings, "elevenlabs_api_key", "test-key"),
+            patch.object(telegram.random, "random", return_value=0),
+            patch.object(telegram, "synthesize_voice_reply", synthesize),
+            patch.object(telegram, "_append_or_persist_bot_message", record),
+        ):
+            await self.reactive()
+        self.assertEqual(self.send.await_count, 2)
+        poll, voice = self.send.await_args_list
+        self.assertEqual(poll.args[1].poll.question.text, "Which language?")
+        self.assertTrue(voice.kwargs["voice_note"])
+        self.assertNotIn("caption", voice.kwargs)
+        synthesize.assert_awaited_once()
+        self.assertEqual(synthesize.await_args.args, (f"[Strong Singapore Accent] {TEXT}",))
+        self.text.assert_not_awaited()
+        messages = telegram.current_messages_buffer[42]
+        self.assertEqual([m.telegram_message_id for m in messages], [1, 123, 124])
+        self.assertEqual((messages[1].content, messages[1].reason), (PLACEHOLDER, POLL_REASON))
+        self.assertEqual(messages[2].content, TEXT)
+        self.assertEqual(recording_order, [124, 123])
+        self.assertFalse(telegram.reply_locks[42].locked())
 
     async def test_recording_retry_after_append_does_not_duplicate_buffer_entry(self):
         append = telegram._append_or_persist_bot_message

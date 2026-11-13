@@ -9,7 +9,6 @@ from uuid import uuid4
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, HTTPException
 import httpx
-from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -20,6 +19,7 @@ from app.routers import admin
 from app.services import proactive
 from app.services import llm
 from app.telegram import client as telegram
+from tests.test_agent_loop import FetcherModel, Model, finish
 from types import SimpleNamespace
 
 
@@ -316,23 +316,11 @@ class ProactivePostgresTests(unittest.IsolatedAsyncioTestCase):
         await repository.set_summary(42, "Exam preparation", "excited")
         row = await self.create_schedule(intent="Ask how the exam went", repeat_times=1)
 
-        class Model:
-            def __init__(self, outputs):
-                self.outputs, self.messages = iter(outputs), []
-
-            def bind_tools(self, tools):
-                return self
-
-            async def ainvoke(self, messages):
-                self.messages.append(messages)
-                return next(self.outputs)
-
-        fetcher = Model([AIMessage(content=""), AIMessage(content="")])
+        fetcher = FetcherModel([finish("The history contains the exam context")])
         responder = Model([
-            llm.ResponseOutput(decision="fetch_more", retrieval_request="Exam context",
-                reason="Need background", content="How was your exam?"),
-            llm.ResponseOutput(decision="respond", retrieval_request="",
-                reason="Following the outreach intent", content="Hey Jamie, how did your exam go?"),
+            llm.ResponseOutput(
+                reason="Following the outreach intent", content="Hey Jamie, how did your exam go?"
+            ),
         ])
 
         @asynccontextmanager
@@ -349,6 +337,8 @@ class ProactivePostgresTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(telegram.client, "is_connected", return_value=True))
             stack.enter_context(patch.object(telegram.client, "get_me", AsyncMock(return_value=SimpleNamespace(id=99))))
             stack.enter_context(patch.object(telegram.client, "action", side_effect=typing))
+            stack.enter_context(patch.object(telegram.settings, "elevenlabs_api_key", "test-key"))
+            voice = stack.enter_context(patch.object(telegram.client, "send_file", AsyncMock()))
             sent = stack.enter_context(patch.object(telegram.client, "send_message", AsyncMock(return_value=SimpleNamespace(id=2))))
             stack.enter_context(patch.object(llm, "get_active_trait_prompts", AsyncMock(return_value="Friendly")))
             stack.enter_context(patch.object(llm, "_get_context_fetcher_llm", AsyncMock(return_value=fetcher)))
@@ -360,7 +350,9 @@ class ProactivePostgresTests(unittest.IsolatedAsyncioTestCase):
                 stored = await repository.get_proactive_schedule(row["id"])
                 self.assertEqual((stored["repeat_completed"], stored["last_status"]), (1, "succeeded"))
                 sent.assert_awaited_once_with(42, "Hey Jamie, how did your exam go?")
-                self.assertEqual(len(fetcher.messages), 2)
+                voice.assert_not_awaited()
+                self.assertEqual(len(fetcher.messages), 1)
+                self.assertEqual(len(responder.messages), 1)
                 self.assertIn("Ask how the exam went", responder.messages[-1][0].content)
                 self.assertIn("Jamie: My exam is tomorrow", [m.content for m in responder.messages[-1]])
                 self.assertEqual(responder.messages[-1][-1].type, "system")

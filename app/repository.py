@@ -594,30 +594,6 @@ async def clear_history(chat_id: int) -> None:
         await session.execute(delete(History).where(History.chat_id == chat_id))
 
 
-async def get_history_min_id(chat_id: int) -> int:
-    """Min telegram_message_id stored for a chat, used to incrementally update history."""
-    async with session_scope() as session:
-        out = await session.scalar(
-            select(func.min(History.telegram_message_id)).where(History.chat_id == chat_id)
-        )
-    # return 0 if no min id (no messages stored yet)
-    return out if out else 0
-
-
-async def rewrite_history(chat_id: int, parsed_history: list[dict]) -> None:
-    async with session_scope() as session:
-        await session.execute(delete(History).where(History.chat_id == chat_id))
-        for item in parsed_history:
-            await session.execute(
-                pg_insert(History).values(
-                    telegram_message_id=item["telegram_message_id"],
-                    chat_id=chat_id,
-                    sender_user_id=item["sender_user_id"],
-                    content=item["content"],
-                )
-            )
-
-
 # --- summary -------------------------------------------------------------
 
 
