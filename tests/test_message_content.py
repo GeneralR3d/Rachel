@@ -1,7 +1,6 @@
 """Telegram entities and media render consistently before buffering or import."""
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
 
 from telethon import events
 from telethon.tl.types import Message, MessageEntityTextUrl, PeerUser
@@ -52,25 +51,19 @@ class MessageContentTests(unittest.TestCase):
         self.assertEqual(render_message_content(Message(id=1, peer_id=PeerUser(7), message='')), '')
 
 
-class IngestionAdapterTests(unittest.IsolatedAsyncioTestCase):
-    async def test_incoming_and_import_use_same_renderer(self):
+class IncomingMessageContentTests(unittest.TestCase):
+    def test_incoming_message_uses_shared_renderer(self):
         from app.telegram import client as telegram
-        message = linked_message()
-        message.from_id = SimpleNamespace(user_id=7)
-        event = SimpleNamespace(message=message, chat_id=42, is_group=False)
-        self.assertEqual(telegram._message_content(event), '😀 read this\n<https://example.com/Article#part>')
 
-        async def messages(*args, **kwargs):
-            yield message
+        event = SimpleNamespace(message=linked_message())
+        self.assertEqual(
+            telegram._message_content(event),
+            '😀 read this\n<https://example.com/Article#part>',
+        )
 
-        with (
-            patch.object(telegram.client, 'get_me', AsyncMock(return_value=SimpleNamespace(user_id=1))),
-            patch.object(telegram.client, 'iter_messages', messages),
-            patch.object(telegram.client, 'delete_messages', AsyncMock()),
-            patch.object(telegram, 'get_history_min_id', AsyncMock(return_value=1)),
-            patch.object(telegram, 'parse_history', return_value=[]) as parse,
-            patch.object(telegram, 'rewrite_history', AsyncMock()),
-        ):
-            with self.assertRaises(events.StopPropagation):
-                await telegram.on_update_history(event)
-        self.assertEqual(parse.call_args.args[0], [(7, '😀 read this\n<https://example.com/Article#part>', 7)])
+    def test_history_rebuild_has_no_telegram_command(self):
+        from app.telegram import client as telegram
+
+        for _, handler in telegram.client.list_event_handlers():
+            if isinstance(handler, events.NewMessage) and handler.pattern:
+                self.assertIsNone(handler.pattern("/update_history"))

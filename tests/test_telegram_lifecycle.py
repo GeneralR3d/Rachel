@@ -13,6 +13,7 @@ class TelegramLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.object(telegram.settings, "elevenlabs_api_key", None))
         for name in (
             "current_messages_buffer", "pending_summaries", "burst_sessions", "wait_tasks",
             "flush_tasks", "last_message_time", "reply_locks", "buffer_locks", "responded_watermark",

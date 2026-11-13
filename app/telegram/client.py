@@ -13,11 +13,12 @@ import random
 import re
 import time
 import uuid
-from pprint import pprint
+from io import BytesIO
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 from telethon import TelegramClient, events
+from telethon.tl.types import DocumentAttributeAudio
 
 from app.config import get_settings
 from app.repository import (
@@ -25,11 +26,9 @@ from app.repository import (
     clear_history,
     delete_summary,
     get_history,
-    get_history_min_id,
     get_last_processed_message_id,
     get_summary,
     get_summary_mood,
-    rewrite_history,
     set_last_processed_message_id,
     set_summary,
     upsert_user,
@@ -38,9 +37,9 @@ from app.services.llm import get_chat_mood, get_proactive_response, get_response
 from app.services.memory import update_memories
 from app.services.poll_tools import PollDeliveryRuntime
 from app.services.tracing import traced_workflow
+from app.services.voice import VoiceSynthesisError, ogg_opus_duration, synthesize_voice_reply
 from app.telegram.bot import ADMIN
 from app.telegram.message_content import render_message_content
-from app.utils import parse_history
 
 settings = get_settings()
 
@@ -53,6 +52,9 @@ N_PAST_MSG_REQUIRED = 40         # messages pre-loaded on first contact and fed 
 MAX_BUFFER_LEN = 150             # flush to DB immediately if buffer hits this length
 SPONTANEOUS_REPLY_CHANCE = 0.05  # chance an untagged message still forces a reply (skips the router)
 TYPING_SPEED = 22                # characters per second
+VOICE_REPLY_CHANCE = 0.2
+VOICE_ACCENT_PREFIX = "[Strong Singapore Accent] "
+ELEVEN_V4_TEXT_LIMIT = 10_000
 SILENT_MODE_DURATION = 15 * 60   # seconds a group stays silenced after "Rachel shush" (default 15 min)
 
 # only used for summarisation
@@ -242,6 +244,51 @@ async def _send_paragraphs(chat_id: int, response: str) -> int | None:
         if first_message_id is None:
             first_message_id = sent.id
     return first_message_id
+
+
+def _contains_url(text: str) -> bool:
+    return re.search(
+        r"\b[a-z][a-z0-9+.-]*://\S"
+        r"|(?<![\w@.-])(?:[a-z0-9][a-z0-9-]{0,62}\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})(?![\w-])",
+        text,
+        re.IGNORECASE,
+    ) is not None
+
+
+async def _deliver_reactive_reply(chat_id: int, response: str) -> int | None:
+    """Choose one delivery mode for the complete generated reply."""
+    if not response.strip():
+        return None
+    use_voice = random.random() < VOICE_REPLY_CHANCE
+    api_key = (settings.elevenlabs_api_key or "").strip()
+    model_id = settings.elevenlabs_model_id
+    if not use_voice or not api_key or _contains_url(response):
+        return await _send_paragraphs(chat_id, response)
+
+    speech_text = VOICE_ACCENT_PREFIX + response
+    if model_id == "eleven_v4" and len(speech_text) > ELEVEN_V4_TEXT_LIMIT:
+        return await _send_paragraphs(chat_id, response)
+
+    try:
+        async with client.action(chat_id, "record-voice"):
+            audio = await synthesize_voice_reply(
+                speech_text, api_key=api_key, voice_id=settings.elevenlabs_voice_id, model_id=model_id,
+            )
+            duration = ogg_opus_duration(audio)
+    except VoiceSynthesisError as exc:
+        print(f"[{chat_id}] {exc}; delivering reply as text")
+        return await _send_paragraphs(chat_id, response)
+
+    with BytesIO(audio) as voice_file:
+        voice_file.name = "voice.ogg"
+        sent = await client.send_file(
+            chat_id, voice_file, voice_note=True,
+            attributes=[DocumentAttributeAudio(duration=duration, voice=True)],
+        )
+    message_id = getattr(sent, "id", None)
+    if type(message_id) is not int or message_id <= 0:
+        raise RuntimeError("Telegram voice delivery returned no confirmed message ID")
+    return message_id
 
 
 async def _append_or_persist_bot_message(
@@ -547,15 +594,7 @@ async def _reply_with_delivery(event, me, poll_delivery: PollDeliveryRuntime):
             print(f"[{chat_id}] Summary buffered (pending flush): {new_summary}")
         print(f"[{chat_id}] Current summary: {current_summary}")
 
-    # TODO: A multi-paragraph reply is sent as N separate Telegram messages
-    # (each with its own id) but persisted as ONE row keyed to the FIRST
-    # paragraph's id. If a user interleaves a message during the typing delay
-    # between paragraphs, the DB re-seed (get_history, ordered strictly by
-    # telegram_message_id) sorts the whole reply ABOVE that user message —
-    # disagreeing with the live buffer's true append order. Low-impact (only
-    # after a flush + re-seed). Proper fix: persist each paragraph as its own
-    # row with its own sent.id.
-    bot_message_id = await _send_paragraphs(chat_id, response)
+    bot_message_id = await _deliver_reactive_reply(chat_id, response)
     if bot_message_id is not None:
         await _append_or_persist_bot_message(
             chat_id, me.id, bot_message_id, response, response_reason

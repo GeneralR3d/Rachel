@@ -367,6 +367,23 @@ wheels = [
 ]
 
 [[package]]
+name = "elevenlabs"
+version = "2.78.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "requests" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c0/9b/0a771ae87b389db5174759796bbfa5b08ec1dc84de1a9bf29d2f46527b55/elevenlabs-2.78.0.tar.gz", hash = "sha256:8b33e5a51ea04f89e47e0d08b1709a837e9208dc84076c692aefeeb492c59378", size = 974330, upload-time = "2026-11-12T14:48:51.611Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/60/15/eb29334a44d5a7976d41fa4f8380cb54e4eee6271459ccf6799ccb0b5341/elevenlabs-2.78.0-py3-none-any.whl", hash = "sha256:a09f59beb73a9805f90ff719182e2f91e4d418ef9327fd984d8aa97a51004351", size = 2513566, upload-time = "2026-11-12T14:48:49.818Z" },
+]
+
+[[package]]
 name = "exa-py"
 version = "2.28.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2001,13 +2018,14 @@ wheels = [
 
 [[package]]
 name = "rachel"
-version = "2.0.0"
+version = "2.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "alembic" },
     { name = "apscheduler" },
     { name = "arize-phoenix-otel" },
     { name = "asyncpg" },
+    { name = "elevenlabs" },
     { name = "exa-py" },
     { name = "fastapi" },
     { name = "graphiti-core" },
@@ -2035,6 +2053,7 @@ requires-dist = [
     { name = "apscheduler", specifier = ">=3.11,<4" },
     { name = "arize-phoenix-otel", specifier = "==0.17.2" },
     { name = "asyncpg", specifier = ">=0.29" },
+    { name = "elevenlabs", specifier = ">=2,<3" },
     { name = "exa-py", specifier = ">=2.28,<3" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "graphiti-core", specifier = ">=0.3" },
