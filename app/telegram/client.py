@@ -795,38 +795,6 @@ async def on_clear_history(event):
     raise events.StopPropagation
 
 
-@client.on(events.NewMessage(pattern="\\/update_history"))
-async def on_update_history(event):
-    print(f"[{event.chat_id}] update history command received")
-
-    if event.is_group:
-        await event.respond("I can't clear history in groups yet.")
-        return  # ignore group messages
-
-    my_id = (await client.get_me(input_peer=True)).user_id
-    chat_id = event.chat_id
-    min_id = await get_history_min_id(chat_id)
-
-    chat_log = []
-    async for message in client.iter_messages(
-        chat_id, min_id=min_id - 1, max_id=event.message.id
-    ):  # ignore command message
-        sender_id = message.from_id.user_id if message.from_id else 0
-        chat_log.insert(0, (sender_id, render_message_content(message), message.id))
-
-    parsed_history = parse_history(chat_log)
-    print(f"{my_id=}")
-    print(f"{min_id=}")
-    pprint(chat_log)
-    pprint(parsed_history)
-    await rewrite_history(chat_id, parsed_history)
-
-    # delete command message
-    await client.delete_messages(chat_id, [event.message.id])
-
-    raise events.StopPropagation
-
-
 @client.on(events.NewMessage(incoming=True))
 async def new_message(event):
     """Handle new incoming message: populate buffer cache if needed, then schedule a reply."""
