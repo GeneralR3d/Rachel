@@ -25,7 +25,7 @@ class VoiceReplyLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch.object(telegram.settings, "elevenlabs_model_id", "eleven_v4"))
         self.stack.enter_context(patch.object(telegram.client, "is_connected", return_value=True))
         self.stack.enter_context(patch.object(telegram.client, "action", side_effect=self.action))
-        self.draw = self.stack.enter_context(patch.object(telegram.random, "random", return_value=0.199))
+        self.draw = self.stack.enter_context(patch.object(telegram.random, "random", return_value=0.149))
         self.generate = self.stack.enter_context(patch.object(
             telegram, "get_response", AsyncMock(return_value=(REPLY, REASON, "Updated summary", 0))
         ))
@@ -106,8 +106,8 @@ class VoiceReplyLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 for mock in (self.draw, self.synthesize, self.voice):
                     mock.reset_mock()
 
-    async def test_text_selection_at_twenty_percent_and_with_no_key(self):
-        for draw, key in ((0.2, "test-key"), (0, None), (0, ""), (0, " \t ")):
+    async def test_text_selection_at_fifteen_percent_and_with_no_key(self):
+        for draw, key in ((0.15, "test-key"), (0, None), (0, ""), (0, " \t ")):
             with self.subTest(draw=draw, key=key), patch.object(telegram.settings, "elevenlabs_api_key", key):
                 self.draw.return_value = draw
                 await self.reactive()
@@ -160,8 +160,8 @@ class VoiceReplyLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(telegram.current_messages_buffer[CHAT_ID]), 1)
                 self.seed_chat()
 
-    async def test_default_model_counts_accent_tag_toward_input_limit(self):
-        response = "x" * (10000 - len(ACCENT_PREFIX))
+    async def test_voice_requires_fewer_than_650_characters_before_accent_tag(self):
+        response = "x" * 649
         self.generate.return_value = (response, REASON, None, 0)
         await self.reactive()
         self.synthesize.assert_awaited_once()
@@ -169,10 +169,12 @@ class VoiceReplyLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assert_transcript(12, response)
         self.seed_chat()
         self.synthesize.reset_mock()
+        self.voice.reset_mock()
         response += "x"
         self.generate.return_value = (response, REASON, None, 0)
         await self.reactive()
         self.synthesize.assert_not_awaited()
+        self.voice.assert_not_awaited()
         self.text.assert_awaited_once_with(CHAT_ID, response)
         self.assert_transcript(10, response)
 
@@ -189,8 +191,8 @@ class VoiceReplyLifecycleTests(unittest.IsolatedAsyncioTestCase):
         sleep.assert_awaited_once_with(len("Second paragraph!") / telegram.TYPING_SPEED)
         self.assert_transcript(10, response)
 
-    async def test_overridden_model_can_try_long_text_and_falls_back_on_rejection(self):
-        response = "x" * 10001
+    async def test_overridden_model_can_try_short_text_and_falls_back_on_rejection(self):
+        response = "Try this instead."
         self.generate.return_value = (response, REASON, None, 0)
         self.synthesize.side_effect = VoiceSynthesisError("Rejected input")
         with patch.object(telegram.settings, "elevenlabs_model_id", "custom"):

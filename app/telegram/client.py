@@ -52,9 +52,9 @@ N_PAST_MSG_REQUIRED = 40         # messages pre-loaded on first contact and fed 
 MAX_BUFFER_LEN = 150             # flush to DB immediately if buffer hits this length
 SPONTANEOUS_REPLY_CHANCE = 0.05  # chance an untagged message still forces a reply (skips the router)
 TYPING_SPEED = 22                # characters per second
-VOICE_REPLY_CHANCE = 0.2
+VOICE_REPLY_CHANCE = 0.15
+VOICE_REPLY_CHARACTER_LIMIT = 650
 VOICE_ACCENT_PREFIX = "[Strong Singapore Accent] "
-ELEVEN_V4_TEXT_LIMIT = 10_000
 SILENT_MODE_DURATION = 15 * 60   # seconds a group stays silenced after "Rachel shush" (default 15 min)
 
 # only used for summarisation
@@ -255,24 +255,25 @@ def _contains_url(text: str) -> bool:
     ) is not None
 
 
+def _is_voice_reply_eligible(response: str) -> bool:
+    return len(response) < VOICE_REPLY_CHARACTER_LIMIT and not _contains_url(response)
+
+
 async def _deliver_reactive_reply(chat_id: int, response: str) -> int | None:
     """Choose one delivery mode for the complete generated reply."""
     if not response.strip():
         return None
     use_voice = random.random() < VOICE_REPLY_CHANCE
     api_key = (settings.elevenlabs_api_key or "").strip()
-    model_id = settings.elevenlabs_model_id
-    if not use_voice or not api_key or _contains_url(response):
+    if not use_voice or not api_key or not _is_voice_reply_eligible(response):
         return await _send_paragraphs(chat_id, response)
 
     speech_text = VOICE_ACCENT_PREFIX + response
-    if model_id == "eleven_v4" and len(speech_text) > ELEVEN_V4_TEXT_LIMIT:
-        return await _send_paragraphs(chat_id, response)
-
     try:
         async with client.action(chat_id, "record-voice"):
             audio = await synthesize_voice_reply(
-                speech_text, api_key=api_key, voice_id=settings.elevenlabs_voice_id, model_id=model_id,
+                speech_text, api_key=api_key, voice_id=settings.elevenlabs_voice_id,
+                model_id=settings.elevenlabs_model_id,
             )
             duration = ogg_opus_duration(audio)
     except VoiceSynthesisError as exc:
