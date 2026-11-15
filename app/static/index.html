@@ -417,6 +417,11 @@
               <button onclick="loadHistory()" class="ghost">Reload</button>
               <button onclick="clearHistory()" class="danger">Clear history</button>
             </div>
+            <div class="btns" role="group" aria-label="History pages" style="align-items:center">
+              <button id="historyNewer" onclick="loadHistory(historyPage - 1)" class="ghost" disabled>Newer</button>
+              <button id="historyOlder" onclick="loadHistory(historyPage + 1)" class="ghost" disabled>Older</button>
+              <span id="historyPageLabel" class="muted" role="status"></span>
+            </div>
             <div id="historyOut"></div>
           </div>
         </div>
@@ -506,7 +511,7 @@ function toast(msg, kind = "") {
   setTimeout(() => el.remove(), 3800);
 }
 
-async function api(path, { method = "GET", body } = {}) {
+async function api(path, { method = "GET", body, withHeaders = false } = {}) {
   const opts = { method, headers: {} };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
@@ -520,7 +525,8 @@ async function api(path, { method = "GET", body } = {}) {
   }
   if (res.status === 204) return null;
   const ct = res.headers.get("content-type") || "";
-  return ct.includes("application/json") ? res.json() : res.text();
+  const data = await (ct.includes("application/json") ? res.json() : res.text());
+  return withHeaders ? { data, headers: res.headers } : data;
 }
 
 function esc(s) {
@@ -687,6 +693,8 @@ async function resetTraits() {
 // --- chats (list + summary + history) -----------------------------------
 let selectedChat = null;   // currently selected chat id (string)
 let CHATS = [];
+let historyPage = 1;
+let historyRequestId = 0;
 
 async function loadChats() {
   const box = document.getElementById("chatTable");
@@ -725,12 +733,26 @@ async function selectChat(id) {
 }
 
 // history ----------------------------------------------------------------
-async function loadHistory() {
+async function loadHistory(targetPage) {
   if (!selectedChat) return;
+  const page = targetPage ?? 1;
+  const navigating = targetPage !== undefined;
+  const requestId = ++historyRequestId;
   const box = document.getElementById("historyOut");
-  box.className = "out"; box.textContent = "Loading…";
+  const newer = document.getElementById("historyNewer");
+  const older = document.getElementById("historyOlder");
+  const label = document.getElementById("historyPageLabel");
+  const olderWasDisabled = older.disabled;
+  newer.disabled = older.disabled = true;
+  label.textContent = navigating ? `Loading page ${page}…` : "";
+  if (!navigating) { box.className = "out"; box.textContent = "Loading…"; }
   try {
-    const items = await api("/history/" + selectedChat);
+    const { data: items, headers } = await api(`/history/${selectedChat}?page=${page}`, { withHeaders: true });
+    if (requestId !== historyRequestId) return;
+    historyPage = page;
+    label.textContent = `Page ${page}`;
+    newer.disabled = page === 1;
+    older.disabled = headers.get("X-Has-More") !== "true";
     if (!items.length) { box.className = "out"; box.textContent = "(empty)"; return; }
     box.className = "";
     let html = "<table><thead><tr><th>Sender</th><th>Content</th><th>Reason</th></tr></thead><tbody>";
@@ -740,15 +762,25 @@ async function loadHistory() {
     }
     html += "</tbody></table>";
     box.innerHTML = html;
-  } catch (e) { box.className = "out"; box.textContent = ""; toast("History: " + e.message, "err"); }
+  } catch (e) {
+    if (requestId !== historyRequestId) return;
+    if (navigating) {
+      label.textContent = `Page ${historyPage}`;
+      newer.disabled = historyPage === 1;
+      older.disabled = olderWasDisabled;
+    } else {
+      box.textContent = "";
+    }
+    toast("History: " + e.message, "err");
+  }
 }
 async function clearHistory() {
-  if (!selectedChat) return;
-  if (!confirm("Clear ALL history for chat " + selectedChat + "?")) return;
+  const chat = selectedChat;
+  if (!chat || !confirm("Clear ALL history for chat " + chat + "?")) return;
   try {
-    await api("/history/" + selectedChat, { method: "DELETE" });
+    await api("/history/" + chat, { method: "DELETE" });
     toast("History cleared", "ok");
-    loadHistory();
+    if (chat === selectedChat) await loadHistory();
   } catch (e) { toast("Clear: " + e.message, "err"); }
 }
 

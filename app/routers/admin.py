@@ -9,9 +9,9 @@ import base64
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 import json
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 from telethon import utils
 
@@ -29,6 +29,9 @@ from app.telegram.client import client
 from scripts.draw_graphs import GRAPHS, render_graphs
 
 router = APIRouter()
+
+HISTORY_PAGE_SIZE = 100
+MAX_HISTORY_PAGE = (2**63 - 1) // HISTORY_PAGE_SIZE + 1
 
 
 # Workflow-node prompts that are NOT stored in the DB: they are imported
@@ -239,9 +242,32 @@ async def run_proactive_schedule(schedule_id: int) -> ProactiveScheduleOut:
     return _schedule_out(row)
 
 
-@router.get("/history/{chat_id}", response_model=list[HistoryItem])
-async def read_history(chat_id: int) -> list[HistoryItem]:
-    return [HistoryItem(**item) for item in await repository.get_history(chat_id)]
+@router.get(
+    "/history/{chat_id}",
+    response_model=list[HistoryItem],
+    responses={
+        200: {
+            "headers": {
+                "X-Has-More": {
+                    "description": "Whether an older page exists.",
+                    "schema": {"type": "string", "enum": ["true", "false"]},
+                },
+            },
+        },
+    },
+)
+async def read_history(
+    chat_id: int,
+    response: Response,
+    page: Annotated[int, Query(ge=1, le=MAX_HISTORY_PAGE, description="Page 1 is the newest page.")] = 1,
+) -> list[HistoryItem]:
+    """Return up to 100 messages in ascending Telegram message ID order within the page."""
+    rows = await repository.get_history(
+        chat_id, HISTORY_PAGE_SIZE + 1, offset=(page - 1) * HISTORY_PAGE_SIZE,
+    )
+    response.headers["X-Has-More"] = "true" if len(rows) > HISTORY_PAGE_SIZE else "false"
+    # The lookahead row is the oldest because the repository returns ascending IDs.
+    return [HistoryItem(**item) for item in rows[-HISTORY_PAGE_SIZE:]]
 
 
 @router.delete("/history/{chat_id}", status_code=204)

@@ -497,10 +497,11 @@ async def get_all_chats() -> list[dict]:
     return [{"chat_id": r.chat_id, "message_count": r.message_count} for r in rows]
 
 
-async def get_history(chat_id: int, count: int = -1) -> list[dict]:
+async def get_history(chat_id: int, count: int = -1, *, offset: int = 0) -> list[dict]:
     """Return history rows in ascending message order.
 
     count: number of most-recent rows to return (-1 for all).
+    offset: number of newest rows to skip for a bounded read.
     """
     # Prioritize first name, better for summary and fact extraction
     # Might cause conflicts if 2 ppl in same chat have exact same first name, which is unlikely
@@ -517,7 +518,10 @@ async def get_history(chat_id: int, count: int = -1) -> list[dict]:
     )
 
     if count != -1:
-        subq = base.order_by(History.telegram_message_id.desc()).limit(count).subquery()
+        recent = base.order_by(History.telegram_message_id.desc()).limit(count)
+        if offset:
+            recent = recent.offset(sa.literal(offset, type_=sa.BigInteger()))
+        subq = recent.subquery()
         stmt = select(subq).order_by(subq.c.telegram_message_id.asc())
     else:
         stmt = base.order_by(History.telegram_message_id.asc())

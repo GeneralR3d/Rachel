@@ -584,7 +584,7 @@ Routes are mounted at the root, with [app/routers/admin.py](app/routers/admin.py
 
 - **Prompts:** `GET /responder-system-prompt`, `/summarizer-system-prompt`, and `/workflow-prompts` are read-only.
 - **Users and chats:** `GET /users/names` and `/list-chats`.
-- **Conversation state:** `GET` and `DELETE /history/{chat_id}` and `/summary/{chat_id}`.
+- **Conversation state** endpoints include `GET` and `DELETE /history/{chat_id}` and `/summary/{chat_id}`. History GET defaults to `?page=1` for the latest 100 stored messages, ordered oldest to newest within the page. If `X-Has-More` is `true`, increment `page` for older messages.
 - **Profiles:** `GET`, `PUT`, and `DELETE /user-profile/{user_id}`; `GET /user-profile-fields` derives fields from the source schema.
 - **Facts:** `GET` and `POST /user-facts/{user_id}` and `/worldview-facts`. There is no episode edit/delete API; ingestion may take several model round-trips per fact.
 - **Traits:** `GET /personality`, `PATCH /personality/{trait_id}`, and `POST /personality/reset`.
@@ -656,7 +656,7 @@ uv run python -m unittest tests.test_agent_loop
 Run the dashboard JavaScript checks with Node's built-in test runner; no browser or frontend build is needed:
 
 ```bash
-node --test tests/test_proactive_dashboard.cjs
+node --test tests/*.cjs
 ```
 
 Successful test commands finish with no failures; database tests report skips unless configured. **`TEST_DATABASE_URL`** is an optional test-only async PostgreSQL URL, for example `postgresql+asyncpg://rachel:rachel@localhost:5433/rachel_test`. Create a disposable database yourself before setting it; Compose only creates the application database. Integration tests create and remove isolated schemas. Never point this setting at production data.

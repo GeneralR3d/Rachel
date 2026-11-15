@@ -35,7 +35,7 @@ uv run python -m compileall -q app scripts alembic
 
 # Python regression tests and zero-build dashboard tests
 uv run python -m unittest discover -s tests
-node --test tests/test_proactive_dashboard.cjs
+node --test tests/*.cjs
 
 # Graphiti helpers; require Neo4j and configured Gateway credentials
 uv run python -m scripts.add_worldview_fact "Chagee is a bubble tea brand"
@@ -205,7 +205,7 @@ The HTTP API is root-mounted; `app/routers/admin.py` is the endpoint/schema sour
 
 - Read-only prompts: `GET /responder-system-prompt`, `/summarizer-system-prompt`, `/workflow-prompts` (includes fetcher system prompt and collection-loop instructions).
 - Users/chats: `GET /users/names`, `/list-chats`; chat names resolve concurrently through Telegram, with failures returning null names.
-- History/summary: `GET` and `DELETE /history/{chat_id}` and `/summary/{chat_id}`.
+- History/summary: `GET` and `DELETE /history/{chat_id}` and `/summary/{chat_id}`. History GET accepts `?page=1` and returns up to 100 messages per page, with the newest page first. `X-Has-More` indicates whether an older page exists.
 - Profiles: `GET`, `PUT`, `DELETE /user-profile/{user_id}`; `GET /user-profile-fields` derives labels from the shared schema.
 - Facts: `GET`, `POST /user-facts/{user_id}` and `/worldview-facts`. Ingestion is slow; there is no episode edit/delete API, and Graphiti resolves superseding facts during ingestion.
 - Traits: `GET /personality`, `PATCH /personality/{trait_id}`, `POST /personality/reset`.
