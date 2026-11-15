@@ -132,6 +132,41 @@ flowchart LR
     RESP --> E
 ```
 
+```mermaid
+flowchart LR
+    %% Invisible layout links
+    CTX ~~~ F
+    F ~~~ E
+
+    S((start)) --> C[checker]
+    C -->|no new user messages| E((end))
+    C -->|forced admission| A[admission]
+    C -->|ordinary turn| R[JEV decision router]
+    R -->|stay silent| E
+    R -->|reply| A
+    A --> SUM[summarizer]
+    A --> CTX[context fetcher]
+    CTX -->|collecting| CTX
+    CTX -->|finish_context or application cap| RESP[one final responder]
+    SUM -.->|summary and mood at join| RESP
+    RESP --> E
+
+    F["Finalized conversation<br/>3 min idle or 150 buffered messages<br/>Split once at the extraction watermark<br/>Extract from new turns with earlier context"]
+    W["World-view facts<br/>Extract durable general facts<br/>Write one episode per fact"]
+    P["Personal facts<br/>Extract free-form facts per person<br/>Resolve names to Telegram IDs<br/>Write to each user’s partition"]
+    U["User profiles<br/>Extract fixed profile slots<br/>Use summary and existing profiles<br/>Merge non-empty updates"]
+
+    F --> W & P & U
+    W --> G[Graphiti]
+    P --> G
+    G <--> N[Neo4j]
+    U --> PG[Postgres]
+
+    E -.-> F
+    CTX <-.-> G
+    CTX <-.-> PG
+```
+
 The checker rejects turns without new user messages even when admission is forced. Otherwise, direct mentions/replies and the spontaneity path can bypass routing. The router sees the summary and latest 15 messages, uses separate DM/group questions, and admits a reply at a validated `noul` probability of at least **0.7**. Errors or invalid answers admit the turn; rejection skips summarization, retrieval, and generation.
 
 After admission, the summarizer and first fetcher pass run in parallel. The fetcher loops directly in the reply graph. The deferred responder waits for both branches to finish. The fetcher uses the existing summary captured when collection starts; the responder receives the current call's updated summary and mood, active traits, Singapore time, and all accumulated observations. Summarizer failure preserves existing state. The responder returns only `content` and `reason`; it runs once per completed admitted graph attempt and cannot request retrieval. The whole-graph Telegram retry is separate.
