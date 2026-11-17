@@ -56,6 +56,7 @@ VOICE_REPLY_CHANCE = 0.15
 VOICE_REPLY_CHARACTER_LIMIT = 650
 VOICE_ACCENT_PREFIX = "[Strong Singapore Accent] "
 SILENT_MODE_DURATION = 15 * 60   # seconds a group stays silenced after "Rachel shush" (default 15 min)
+WELCOME_GREETING = "Hello Im Rachel! Nice to meet you!"
 
 # only used for summarisation
 USER_NAME = settings.user_name
@@ -835,6 +836,17 @@ async def on_clear_history(event):
     raise events.StopPropagation
 
 
+@client.on(events.NewMessage(
+    incoming=True,
+    pattern=r"/start(?: [A-Za-z0-9_-]+)?\Z",
+    func=lambda event: event.is_private,
+))
+async def on_start(event):
+    """Greet users who start a private chat with Rachel."""
+    await event.respond(WELCOME_GREETING)
+    raise events.StopPropagation
+
+
 @client.on(events.NewMessage(incoming=True))
 async def new_message(event):
     """Handle new incoming message: populate buffer cache if needed, then schedule a reply."""
@@ -929,4 +941,4 @@ async def say_hi_added(event):
         me = await client.get_me()
         if event.user_id == me.id:
             print(f"Bot added to group: {event.chat_id}")
-            await event.respond("Hi Im Rachel! Nice to meet you!")
+            await event.respond(WELCOME_GREETING)

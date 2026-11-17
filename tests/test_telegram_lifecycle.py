@@ -2,9 +2,12 @@
 
 import asyncio
 from contextlib import ExitStack, asynccontextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
+
+from telethon.tl import types
 
 from app.telegram import client as telegram
 
@@ -32,6 +35,31 @@ class TelegramLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def message(self, message_id, sender_id=7):
         return telegram.BufferedMessage(telegram_message_id=message_id, sender_user_id=sender_id,
                                         sender_name="Jamie", content=f"Message {message_id}")
+
+    async def test_private_start_greets_without_scheduling_a_reply(self):
+        sender = types.User(id=7, access_hash=17, first_name="Jamie")
+        with patch.object(telegram.client, "send_message", AsyncMock()) as send:
+            for message_id, command in enumerate(("/start", "/start invite_123"), 1):
+                with self.subTest(command=command):
+                    update = types.UpdateNewMessage(
+                        message=types.Message(
+                            id=message_id,
+                            peer_id=types.PeerUser(sender.id),
+                            from_id=types.PeerUser(sender.id),
+                            date=datetime.now(timezone.utc),
+                            message=command,
+                        ),
+                        pts=message_id,
+                        pts_count=1,
+                    )
+                    update._entities = {sender.id: sender}
+                    await telegram.client._dispatch_update(update)
+                    send.assert_awaited_once_with(
+                        types.InputPeerUser(sender.id, sender.access_hash),
+                        "Hi Im Rachel! Nice to meet you!",
+                    )
+                    self.assertNotIn(sender.id, telegram.wait_tasks)
+                    send.reset_mock()
 
     async def test_flush_returns_exact_memory_snapshot_and_clears_session(self):
         telegram.current_messages_buffer[42] = [self.message(1)]
