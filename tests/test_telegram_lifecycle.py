@@ -126,6 +126,49 @@ class TelegramLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await telegram._reply(SimpleNamespace(chat_id=42, is_private=True, mentioned=False, chat=None))
         self.assertIn(42, telegram.current_messages_buffer)
 
+    async def test_non_admin_group_member_can_request_kick_after_silent_member_is_added(self):
+        from app.services.kick_tools import RecentMemberAdds
+
+        @asynccontextmanager
+        async def typing(*args):
+            yield
+
+        now = datetime.now(timezone.utc)
+        action = types.MessageService(
+            id=10, peer_id=types.PeerChat(42), from_id=types.PeerUser(7),
+            action=types.MessageActionChatAddUser([74]), date=now,
+        )
+        added = telegram.events.ChatAction.Event(action, added_by=7, users=[74])
+
+        def message(message_id, sender_id, content, mentioned):
+            return SimpleNamespace(
+                chat_id=-42, chat=None, raw_text=content, sender_id=sender_id, mentioned=mentioned,
+                is_private=False, is_group=True,
+                message=SimpleNamespace(id=message_id, date=now, raw_text=content),
+                get_sender=AsyncMock(return_value=types.User(id=sender_id, first_name="Jamie")),
+            )
+
+        request = message(11, 7, "Rachel, kick the person just added", True)
+        unrelated = message(12, 8, "Try someone else", False)
+        with patch.object(telegram, "ADMIN", 111), patch.object(
+            telegram, "recent_member_adds", RecentMemberAdds(), create=True,
+        ), patch.object(telegram.client, "is_connected", return_value=True), patch.object(
+            telegram.client, "action", side_effect=typing
+        ), patch.object(
+            telegram, "_generate_response_with_retry", AsyncMock(return_value=("", "", None, 0)),
+        ) as generate:
+            await telegram.say_hi_added(added)
+            await telegram.new_message(request)
+            await telegram.new_message(unrelated)
+            for timer in (telegram.wait_tasks[-42], telegram.flush_tasks[-42]):
+                timer.cancel()
+                await asyncio.gather(timer, return_exceptions=True)
+            await telegram.reply(unrelated)
+        runtime = generate.await_args.args[0]["kick_runtime"]
+        self.assertEqual(runtime.request, request.raw_text)
+        self.assertEqual(runtime.recent_user_id, 74)
+        self.assertEqual(runtime.chat_id, -42)
+
     async def test_outreach_sends_and_arms_memory_flush_without_advancing_reply_watermark(self):
         @asynccontextmanager
         async def typing(*args):

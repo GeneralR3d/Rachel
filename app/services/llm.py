@@ -23,6 +23,7 @@ import httpx
 from app.services import worldview
 from app.services.metrics import AGENT_CONTEXT_PASSES, AGENT_LOOP_OUTCOMES, LLM_CALLS, record_llm_error
 from app.services.context import ToolObservation
+from app.services.kick_tools import KickRuntime, kick_user
 from app.services.poll_tools import PollDeliveryRuntime, send_poll
 from app.services.url_fetch import fetch_url, normalize_url
 from app.services.web_search import search_web, normalize_search_arguments
@@ -304,6 +305,7 @@ class GraphState(TypedDict):
     response_text: str
     response_reason: str
     poll_delivery: PollDeliveryRuntime | None
+    kick_runtime: NotRequired[KickRuntime | None]
 
 
 
@@ -387,8 +389,8 @@ def finish_context(reason: str) -> str:
 # The context_fetcher is the one node that *does* use tool-calling: it has these
 # tools bound and decides which to call. (CLAUDE.md notes tool-calling can hang on
 # some models — each pass has a hard timeout below and records failures as
-# observations, so a hang/error can never stall the pipeline.) CONTEXT_TOOLS is the
-# single source of truth for both the agent's tools and its dynamic prompt.
+# observations, so a hang/error can never stall the pipeline.) CONTEXT_TOOLS
+# holds the tools available to every turn; group moderation requires a runtime.
 CONTEXT_TOOLS = [*CALENDAR_TOOLS, search_world_view, search_user_info_tool, *PROACTIVE_TOOLS, fetch_url, search_web, send_poll, finish_context]
 
 
@@ -414,6 +416,7 @@ def context_fetcher_dynamic_prompt(request: ModelRequest) -> str:
 
 
 _context_tools_by_name = {t.name: t for t in CONTEXT_TOOLS if t.name != finish_context.name}
+_context_tools_by_name[kick_user.name] = kick_user
 _schedule_mutation_schemas = {
     t.name: t.args_schema for t in PROACTIVE_TOOLS if t.name != "list_proactive_schedules"
 }
@@ -635,6 +638,18 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
     if proactive:
         # End the old transcript with the fired job, not the earlier setup request.
         history_msgs.append(SystemMessage(content=build_proactive_trigger(state["intent"], role="fetcher")))
+    kick_runtime = state.get("kick_runtime")
+    if proactive or state.get("is_private") or (
+        kick_runtime is not None and kick_runtime.chat_id != state.get("chat_id")
+    ):
+        kick_runtime = None
+    tools = CONTEXT_TOOLS
+    if kick_runtime is not None:
+        tools = [*CONTEXT_TOOLS, kick_user]
+        history_msgs.append(HumanMessage(content="Addressed group message for kick_user only:\n" + json.dumps({
+            "request": kick_runtime.request,
+            "unambiguous_recent_added_user_id": kick_runtime.recent_user_id,
+        }, ensure_ascii=False)))
     now = datetime.now(SGT)
     formatted_datetime = (
         f"The current date is {now.strftime('%d %B %Y')}, "
@@ -659,7 +674,7 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
     request = ModelRequest(
         model=await _get_context_fetcher_llm(),
         messages=[collection_state, *url_messages, *history_msgs],
-        tools=CONTEXT_TOOLS,
+        tools=tools,
         runtime=Runtime(context={"participants": participants, "datetime": formatted_datetime,
                                  "intent": state.get("intent", "")}),
     )
@@ -765,7 +780,12 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
                     tool = _context_tools_by_name.get(name)
                     if tool is None:
                         raise ValueError(f"Unknown tool '{name}'")
-                    if _context_category(name) == "proactive_schedules" or name == send_poll.name:
+                    if name == kick_user.name:
+                        result = await tool.ainvoke(arguments, config={
+                            "configurable": {"current_chat_id": state.get("chat_id"),
+                                             "kick_runtime": kick_runtime},
+                        })
+                    elif _context_category(name) == "proactive_schedules" or name == send_poll.name:
                         result = await tool.ainvoke(arguments, config={
                             "configurable": {"current_chat_id": state.get("chat_id"),
                                              "poll_delivery": state.get("poll_delivery")},
@@ -775,7 +795,7 @@ async def _run_context_fetcher(state: GraphState, observations: List[ToolObserva
                     usable = result is not None and bool(str(result).strip())
                 observation.update(status="success" if usable else "empty", raw_result=result)
             except asyncio.CancelledError as error:
-                if name == send_poll.name and str(error):
+                if name in {send_poll.name, kick_user.name} and str(error):
                     observation.update(status="timeout", raw_result=str(error))
                 raise
             except asyncio.TimeoutError as e:
@@ -1021,6 +1041,7 @@ async def get_response(
     is_private: bool = False,
     responded_watermark: int | None = None,
     poll_delivery: PollDeliveryRuntime | None = None,
+    kick_runtime: KickRuntime | None = None,
 ) -> Tuple[str, str, str | None, float]:
     """Run the LangGraph pipeline and return ``(response_text, reason, new_summary, elapsed_seconds)``.
 
@@ -1058,6 +1079,7 @@ async def get_response(
         "response_text": "",
         "response_reason": "",
         "poll_delivery": poll_delivery,
+        "kick_runtime": kick_runtime,
     }
 
     result = await _run_response_graph(_graph, initial_state, run_name="RachelReplyGraph")

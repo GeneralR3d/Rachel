@@ -13,6 +13,7 @@ import random
 import re
 import time
 import uuid
+from datetime import datetime
 from io import BytesIO
 from typing import Any, Dict, List, Optional
 
@@ -34,6 +35,7 @@ from app.repository import (
     upsert_user,
 )
 from app.services.llm import get_chat_mood, get_proactive_response, get_response, set_chat_mood
+from app.services.kick_tools import KickRuntime, RecentMemberAdds
 from app.services.memory import update_memories
 from app.services.poll_tools import PollDeliveryRuntime
 from app.services.tracing import traced_workflow
@@ -71,6 +73,9 @@ class BufferedMessage(BaseModel):
     is_persisted: bool = False
     # The responder LLM's one-sentence justification; None for user messages.
     reason: Optional[str] = None
+    # Live Telegram provenance for a request addressed to Rachel in a group.
+    kick_request: str | None = None
+    kick_request_at: datetime | None = None
 
     def to_llm_dict(self) -> Dict[str, Any]:
         return {
@@ -92,6 +97,7 @@ class BufferedMessage(BaseModel):
 
 # state
 current_messages_buffer: Dict[int, List[BufferedMessage]] = {}
+recent_member_adds = RecentMemberAdds()
 # One Phoenix session per buffer lifetime (inactivity or size-cap flush).
 burst_sessions: Dict[int, str] = {}
 pending_summaries: Dict[int, str] = {}
@@ -575,6 +581,22 @@ async def _reply_with_delivery(event, me, poll_delivery: PollDeliveryRuntime):
             print(f"[{chat_id}] Nothing new since watermark {watermark} — skipping redundant reply")
             return
 
+        # Another member's unaddressed message can reset the debounce timer.
+        # Use the latest addressed request in the snapshot, not the timer event.
+        kick_request = next((
+            message for message in reversed(context_msgs)
+            if message.kick_request and message.sender_user_id != me.id
+            and (watermark is None or message.telegram_message_id > watermark)
+        ), None)
+        kick_runtime = None
+        if kick_request is not None:
+            recent_user_id = None
+            if kick_request.kick_request_at is not None:
+                recent_user_id = recent_member_adds.latest_before(
+                    chat_id, kick_request.kick_request_at, kick_request.telegram_message_id,
+                )
+            kick_runtime = KickRuntime(chat_id, me.id, client, kick_request.kick_request, recent_user_id)
+
         response, response_reason, new_summary, load_time = await _generate_response_with_retry(
             {
                 "history": context,
@@ -585,6 +607,7 @@ async def _reply_with_delivery(event, me, poll_delivery: PollDeliveryRuntime):
                 "is_private": is_private,
                 "responded_watermark": watermark,
                 "poll_delivery": poll_delivery,
+                "kick_runtime": kick_runtime,
             },
             session_id,
             chat_id,
@@ -882,6 +905,10 @@ async def new_message(event):
         return
 
     me = await client.get_me()
+    addressed_group_text = None
+    if (getattr(event, "is_group", False) and event.mentioned
+            and type(event.sender_id) is int and event.sender_id > 0):
+        addressed_group_text = event.raw_text.strip() or None
     buffer_len = await _append_to_buffer(
         chat_id,
         BufferedMessage(
@@ -890,6 +917,8 @@ async def new_message(event):
             sender_name=event_name,
             content=content,
             is_persisted=False,
+            kick_request=addressed_group_text,
+            kick_request_at=getattr(event.message, "date", None) if addressed_group_text else None,
         ),
         me.id
     )
@@ -936,9 +965,16 @@ async def new_message(event):
 
 @client.on(events.ChatAction)
 async def say_hi_added(event):
-    """Send a greeting when the bot is added to a group."""
+    """Remember added members and greet the group when Rachel is added."""
     if event.user_added:
+        user_ids = tuple(user_id for user_id in event.user_ids if user_id > 0)
+        action = event.action_message
+        update = getattr(event, "original_update", None)
+        occurred_at = getattr(action or update, "date", None)
+        if (event.is_group is not False and occurred_at is not None
+                and getattr(update, "actor_id", None) not in user_ids):
+            recent_member_adds.record(event.chat_id, user_ids, occurred_at, getattr(action, "id", None))
         me = await client.get_me()
-        if event.user_id == me.id:
+        if me.id in user_ids:
             print(f"Bot added to group: {event.chat_id}")
             await event.respond(WELCOME_GREETING)
