@@ -61,11 +61,13 @@ class KickTests(unittest.IsolatedAsyncioTestCase):
         await self.invoke(self.turn("Kick the person just added", 74), user_id=74)
         self.assertEqual(self.client.kick_participant.await_count, 2)
 
-    async def test_unrelated_identifier_cannot_replace_the_requested_target(self):
-        with self.assertRaisesRegex(ValueError, "request"):
-            await self.invoke(self.turn("Could you kick @Other, Rachel?"), username="jamie")
-        self.client.assert_not_awaited()
-        self.client.kick_participant.assert_not_awaited()
+    async def test_target_can_be_resolved_from_conversation_context(self):
+        for args in ({"username": "jamie"}, {"user_id": 74}):
+            with self.subTest(args=args):
+                runtime = self.turn("Rachel, could you kick the member we discussed?", recent_user_id=75)
+                result = await self.invoke(runtime, **args)
+                self.assertIn("Telegram user ID 74", result)
+        self.assertEqual(self.client.kick_participant.await_count, 2)
 
     async def test_invalid_arguments_never_reach_telegram(self):
         for args in ({}, {"user_id": 0}, {"user_id": "74"}, {"username": "t.me/jamie"},
