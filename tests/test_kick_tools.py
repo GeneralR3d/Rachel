@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 from langchain_core.messages import HumanMessage
 from telethon.errors import UsernameNotOccupiedError
 from telethon.tl import functions, types
+from telethon.tl.custom.participantpermissions import ParticipantPermissions
 
 from app.services import llm
 from tests.test_agent_loop import FetcherModel, Model, calls, finish, reply, state
@@ -26,9 +27,11 @@ class KickTests(unittest.IsolatedAsyncioTestCase):
             peer=types.PeerUser(74), chats=[], users=[TARGET]
         )
         self.client.get_input_entity.return_value = PEER
-        self.client.get_permissions.side_effect = lambda chat, user: (
-            SimpleNamespace(is_creator=False, ban_users=True) if user == "me" else MEMBER
+        self.client.get_entity.return_value = types.Channel(
+            id=42, title="Group", photo=types.ChatPhotoEmpty(), date=None,
+            megagroup=True, admin_rights=types.ChatAdminRights(ban_users=True),
         )
+        self.client.get_permissions.return_value = MEMBER
 
     def turn(self, request="Rachel, kick @Jamie or user 75", recent_user_id=None):
         from app.services.kick_tools import KickRuntime
@@ -39,7 +42,7 @@ class KickTests(unittest.IsolatedAsyncioTestCase):
         from app.services.kick_tools import kick_user
 
         return await kick_user.ainvoke(args, config={"configurable": {
-            "current_chat_id": CHAT_ID, "kick_runtime": runtime,
+            "current_chat_id": runtime.chat_id, "kick_runtime": runtime,
         }})
 
     async def test_username_resolves_live_and_shares_receipt_with_numeric_id(self):
@@ -89,19 +92,39 @@ class KickTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(is_admin=False, is_banned=False, has_left=True),
         ):
             with self.subTest(member=member), self.assertRaises(ValueError):
-                self.client.get_permissions.side_effect = [
-                    SimpleNamespace(is_creator=False, ban_users=True), member,
-                ]
+                self.client.get_permissions.return_value = member
                 await self.invoke(self.turn(), username="jamie")
         self.client.kick_participant.assert_not_awaited()
 
     async def test_missing_removal_permission_prevents_the_kick(self):
-        self.client.get_permissions.side_effect = [
-            SimpleNamespace(is_creator=False, ban_users=False), MEMBER,
-        ]
+        self.client.get_entity.return_value.admin_rights = types.ChatAdminRights(delete_messages=True)
         with self.assertRaisesRegex(ValueError, "Ban Users"):
             await self.invoke(self.turn(), username="jamie")
         self.client.kick_participant.assert_not_awaited()
+
+    async def test_self_participant_without_rights_does_not_override_group_admin_rights(self):
+        own_participant = types.ChannelParticipantSelf(user_id=99, inviter_id=7, date=None)
+        self.client.get_permissions.side_effect = lambda chat, user: (
+            ParticipantPermissions(own_participant, False) if user == "me" else MEMBER
+        )
+
+        result = await self.invoke(self.turn(), username="jamie")
+
+        self.assertIn("[Member kicked]", result)
+        self.client.kick_participant.assert_awaited_once_with(CHAT_ID, PEER)
+
+    async def test_basic_group_creator_can_kick_without_explicit_admin_rights(self):
+        runtime = self.turn()
+        runtime.chat_id = -42
+        self.client.get_entity.return_value = types.Chat(
+            id=42, title="Group", photo=types.ChatPhotoEmpty(), participants_count=3,
+            date=None, version=1, creator=True,
+        )
+
+        result = await self.invoke(runtime, username="jamie")
+
+        self.assertIn("[Member kicked]", result)
+        self.client.kick_participant.assert_awaited_once_with(-42, PEER)
 
     async def test_username_resolving_to_rachel_is_protected(self):
         self.client.return_value = types.contacts.ResolvedPeer(

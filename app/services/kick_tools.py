@@ -134,8 +134,14 @@ class KickRuntime:
                 raise ValueError("This request can only kick one group member")
             if peer.user_id == self.rachel_id:
                 raise ValueError("Rachel cannot kick herself")
-            own_permissions = await self.client.get_permissions(self.chat_id, "me")
-            if not own_permissions or not (own_permissions.is_creator or own_permissions.ban_users):
+            group = await self.client.get_entity(self.chat_id)
+            if not isinstance(group, (types.Chat, types.Channel)) or (
+                isinstance(group, types.Channel) and group.broadcast
+            ):
+                raise ValueError("Telegram did not return an accessible group for this kick")
+            # A self-participant record can omit rights. The fresh group
+            # entity carries the connected account's actual admin rights.
+            if not (group.creator or (group.admin_rights and group.admin_rights.ban_users)):
                 raise ValueError("Rachel needs the Ban Users admin permission in this group")
             try:
                 member = await self.client.get_permissions(self.chat_id, peer)
